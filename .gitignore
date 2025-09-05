@@ -39,3 +39,22 @@
 
 # debug information files
 *.dwo
+
+# 构建目录
+build/
+bin/
+lib/
+out/
+Debug/
+Release/
+x64/
+x86/
+
+# IDE生成的文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
