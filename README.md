@@ -2,6 +2,8 @@
 
 A high-performance C++ library for generating smooth spline trajectories in N-dimensional space with Eigen integration. This library provides **MINCO-equivalent** cubic and quintic spline interpolation with boundary conditions support, making it ideal for robotics, path planning, and trajectory generation applications.
 
+**English** | [中文](README_zh.md)
+
 ## Theoretical Background
 
 ### MINCO and Spline Theory Equivalence
@@ -93,6 +95,8 @@ double quintic_energy = spline.getEnergy(); // Identical to MINCO
 ## Quick Installation and Testing
 
 ```bash
+git clone https://github.com/Bziyue/SplineTrajectory.git
+# git clone git@github.com:Bziyue/SplineTrajectory.git
 # Install Eigen3
 sudo apt install libeigen3-dev
 
@@ -105,6 +109,11 @@ make
 # Run performance comparisons
 ./test_cubic_spline_vs_minco_nd
 ./test_quintic_spline_vs_minco_nd
+
+# Run examples
+./basic_cubic_spline
+./quintic_spline_comparison
+./robot_trajectory_planning
 ```
 
 ## Installation
@@ -141,6 +150,7 @@ Both methods produce identical results - choose the one that's most convenient f
 ### Basic 3D Cubic Spline with Time Points
 
 ```cpp
+//test_cubic.cpp
 #include <iostream>
 #include <vector>
 #include <Eigen/Dense>
@@ -150,11 +160,11 @@ int main() {
     using namespace SplineTrajectory;
     
     // Define waypoints in 3D space
-    std::vector<SplineVector3d> waypoints = {
-        SplineVector3d(0.0, 0.0, 0.0),
-        SplineVector3d(1.0, 2.0, 1.0),
-        SplineVector3d(3.0, 1.0, 2.0),
-        SplineVector3d(4.0, 3.0, 0.5)
+    SplineVector<SplinePoint3d> waypoints = {
+        SplinePoint3d(0.0, 0.0, 0.0),
+        SplinePoint3d(1.0, 2.0, 1.0),
+        SplinePoint3d(3.0, 1.0, 2.0),
+        SplinePoint3d(4.0, 3.0, 0.5)
     };
     
     // Method 1: Using absolute time points
@@ -162,17 +172,17 @@ int main() {
     
     // Create boundary conditions for clamped spline
     BoundaryConditions<3> boundary_conditions;
-    boundary_conditions.start_velocity = SplineVector3d(0.0, 0.0, 0.0);
-    boundary_conditions.end_velocity = SplineVector3d(0.0, 0.0, 0.0);
+    boundary_conditions.start_velocity = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary_conditions.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
     
     // Create cubic spline (minimum curvature by spline theory)
     CubicSpline3D spline(time_points, waypoints, boundary_conditions);
     
     // Evaluate at specific time
     double t = 1.5;
-    SplineVector3d position = spline.getTrajectory().getPos(t);
-    SplineVector3d velocity = spline.getTrajectory().getVel(t);
-    SplineVector3d acceleration = spline.getTrajectory().getAcc(t);
+    SplinePoint3d position = spline.getTrajectory().getPos(t);
+    SplinePoint3d velocity = spline.getTrajectory().getVel(t);
+    SplinePoint3d acceleration = spline.getTrajectory().getAcc(t);
     
     std::cout << "At t = " << t << ":\n";
     std::cout << "Position: " << position.transpose() << "\n";
@@ -181,11 +191,13 @@ int main() {
     
     return 0;
 }
+// g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. test_cubic.cpp -o test_cubic
 ```
 
 ### Minimum Norm Demonstration
 
 ```cpp
+// MinimumNorm.cpp
 #include <iostream>
 #include <vector>
 #include <Eigen/Dense>
@@ -195,18 +207,18 @@ int main() {
     using namespace SplineTrajectory;
     
     // Create waypoints
-    std::vector<SplineVector3d> waypoints = {
-        SplineVector3d(0.0, 0.0, 0.0),
-        SplineVector3d(1.0, 2.0, 1.0),
-        SplineVector3d(3.0, 1.0, 2.0),
-        SplineVector3d(4.0, 3.0, 0.5)
+    SplineVector<SplinePoint3d> waypoints = {
+        SplinePoint3d(0.0, 0.0, 0.0),
+        SplinePoint3d(1.0, 2.0, 1.0),
+        SplinePoint3d(3.0, 1.0, 2.0),
+        SplinePoint3d(4.0, 3.0, 0.5)
     };
     std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
     
     // Zero boundary conditions (natural spline)
     BoundaryConditions<3> natural_boundary;
-    natural_boundary.start_velocity = SplineVector3d::Zero();
-    natural_boundary.end_velocity = SplineVector3d::Zero();
+    natural_boundary.start_velocity = SplinePoint3d::Zero();
+    natural_boundary.end_velocity = SplinePoint3d::Zero();
     
     // Compare cubic and quintic minimum norms
     CubicSpline3D cubic_spline(time_points, waypoints, natural_boundary);
@@ -217,17 +229,17 @@ int main() {
     double quintic_min_norm = quintic_spline.getEnergy(); 
     
     std::cout << "Cubic spline minimum norm (curvature): " << cubic_min_norm << std::endl;
-    std::cout << "Quintic spline minimum norm (snap): " << quintic_min_norm << std::endl;
-    std::cout << "Quintic provides " << cubic_min_norm/quintic_min_norm 
-              << "x smoother trajectory" << std::endl;
+    std::cout << "Quintic spline minimum norm (jerk): " << quintic_min_norm << std::endl;
     
     return 0;
+    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. MinimumNorm.cpp -o MinimumNorm 
 }
 ```
 
 ### High-Performance Batch Evaluation
 
 ```cpp
+// PerformanceEval.cpp
 #include <iostream>
 #include <vector>
 #include <chrono>
@@ -238,11 +250,11 @@ int main() {
     using namespace SplineTrajectory;
     
     // Create a trajectory
-    std::vector<SplineVector3d> waypoints = {
-        SplineVector3d(0.0, 0.0, 0.0),
-        SplineVector3d(1.0, 2.0, 1.0),
-        SplineVector3d(3.0, 1.0, 2.0),
-        SplineVector3d(4.0, 3.0, 0.5)
+    SplineVector<SplinePoint3d> waypoints = {
+        SplinePoint3d(0.0, 0.0, 0.0),
+        SplinePoint3d(1.0, 2.0, 1.0),
+        SplinePoint3d(3.0, 1.0, 2.0),
+        SplinePoint3d(4.0, 3.0, 0.5)
     };
     std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
     CubicSpline3D spline(time_points, waypoints);
@@ -264,6 +276,7 @@ int main() {
               << " evaluations per millisecond" << std::endl;
     
     return 0;
+    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. PerformanceEval.cpp -o PerformanceEval  
 }
 ```
 
@@ -279,11 +292,11 @@ int main() {
     using namespace SplineTrajectory;
     
     // Same waypoints as before
-    std::vector<SplineVector3d> waypoints = {
-        SplineVector3d(0.0, 0.0, 0.0),
-        SplineVector3d(1.0, 2.0, 1.0),
-        SplineVector3d(3.0, 1.0, 2.0),
-        SplineVector3d(4.0, 3.0, 0.5)
+    SplineVector<SplinePoint3d> waypoints = {
+        SplinePoint3d(0.0, 0.0, 0.0),
+        SplinePoint3d(1.0, 2.0, 1.0),
+        SplinePoint3d(3.0, 1.0, 2.0),
+        SplinePoint3d(4.0, 3.0, 0.5)
     };
     
     // Method 2: Using time segments and start time
@@ -291,15 +304,15 @@ int main() {
     double start_time = 0.0;
     
     BoundaryConditions<3> boundary_conditions;
-    boundary_conditions.start_velocity = SplineVector3d(0.0, 0.0, 0.0);
-    boundary_conditions.end_velocity = SplineVector3d(0.0, 0.0, 0.0);
+    boundary_conditions.start_velocity = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary_conditions.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
     
     // Create cubic spline using time segments
     CubicSpline3D spline(time_segments, waypoints, start_time, boundary_conditions);
     
     // This produces identical results to the time points method above
     double t = 1.5;
-    SplineVector3d position = spline.getTrajectory().getPos(t);
+    SplinePoint3d position = spline.getTrajectory().getPos(t);
     
     std::cout << "At t = " << t << ":\n";
     std::cout << "Position: " << position.transpose() << "\n";
@@ -311,6 +324,7 @@ int main() {
 ### 2D Quintic Spline Example
 
 ```cpp
+// QuinticSplineExample.cpp
 #include <iostream>
 #include <vector>
 #include <Eigen/Dense>
@@ -320,11 +334,11 @@ int main() {
     using namespace SplineTrajectory;
     
     // Define waypoints in 2D space
-    std::vector<SplineVector2d> waypoints = {
-        SplineVector2d(0.0, 0.0),
-        SplineVector2d(2.0, 1.0),
-        SplineVector2d(3.0, 3.0),
-        SplineVector2d(5.0, 2.0)
+    SplineVector<SplinePoint2d> waypoints = {
+        SplinePoint2d(0.0, 0.0),
+        SplinePoint2d(2.0, 1.0),
+        SplinePoint2d(3.0, 3.0),
+        SplinePoint2d(5.0, 2.0)
     };
     
     // Using time points method
@@ -332,10 +346,10 @@ int main() {
     
     // Set boundary conditions with velocity and acceleration
     BoundaryConditions<2> boundary;
-    boundary.start_velocity = SplineVector2d(1.0, 0.5);
-    boundary.start_acceleration = SplineVector2d(0.0, 0.0);
-    boundary.end_velocity = SplineVector2d(0.0, -0.5);
-    boundary.end_acceleration = SplineVector2d(0.0, 0.0);
+    boundary.start_velocity = SplinePoint2d(1.0, 0.5);
+    boundary.start_acceleration = SplinePoint2d(0.0, 0.0);
+    boundary.end_velocity = SplinePoint2d(0.0, -0.5);
+    boundary.end_acceleration = SplinePoint2d(0.0, 0.0);
     
     // Create quintic spline (minimum snap by spline theory)
     QuinticSpline2D spline(time_points, waypoints, boundary);
@@ -357,6 +371,7 @@ int main() {
     std::cout << "Trajectory energy (minimum snap norm): " << energy << std::endl;
     
     return 0;
+    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. QuinticSplineExample.cpp -o QuinticSplineExample 
 }
 ```
 
@@ -581,7 +596,7 @@ struct BoundaryConditions {
     VectorType end_acceleration;
     
     // Constructors for different boundary condition types
-    BoundaryConditions();  // Zero boundary conditions (natural spline)
+    BoundaryConditions();  // Zero boundary conditions 
     BoundaryConditions(const VectorType& start_vel, const VectorType& end_vel);
     BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
                        const VectorType& end_vel, const VectorType& end_acc);
@@ -592,9 +607,9 @@ struct BoundaryConditions {
 
 ```cpp
 // Vector types
-using SplineVector1d = Eigen::Matrix<double, 1, 1>;
-using SplineVector2d = Eigen::Matrix<double, 2, 1>;
-using SplineVector3d = Eigen::Matrix<double, 3, 1>;
+using SplinePoint1d = Eigen::Matrix<double, 1, 1>;
+using SplinePoint2d = Eigen::Matrix<double, 2, 1>;
+using SplinePoint3d = Eigen::Matrix<double, 3, 1>;
 // ... up to SplineVector10d (extensible to any dimension)
 
 // Spline types
@@ -645,7 +660,7 @@ CubicSpline3D spline;
 std::vector<double> time_points = {0.0, 1.0, 2.0};
 spline.update(time_points, waypoints, boundary);
 
-// Later, update with time segments
+// update with time segments
 std::vector<double> time_segments = {0.8, 1.2};
 spline.update(time_segments, new_waypoints, 0.5, new_boundary);
 ```
@@ -654,7 +669,7 @@ spline.update(time_segments, new_waypoints, 0.5, new_boundary);
 
 ```cpp
 // Compare different spline types for minimum norm solutions
-std::vector<SplineVector3d> waypoints = {/* your waypoints */};
+SplineVector<SplinePoint3d> waypoints = {/* your waypoints */};
 std::vector<double> times = {/* your time points */};
 
 CubicSpline3D cubic_spline(times, waypoints);
@@ -686,13 +701,13 @@ auto accelerations = ppoly.evaluateSegmented(segmented_seq, 2); // accelerations
 ```cpp
 // Example: 7D robot with 7 DOF
 constexpr int DOF = 7;
-using SplineVector7d = Eigen::Matrix<double, DOF, 1>;
+using SplinePoint7d = Eigen::Matrix<double, DOF, 1>;
 using CubicSpline7D = CubicSplineND<DOF>;
 
-std::vector<SplineVector7d> joint_waypoints = {
-    SplineVector7d::Random(),
-    SplineVector7d::Random(),
-    SplineVector7d::Random()
+SplineVector<SplinePoint7d> joint_waypoints = {
+    SplinePoint7d::Random(),
+    SplinePoint7d::Random(),
+    SplinePoint7d::Random()
 };
 
 std::vector<double> times = {0.0, 1.0, 2.0};
@@ -740,6 +755,8 @@ CubicSpline7D robot_trajectory(times, joint_waypoints);
 
 ```bash
 git clone https://github.com/Bziyue/SplineTrajectory.git
+# git clone git@github.com:Bziyue/SplineTrajectory.git
+sudo apt install libeigen3-dev
 cd SplineTrajectory
 mkdir build && cd build
 cmake ..
@@ -776,5 +793,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Built with [Eigen](http://eigen.tuxfamily.org/) for linear algebra operations
 - Inspired by [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER) trajectory optimization
 - Grounded in **classical spline interpolation theory** and the **minimum norm theorem**
-- Optimized through advanced template metaprogramming and specialized algorithms
-- Enhanced with segmented batch evaluation for superior performance

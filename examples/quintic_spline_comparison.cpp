@@ -17,24 +17,24 @@ int main() {
     std::cout << "=== Cubic vs Quintic Spline Comparison ===" << std::endl;
     
     // Define a challenging 2D trajectory with sharp turns
-    SplineVector<Point2d> waypoints = {
-        Point2d(0.0, 0.0),
-        Point2d(2.0, 1.0),
-        Point2d(2.5, 3.0),
-        Point2d(1.0, 4.0),
-        Point2d(-0.5, 3.5),
-        Point2d(0.0, 2.0),
-        Point2d(1.5, 1.0)
+    SplineVector<SplinePoint2d> waypoints = {
+        SplinePoint2d(0.0, 0.0),
+        SplinePoint2d(2.0, 1.0),
+        SplinePoint2d(2.5, 3.0),
+        SplinePoint2d(1.0, 4.0),
+        SplinePoint2d(-0.5, 3.5),
+        SplinePoint2d(0.0, 2.0),
+        SplinePoint2d(1.5, 1.0)
     };
     
     std::vector<double> time_points = {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
     
     // Set boundary conditions with specific velocities and accelerations
     BoundaryConditions<2> boundary;
-    boundary.start_velocity = Point2d(1.0, 0.5);
-    boundary.start_acceleration = Point2d(0.0, 0.0);
-    boundary.end_velocity = Point2d(0.5, -0.2);
-    boundary.end_acceleration = Point2d(0.0, 0.0);
+    boundary.start_velocity = SplinePoint2d(1.0, 0.5);
+    boundary.start_acceleration = SplinePoint2d(0.0, 0.0);
+    boundary.end_velocity = SplinePoint2d(0.5, -0.2);
+    boundary.end_acceleration = SplinePoint2d(0.0, 0.0);
     
     // Create both cubic and quintic splines
     CubicSpline2D cubic_spline(time_points, waypoints, boundary);

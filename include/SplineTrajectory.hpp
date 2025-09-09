@@ -1197,28 +1197,28 @@ namespace SplineTrajectory
         }
     };
 
-    using Point1d = Eigen::Matrix<double, 1, 1>;
-    using Point2d = Eigen::Matrix<double, 2, 1>;
-    using Point3d = Eigen::Matrix<double, 3, 1>;
-    using Point4d = Eigen::Matrix<double, 4, 1>;
-    using Point5d = Eigen::Matrix<double, 5, 1>;
-    using Point6d = Eigen::Matrix<double, 6, 1>;
-    using Point7d = Eigen::Matrix<double, 7, 1>;
-    using Point8d = Eigen::Matrix<double, 8, 1>;
-    using Point9d = Eigen::Matrix<double, 9, 1>;
-    using Point10d = Eigen::Matrix<double, 10, 1>;
+    using SplinePoint1d = Eigen::Matrix<double, 1, 1>;
+    using SplinePoint2d = Eigen::Matrix<double, 2, 1>;
+    using SplinePoint3d = Eigen::Matrix<double, 3, 1>;
+    using SplinePoint4d = Eigen::Matrix<double, 4, 1>;
+    using SplinePoint5d = Eigen::Matrix<double, 5, 1>;
+    using SplinePoint6d = Eigen::Matrix<double, 6, 1>;
+    using SplinePoint7d = Eigen::Matrix<double, 7, 1>;
+    using SplinePoint8d = Eigen::Matrix<double, 8, 1>;
+    using SplinePoint9d = Eigen::Matrix<double, 9, 1>;
+    using SplinePoint10d = Eigen::Matrix<double, 10, 1>;
 
-    using PointSequence1d = SplineVector<Point1d>;
-    using PointSequence2d = SplineVector<Point2d>;
-    using PointSequence3d = SplineVector<Point3d>;
-    using PointSequence4d = SplineVector<Point4d>;
-    using PointSequence5d = SplineVector<Point5d>;
-    using PointSequence6d = SplineVector<Point6d>;
-    using PointSequence7d = SplineVector<Point7d>;
-    using PointSequence8d = SplineVector<Point8d>;
-    using PointSequence9d = SplineVector<Point9d>;
-    using PointSequence10d = SplineVector<Point10d>;
-    
+    using SplineVector1D = SplineVector<SplinePoint1d>;
+    using SplineVector2D = SplineVector<SplinePoint2d>;
+    using SplineVector3D = SplineVector<SplinePoint3d>;
+    using PointSequence4d = SplineVector<SplinePoint4d>;
+    using SplineVector5D = SplineVector<SplinePoint5d>;
+    using SplineVector6D = SplineVector<SplinePoint6d>;
+    using SplineVector7D = SplineVector<SplinePoint7d>;
+    using SplineVector8D = SplineVector<SplinePoint8d>;
+    using SplineVector9D = SplineVector<SplinePoint9d>;
+    using SplineVector10D = SplineVector<SplinePoint10d>;
+
     using PPoly1D = PPolyND<1>;
     using PPoly2D = PPolyND<2>;
     using PPoly3D = PPolyND<3>;

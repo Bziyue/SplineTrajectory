@@ -18,12 +18,12 @@ int main() {
     std::cout << "=== 6-DOF Robot Arm Trajectory Planning ===" << std::endl;
     
     // Define joint space waypoints (6 joints in radians)
-    SplineVector<Point6d> joint_waypoints = {
-        Point6d(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),                    // Home position
-        Point6d(M_PI/4, M_PI/6, -M_PI/3, 0.0, M_PI/4, 0.0),      // Intermediate 1
-        Point6d(M_PI/2, M_PI/3, -M_PI/2, M_PI/4, M_PI/2, M_PI/6), // Target position
-        Point6d(M_PI/3, M_PI/4, -M_PI/4, M_PI/6, M_PI/3, M_PI/4), // Intermediate 2
-        Point6d(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)                     // Return home
+    SplineVector<SplinePoint6d> joint_waypoints = {
+        SplinePoint6d(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),                    // Home position
+        SplinePoint6d(M_PI/4, M_PI/6, -M_PI/3, 0.0, M_PI/4, 0.0),      // Intermediate 1
+        SplinePoint6d(M_PI/2, M_PI/3, -M_PI/2, M_PI/4, M_PI/2, M_PI/6), // Target position
+        SplinePoint6d(M_PI/3, M_PI/4, -M_PI/4, M_PI/6, M_PI/3, M_PI/4), // Intermediate 2
+        SplinePoint6d(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)                     // Return home
     };
     
     // Define time points with varying speeds
@@ -31,10 +31,10 @@ int main() {
     
     // Set boundary conditions for smooth start/stop
     BoundaryConditions<6> boundary_conditions;
-    boundary_conditions.start_velocity = Point6d::Zero();
-    boundary_conditions.start_acceleration = Point6d::Zero();
-    boundary_conditions.end_velocity = Point6d::Zero();
-    boundary_conditions.end_acceleration = Point6d::Zero();
+    boundary_conditions.start_velocity = SplinePoint6d::Zero();
+    boundary_conditions.start_acceleration = SplinePoint6d::Zero();
+    boundary_conditions.end_velocity = SplinePoint6d::Zero();
+    boundary_conditions.end_acceleration = SplinePoint6d::Zero();
     
     // Create quintic spline for smooth robot motion
     QuinticSpline6D robot_trajectory(time_points, joint_waypoints, boundary_conditions);
@@ -49,10 +49,10 @@ int main() {
     std::cout << "Trajectory energy: " << robot_trajectory.getEnergy() << std::endl;
     
     // Define joint limits and velocity/acceleration constraints
-    Point6d joint_limits_min = Point6d(-M_PI, -M_PI/2, -2*M_PI/3, -M_PI, -M_PI, -M_PI);
-    Point6d joint_limits_max = Point6d(M_PI, M_PI/2, 2*M_PI/3, M_PI, M_PI, M_PI);
-    Point6d velocity_limits = Point6d::Constant(M_PI);  // 180 deg/s max
-    Point6d acceleration_limits = Point6d::Constant(2*M_PI);  // 360 deg/s² max
+    SplinePoint6d joint_limits_min = SplinePoint6d(-M_PI, -M_PI/2, -2*M_PI/3, -M_PI, -M_PI, -M_PI);
+    SplinePoint6d joint_limits_max = SplinePoint6d(M_PI, M_PI/2, 2*M_PI/3, M_PI, M_PI, M_PI);
+    SplinePoint6d velocity_limits = SplinePoint6d::Constant(M_PI);  // 180 deg/s max
+    SplinePoint6d acceleration_limits = SplinePoint6d::Constant(2*M_PI);  // 360 deg/s² max
     
     // Validate trajectory against constraints
     std::cout << "\n=== Trajectory Validation ===" << std::endl;
@@ -104,9 +104,9 @@ int main() {
     
     int command_count = 0;
     for (double t = 0.0; t <= robot_trajectory.getEndTime(); t += dt) {
-        Point6d pos = robot_trajectory.getTrajectory().getPos(t);
-        Point6d vel = robot_trajectory.getTrajectory().getVel(t);
-        Point6d acc = robot_trajectory.getTrajectory().getAcc(t);
+        SplinePoint6d pos = robot_trajectory.getTrajectory().getPos(t);
+        SplinePoint6d vel = robot_trajectory.getTrajectory().getVel(t);
+        SplinePoint6d acc = robot_trajectory.getTrajectory().getAcc(t);
         
         cmd_file << t;
         for (int i = 0; i < 6; ++i) cmd_file << "," << pos(i);
@@ -127,7 +127,7 @@ int main() {
     // Calculate joint space distances
     std::vector<double> joint_distances(6, 0.0);
     for (size_t i = 1; i < positions.size(); ++i) {
-        Point6d diff = positions[i] - positions[i-1];
+        SplinePoint6d diff = positions[i] - positions[i-1];
         for (int j = 0; j < 6; ++j) {
             joint_distances[j] += std::abs(diff(j));
         }

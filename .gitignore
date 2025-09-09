@@ -40,6 +40,9 @@
 # debug information files
 *.dwo
 
+test/
+
+
 # 构建目录
 build/
 bin/

@@ -17,12 +17,12 @@ int main() {
     std::cout << "=== Basic Cubic Spline Example ===" << std::endl;
     
     // Define 3D waypoints for a trajectory
-    SplineVector<Point3d> waypoints = {
-        Point3d(0.0, 0.0, 0.0),     // Start point
-        Point3d(1.0, 2.0, 1.0),     // Waypoint 1
-        Point3d(3.0, 1.0, 2.0),     // Waypoint 2
-        Point3d(4.0, 3.0, 0.5),     // Waypoint 3
-        Point3d(5.0, 0.0, 1.5)      // End point
+    SplineVector<SplinePoint3d> waypoints = {
+        SplinePoint3d(0.0, 0.0, 0.0),     // Start point
+        SplinePoint3d(1.0, 2.0, 1.0),     // Waypoint 1
+        SplinePoint3d(3.0, 1.0, 2.0),     // Waypoint 2
+        SplinePoint3d(4.0, 3.0, 0.5),     // Waypoint 3
+        SplinePoint3d(5.0, 0.0, 1.5)      // End point
     };
     
     // Define corresponding time points
@@ -30,8 +30,8 @@ int main() {
     
     // Set up boundary conditions
     BoundaryConditions<3> boundary_conditions;
-    boundary_conditions.start_velocity = Point3d(0.5, 0.0, 0.2);
-    boundary_conditions.end_velocity = Point3d(0.0, -0.5, 0.0);
+    boundary_conditions.start_velocity = SplinePoint3d(0.5, 0.0, 0.2);
+    boundary_conditions.end_velocity = SplinePoint3d(0.0, -0.5, 0.0);
     
     // Create the cubic spline
     CubicSpline3D spline(time_points, waypoints, boundary_conditions);
@@ -53,9 +53,9 @@ int main() {
     std::cout << std::fixed << std::setprecision(3);
     
     for (double t = 0.0; t <= 6.0; t += 0.5) {
-        Point3d pos = spline.getTrajectory().getPos(t);
-        Point3d vel = spline.getTrajectory().getVel(t);
-        Point3d acc = spline.getTrajectory().getAcc(t);
+        SplinePoint3d pos = spline.getTrajectory().getPos(t);
+        SplinePoint3d vel = spline.getTrajectory().getVel(t);
+        SplinePoint3d acc = spline.getTrajectory().getAcc(t);
         
         std::cout << "t=" << std::setw(4) << t 
                   << " pos=[" << std::setw(6) << pos.x() << "," << std::setw(6) << pos.y() << "," << std::setw(6) << pos.z() << "]"
