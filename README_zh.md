@@ -114,8 +114,9 @@ make
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
+./test_with_min_jerk_3d
 ```
-
+在和[large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer)的比较中SplineTrajectory依然在轨迹构造和求值中性能更优，运行“./test_with_min_jerk_3d”查看测试结果。
 ## 安装
 
 由于这是一个纯头文件库，只需在项目中包含头文件：
@@ -696,6 +697,7 @@ make
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
+./test_with_min_jerk_3d
 ```
 
 ## 贡献

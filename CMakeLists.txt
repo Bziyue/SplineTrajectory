@@ -16,6 +16,7 @@ endif()
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include/large_scale_traj_optimizer)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # Set build type if not specified
@@ -30,6 +31,10 @@ target_link_libraries(test_cubic_spline_vs_minco_nd Eigen3::Eigen)
 add_executable(test_quintic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd.cpp)
 target_link_libraries(test_quintic_spline_vs_minco_nd Eigen3::Eigen)
 
+# Add new min_jerk comparison test
+add_executable(test_with_min_jerk_3d test_with_min_jerk_3d.cpp)
+target_link_libraries(test_with_min_jerk_3d Eigen3::Eigen)
+
 # Example executables
 add_executable(basic_cubic_spline examples/basic_cubic_spline.cpp)
 target_link_libraries(basic_cubic_spline Eigen3::Eigen)
@@ -40,7 +45,6 @@ target_link_libraries(quintic_spline_comparison Eigen3::Eigen)
 add_executable(robot_trajectory_planning examples/robot_trajectory_planning.cpp)
 target_link_libraries(robot_trajectory_planning Eigen3::Eigen)
 
-
 # Compiler flags
 set(COMMON_COMPILE_FLAGS -Wall -Wextra)
 set(DEBUG_FLAGS -g -O0)
@@ -49,13 +53,15 @@ set(RELEASE_FLAGS -O3 -march=native -ffast-math -DNDEBUG)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
+    target_compile_options(test_with_min_jerk_3d PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(robot_trajectory_planning PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
 else()
     target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+    target_compile_options(test_with_min_jerk_3d PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+    target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(robot_trajectory_planning PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
 endif()
@@ -64,12 +70,13 @@ endif()
 if(NOT WIN32)
     target_link_libraries(test_cubic_spline_vs_minco_nd pthread)
     target_link_libraries(test_quintic_spline_vs_minco_nd pthread)
+    target_link_libraries(test_with_min_jerk_3d pthread)
     target_link_libraries(quintic_spline_comparison pthread)
 endif()
 
 # Create custom targets for easy building
 add_custom_target(tests
-    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd
+    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d
     COMMENT "Building performance tests"
 )
 
@@ -91,6 +98,7 @@ message(STATUS "可执行文件:")
 message(STATUS "  - Performance Tests:")
 message(STATUS "    * test_cubic_spline_vs_minco_nd")
 message(STATUS "    * test_quintic_spline_vs_minco_nd")
+message(STATUS "    * test_with_min_jerk_3d")
 message(STATUS "  - Examples:")
 message(STATUS "    * basic_cubic_spline")
 message(STATUS "    * quintic_spline_comparison") 

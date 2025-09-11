@@ -114,8 +114,9 @@ make
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
+./test_with_min_jerk_3d
 ```
-
+SplineTrajectory continues to outperform [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer) in both trajectory generation and evaluation. To see the test results, run ./test_with_min_jerk_3d.
 ## Installation
 
 Since this is a header-only library, simply include the header file in your project:
@@ -770,6 +771,7 @@ make
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
+./test_with_min_jerk_3d
 ```
 
 ## Contributing

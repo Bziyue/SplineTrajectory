@@ -1211,7 +1211,7 @@ namespace SplineTrajectory
     using SplineVector1D = SplineVector<SplinePoint1d>;
     using SplineVector2D = SplineVector<SplinePoint2d>;
     using SplineVector3D = SplineVector<SplinePoint3d>;
-    using PointSequence4d = SplineVector<SplinePoint4d>;
+    using SplineVector4D = SplineVector<SplinePoint4d>;
     using SplineVector5D = SplineVector<SplinePoint5d>;
     using SplineVector6D = SplineVector<SplinePoint6d>;
     using SplineVector7D = SplineVector<SplinePoint7d>;
