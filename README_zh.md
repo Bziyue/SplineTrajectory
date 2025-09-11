@@ -39,7 +39,7 @@
 - **灵活的时间规范**：支持绝对时间点和相对时间段
 - **边界条件**：可配置的起始/结束速度和加速度约束（夹持样条）
 - **高效评估**：带缓存和分段批处理的优化多项式评估
-- **导数**：内置支持位置、速度、加速度、跃度和急动度
+- **导数**：内置支持位置、速度、加速度、加加速度和加加加速度
 - **能量优化**：用于轨迹优化的内置能量计算（最小范数）
 - **Eigen 集成**：与 Eigen 库的无缝集成用于线性代数
 - **纯头文件**：易于集成到现有项目中
@@ -72,7 +72,7 @@
 double cubic_energy = spline.getEnergy();  // 与 MINCO 相同
 
 // MINCO 五次样条的成本函数：
-// J = ∫₀ᵀ ||snap(t)||² dt
+// J = ∫₀ᵀ ||jerk(t)||² dt
 double quintic_energy = spline.getEnergy(); // 与 MINCO 相同
 ```
 
@@ -228,7 +228,7 @@ int main() {
     double cubic_min_norm = cubic_spline.getEnergy();    
     double quintic_min_norm = quintic_spline.getEnergy(); 
     
-    std::cout << "Cubic spline minimum norm (curvature): " << cubic_min_norm << std::endl;
+    std::cout << "Cubic spline minimum norm (Acceleration): " << cubic_min_norm << std::endl;
     std::cout << "Quintic spline minimum norm (jerk): " << quintic_min_norm << std::endl;
     
     return 0;
@@ -351,7 +351,7 @@ int main() {
     boundary.end_velocity = SplinePoint2d(0.0, -0.5);
     boundary.end_acceleration = SplinePoint2d(0.0, 0.0);
     
-    // Create quintic spline (minimum snap by spline theory)
+    // Create quintic spline (minimum jerk by spline theory)
     QuinticSpline2D spline(time_points, waypoints, boundary);
     
     // Generate trajectory points
@@ -368,7 +368,7 @@ int main() {
     
     // Calculate trajectory energy (minimum norm by spline theory)
     double energy = spline.getEnergy();
-    std::cout << "Trajectory energy (minimum snap norm): " << energy << std::endl;
+    std::cout << "Trajectory energy (minimum jerk norm): " << energy << std::endl;
     
     return 0;
     // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. QuinticSplineExample.cpp -o QuinticSplineExample 
@@ -504,7 +504,7 @@ double getEndTime() const;
 #### `QuinticSplineND<DIM>`
 - **目的**：生成具有高阶连续性的平滑五次样条轨迹（MINCO 等效，最小急动度）
 - **阶数**：6阶多项式（五次）
-- **连续性**：C⁴ 连续（位置到急动度）
+- **连续性**：C⁴ 连续（位置到Snap）
 - **优化**：最小化 ∫ ||s'''(t)||² dt（样条理论中的最小范数定理）
 - **边界类型**：具有规定端点导数（到加速度）的夹持样条
 
@@ -523,7 +523,7 @@ struct BoundaryConditions {
     VectorType end_acceleration;
     
     // 不同边界条件类型的构造函数
-    BoundaryConditions();  // 零边界条件（自然样条）
+    BoundaryConditions();  // 零边界条件
     BoundaryConditions(const VectorType& start_vel, const VectorType& end_vel);
     BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
                        const VectorType& end_vel, const VectorType& end_acc);
@@ -608,7 +608,7 @@ QuinticSpline3D quintic_spline(times, waypoints);
 double cubic_energy = cubic_spline.getEnergy();    
 double quintic_energy = quintic_spline.getEnergy(); 
 
-std::cout << "三次样条能量（最小曲率）: " << cubic_energy << std::endl;
+std::cout << "三次样条能量（最小加速度）: " << cubic_energy << std::endl;
 std::cout << "五次样条能量（最小急动度）: " << quintic_energy << std::endl;
 ```
 
@@ -660,7 +660,7 @@ CubicSpline7D robot_trajectory(times, joint_waypoints);
 - **内存效率**：缓存友好的内存访问模式
 - **向量化**：利用 Eigen 的 SIMD 优化
 - **数学最优性**：通过最小范数定理可证明的最优解
-- **MINCO 等效**：与 MINCO 相同的数学公式但具有优越的实现
+- **MINCO 等效**：与 MINCO 相同的数学公式但具有更优的实现
 
 ## 与 MINCO 的比较
 

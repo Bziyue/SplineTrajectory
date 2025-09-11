@@ -62,7 +62,7 @@ The library is grounded in classical **interpolating spline theory**:
 - **Continuity**: C⁴ continuous (position through snap)
 - **Boundary Conditions**: Clamped splines with prescribed endpoint derivatives up to acceleration
 - **Optimality**: Minimize ∫₀ᵀ ||s'''(t)||² dt among all C⁴ interpolating functions
-- **Physical Meaning**: Minimum snap energy (smoother than cubic splines)
+- **Physical Meaning**: Minimum jerk energy (smoother than cubic splines)
 
 ### MINCO Relationship
 
@@ -72,7 +72,7 @@ The library is grounded in classical **interpolating spline theory**:
 double cubic_energy = spline.getEnergy();  // Identical to MINCO
 
 // MINCO's cost function for quintic splines:  
-// J = ∫₀ᵀ ||snap(t)||² dt
+// J = ∫₀ᵀ ||jerk(t)||² dt
 double quintic_energy = spline.getEnergy(); // Identical to MINCO
 ```
 
@@ -351,7 +351,7 @@ int main() {
     boundary.end_velocity = SplinePoint2d(0.0, -0.5);
     boundary.end_acceleration = SplinePoint2d(0.0, 0.0);
     
-    // Create quintic spline (minimum snap by spline theory)
+    // Create quintic spline (minimum jerk by spline theory)
     QuinticSpline2D spline(time_points, waypoints, boundary);
     
     // Generate trajectory points
@@ -368,7 +368,7 @@ int main() {
     
     // Calculate trajectory energy (minimum norm by spline theory)
     double energy = spline.getEnergy();
-    std::cout << "Trajectory energy (minimum snap norm): " << energy << std::endl;
+    std::cout << "Trajectory energy (minimum jerk norm): " << energy << std::endl;
     
     return 0;
     // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. QuinticSplineExample.cpp -o QuinticSplineExample 
@@ -503,9 +503,9 @@ double getEndTime() const;
 ```
 
 #### `QuinticSplineND<DIM>`
-- **Purpose**: Generates smooth quintic spline trajectories with higher-order continuity (MINCO equivalent, minimum snap)
+- **Purpose**: Generates smooth quintic spline trajectories with higher-order continuity (MINCO equivalent, minimum jerk)
 - **Order**: 6th order polynomials (quintic)
-- **Continuity**: C⁴ continuous (position through snap)
+- **Continuity**: C⁴ continuous (position through jerk)
 - **Optimization**: Minimizes ∫ ||s'''(t)||² dt (minimum norm theorem in spline theory)
 - **Boundary Type**: Clamped splines with prescribed endpoint derivatives up to acceleration
 
@@ -682,7 +682,7 @@ double cubic_energy = cubic_spline.getEnergy();
 double quintic_energy = quintic_spline.getEnergy(); 
 
 std::cout << "Cubic spline energy (min curvature): " << cubic_energy << std::endl;
-std::cout << "Quintic spline energy (min snap): " << quintic_energy << std::endl;
+std::cout << "Quintic spline energy (min jerk): " << quintic_energy << std::endl;
 ```
 
 ### High-Performance Segmented Evaluation
