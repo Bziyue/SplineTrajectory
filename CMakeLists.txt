@@ -31,6 +31,9 @@ target_link_libraries(test_cubic_spline_vs_minco_nd Eigen3::Eigen)
 add_executable(test_quintic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd.cpp)
 target_link_libraries(test_quintic_spline_vs_minco_nd Eigen3::Eigen)
 
+add_executable(test_septic_spline_vs_minco_nd test_septic_spline_vs_minco_nd.cpp)
+target_link_libraries(test_septic_spline_vs_minco_nd Eigen3::Eigen)
+
 # Add new min_jerk comparison test
 add_executable(test_with_min_jerk_3d test_with_min_jerk_3d.cpp)
 target_link_libraries(test_with_min_jerk_3d Eigen3::Eigen)
@@ -53,6 +56,7 @@ set(RELEASE_FLAGS -O3 -march=native -ffast-math -DNDEBUG)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
+    target_compile_options(test_septic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_with_min_jerk_3d PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
@@ -60,6 +64,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 else()
     target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+    target_compile_options(test_septic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_with_min_jerk_3d PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
@@ -70,13 +75,14 @@ endif()
 if(NOT WIN32)
     target_link_libraries(test_cubic_spline_vs_minco_nd pthread)
     target_link_libraries(test_quintic_spline_vs_minco_nd pthread)
+    target_link_libraries(test_septic_spline_vs_minco_nd pthread)
     target_link_libraries(test_with_min_jerk_3d pthread)
     target_link_libraries(quintic_spline_comparison pthread)
 endif()
 
 # Create custom targets for easy building
 add_custom_target(tests
-    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d
+    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d test_septic_spline_vs_minco_nd
     COMMENT "Building performance tests"
 )
 
@@ -98,6 +104,7 @@ message(STATUS "可执行文件:")
 message(STATUS "  - Performance Tests:")
 message(STATUS "    * test_cubic_spline_vs_minco_nd")
 message(STATUS "    * test_quintic_spline_vs_minco_nd")
+message(STATUS "    * test_septic_spline_vs_minco_nd")
 message(STATUS "    * test_with_min_jerk_3d")
 message(STATUS "  - Examples:")
 message(STATUS "    * basic_cubic_spline")
