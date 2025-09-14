@@ -15,6 +15,7 @@ A high-performance C++ library for generating smooth spline trajectories in N-di
 2. **Minimum Norm Theorem**: The "minimum control effort" optimization in MINCO directly corresponds to the **minimum norm theorem** in classical spline theory:
    - For cubic splines: Minimizes ∫ ||f''(t)||² dt (minimum acceleration)
    - For quintic splines: Minimizes ∫ ||f'''(t)||² dt (minimum jerk)
+   - For septic splines: Minimizes ∫ ||f''''(t)||² dt (minimum snap)
 
 3. **Mathematical Equivalence**: MINCO's cost function optimization is equivalent to finding the natural spline that minimizes the specified norm among all interpolating functions.
 
