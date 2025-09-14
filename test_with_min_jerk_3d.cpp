@@ -294,7 +294,7 @@ void runEvaluationTests()
     
     // QuinticSpline optimized batch evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_pos_batch_optimized = quinticSpline.getTrajectory().evaluateSegmented(segmented_times, 0);
+    auto qs_pos_batch_optimized = quinticSpline.getTrajectory().getPos(segmented_times);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_pos_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -315,7 +315,7 @@ void runEvaluationTests()
     double qs_batch_vel_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_vel_batch_optimized = quinticSpline.getTrajectory().evaluateSegmented(segmented_times, 1);
+    auto qs_vel_batch_optimized = quinticSpline.getTrajectory().getVel(segmented_times);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_vel_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -336,7 +336,7 @@ void runEvaluationTests()
     double qs_batch_acc_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_acc_batch_optimized = quinticSpline.getTrajectory().evaluateSegmented(segmented_times, 2);
+    auto qs_acc_batch_optimized = quinticSpline.getTrajectory().getAcc(segmented_times);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_acc_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     

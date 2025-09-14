@@ -332,23 +332,32 @@ namespace SplineTrajectory
             return generateTimeSequence(getStartTime(), getEndTime(), dt);
         }
 
+        // Single time point evaluation
         VectorType getPos(double t) const { return evaluate(t, 0); }
         VectorType getVel(double t) const { return evaluate(t, 1); }
         VectorType getAcc(double t) const { return evaluate(t, 2); }
         VectorType getJerk(double t) const { return evaluate(t, 3); }
         VectorType getSnap(double t) const { return evaluate(t, 4); }
 
+        // Multiple time points evaluation
         SplineVector<VectorType> getPos(const std::vector<double> &t) const { return evaluate(t, 0); }
         SplineVector<VectorType> getVel(const std::vector<double> &t) const { return evaluate(t, 1); }
         SplineVector<VectorType> getAcc(const std::vector<double> &t) const { return evaluate(t, 2); }
         SplineVector<VectorType> getJerk(const std::vector<double> &t) const { return evaluate(t, 3); }
         SplineVector<VectorType> getSnap(const std::vector<double> &t) const { return evaluate(t, 4); }
 
+        // Time range evaluation(internal segmentation)
         SplineVector<VectorType> getPos(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 0); }
         SplineVector<VectorType> getVel(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 1); }
         SplineVector<VectorType> getAcc(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 2); }
         SplineVector<VectorType> getJerk(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 3); }
         SplineVector<VectorType> getSnap(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 4); }
+
+        SplineVector<VectorType> getPos(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 0); }
+        SplineVector<VectorType> getVel(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 1); }
+        SplineVector<VectorType> getAcc(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 2); }
+        SplineVector<VectorType> getJerk(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 3); }
+        SplineVector<VectorType> getSnap(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 4); }
 
         double getTrajectoryLength(double dt = 0.01) const
         {

@@ -785,6 +785,12 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 - Add comprehensive benchmarks for new features
 - Follow Eigen coding conventions
 
+## Future Plans
+- [ ] Add a gradient propagation mechanism equivalent to MINCO
+- [ ] Implement support for clamped 7th-order splines (Septic Spline, Minimum Snap)
+- [ ] Implement support for N-dimensional Non-Uniform B-Splines
+- [ ] Implement support for the exact conversion from clamped splines to Non-Uniform B-Splines
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
