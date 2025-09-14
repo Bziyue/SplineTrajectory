@@ -35,7 +35,7 @@ This library implements the same mathematical foundation as MINCO but with super
 ## Features
 
 - **Multi-dimensional splines**: Support for 1D to 10D splines out of the box (extensible to any dimension)
-- **Multiple spline types**: Cubic and quintic spline interpolation
+- **Multiple spline types**: Cubic, quintic and septic spline interpolation
 - **Flexible time specification**: Support for both absolute time points and relative time segments
 - **Boundary conditions**: Configurable start/end velocity and acceleration constraints (clamped splines)
 - **Efficient evaluation**: Optimized polynomial evaluation with caching and segmented batch processing
@@ -64,6 +64,13 @@ The library is grounded in classical **interpolating spline theory**:
 - **Optimality**: Minimize ∫₀ᵀ ||s'''(t)||² dt among all C⁴ interpolating functions
 - **Physical Meaning**: Minimum jerk energy (smoother than cubic splines)
 
+#### Septic Splines (8th Order)
+- **Interpolation**: Pass through all waypoints exactly
+- **Continuity**: C⁶ continuous (position through 6th-order derivatives)
+- **Boundary Conditions**: Clamped splines with prescribed endpoint derivatives up to jerk
+- **Optimality**: Minimize ∫₀ᵀ ||s⁽⁴⁾(t)||² dt among all C⁶ interpolating functions (minimum snap)
+- **Physical Meaning**: Minimum snap energy (ultra-smooth for high-precision robot trajectories)
+
 ### MINCO Relationship
 
 ```cpp
@@ -74,6 +81,10 @@ double cubic_energy = spline.getEnergy();  // Identical to MINCO
 // MINCO's cost function for quintic splines:  
 // J = ∫₀ᵀ ||jerk(t)||² dt
 double quintic_energy = spline.getEnergy(); // Identical to MINCO
+
+// MINCO's cost function for septic splines:
+// J = ∫₀ᵀ ||snap(t)||² dt
+double septic_energy = spline.getEnergy(); // Identical to MinSnap
 ```
 
 **Key Insight**: MINCO's "minimum control effort" is mathematically equivalent to the minimum norm theorem in spline theory - both find the unique interpolating spline that minimizes the specified energy functional.
@@ -109,12 +120,14 @@ make
 # Run performance comparisons
 ./test_cubic_spline_vs_minco_nd
 ./test_quintic_spline_vs_minco_nd
+./test_septic_spline_vs_minco_nd
 
 # Run examples
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
 ./test_with_min_jerk_3d
+./test_with_min_snap_3d
 ```
 SplineTrajectory continues to outperform [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer) in both trajectory generation and evaluation. To see the test results, run ./test_with_min_jerk_3d.
 ## Installation
@@ -376,6 +389,68 @@ int main() {
 }
 ```
 
+### 3D Septic Spline Example (Minimum Snap)
+
+```cpp
+// SepticSplineExample.cpp
+#include <iostream>
+#include <vector>
+#include <Eigen/Dense>
+#include <iomanip>
+#include "SplineTrajectory.hpp"
+
+int main() {
+    using namespace SplineTrajectory;
+    
+    // Define waypoints in 3D space
+    SplineVector<SplinePoint3d> waypoints = {
+        SplinePoint3d(0.0, 0.0, 0.0),
+        SplinePoint3d(1.0, 2.0, 1.0),
+        SplinePoint3d(3.0, 1.0, 2.0),
+        SplinePoint3d(4.0, 3.0, 0.5),
+        SplinePoint3d(6.0, 2.0, 1.5)
+    };
+    
+    // Using time points method
+    std::vector<double> time_points = {0.0, 1.0, 2.0, 3.0, 4.5};
+    
+    // Set boundary conditions with velocity, acceleration and jerk
+    BoundaryConditions<3> boundary;
+    boundary.start_velocity = SplinePoint3d(0.5, 0.0, 0.2);
+    boundary.start_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.start_jerk = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.end_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.end_jerk = SplinePoint3d(0.0, 0.0, 0.0);
+    
+    // Create septic spline (minimum snap by spline theory)
+    SepticSpline3D spline(time_points, waypoints, boundary);
+    
+    // Generate trajectory points
+    std::vector<double> eval_times = spline.getTrajectory().generateTimeSequence(0.1);
+    auto positions = spline.getTrajectory().getPos(eval_times);
+    auto velocities = spline.getTrajectory().getVel(eval_times);
+    auto accelerations = spline.getTrajectory().getAcc(eval_times);
+    auto jerks = spline.getTrajectory().getJerk(eval_times);
+    
+    // Print some trajectory points
+    for (size_t i = 0; i < std::min(size_t(10), eval_times.size()); ++i) {
+        std::cout << "t=" << std::fixed << std::setprecision(1) << eval_times[i] 
+                  << " pos=[" << std::setprecision(3) << positions[i].transpose() << "]"
+                  << " vel=[" << velocities[i].transpose() << "]"
+                  << " acc=[" << accelerations[i].transpose() << "]"
+                  << " jerk=[" << jerks[i].transpose() << "]\n";
+    }
+    
+    // Calculate trajectory energy (minimum snap norm by spline theory)
+    double energy = spline.getEnergy();
+    std::cout << "Trajectory energy (minimum snap norm): " << energy << std::endl;
+    
+    return 0;
+    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SepticSplineExample.cpp -o SepticSplineExample 
+}
+```
+
 ### Using PPolyND Directly
 
 ```cpp
@@ -426,6 +501,9 @@ Run the included benchmarks to compare performance with MINCO:
 
 # Quintic spline performance comparison  
 ./test_quintic_spline_vs_minco_nd
+
+# Septic spline performance comparison
+./test_septic_spline_vs_minco_nd
 ```
 
 *Performance results may vary based on hardware and compiler optimizations*
@@ -540,6 +618,44 @@ const PPolyND<DIM>& getTrajectory() const;
 double getEnergy() const;
 ```
 
+#### `SepticSplineND<DIM>`
+- **Purpose**: Generates ultra-smooth septic spline trajectories with highest-order continuity (MinSnap equivalent, minimum snap)
+- **Order**: 8th order polynomials (septic)
+- **Continuity**: C⁶ continuous (position through 6th-order derivatives)
+- **Optimization**: Minimizes ∫ ||s⁽⁴⁾(t)||² dt (minimum norm theorem in spline theory)
+- **Boundary Type**: Clamped splines with prescribed endpoint derivatives up to jerk
+- **Applications**: High-precision robot trajectories, smooth camera motion, precision manufacturing
+
+**Key Methods:**
+```cpp
+// Constructor with absolute time points
+SepticSplineND(const std::vector<double>& time_points,
+               const SplineVector<VectorType>& waypoints,
+               const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
+
+// Constructor with time segments and start time
+SepticSplineND(const std::vector<double>& time_segments,
+               const SplineVector<VectorType>& waypoints,
+               double start_time,
+               const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
+
+// Update methods for both approaches
+void update(const std::vector<double>& time_points,
+            const SplineVector<VectorType>& waypoints,
+            const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
+
+void updateWithSegments(const std::vector<double>& time_segments,
+                        const SplineVector<VectorType>& waypoints,
+                        double start_time,
+                        const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
+
+// Get trajectory object
+const PPolyND<DIM>& getTrajectory() const;
+
+// Energy calculation (minimum snap norm, MinSnap equivalent)
+double getEnergy() const;
+```
+
 #### `PPolyND<DIM>`
 - **Purpose**: N-dimensional piecewise polynomial representation
 - **Evaluation**: Efficient polynomial evaluation with caching and segmented batch processing
@@ -593,14 +709,19 @@ template<int DIM>
 struct BoundaryConditions {
     VectorType start_velocity;
     VectorType start_acceleration;
+    VectorType start_jerk;
     VectorType end_velocity;
     VectorType end_acceleration;
+    VectorType end_jerk;
     
     // Constructors for different boundary condition types
     BoundaryConditions();  // Zero boundary conditions 
     BoundaryConditions(const VectorType& start_vel, const VectorType& end_vel);
     BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
                        const VectorType& end_vel, const VectorType& end_acc);
+    BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
+                       const VectorType& end_vel, const VectorType& end_acc,
+                       const VectorType& start_jerk, const VectorType& end_jerk);
 };
 ```
 
@@ -623,6 +744,11 @@ using QuinticSpline1D = QuinticSplineND<1>;
 using QuinticSpline2D = QuinticSplineND<2>;
 using QuinticSpline3D = QuinticSplineND<3>;
 // ... up to QuinticSpline10D
+
+using SepticSpline1D = SepticSplineND<1>;
+using SepticSpline2D = SepticSplineND<2>;
+using SepticSpline3D = SepticSplineND<3>;
+// ... up to SepticSpline10D
 
 // PPoly types
 using PPoly1D = PPolyND<1>;
@@ -675,15 +801,18 @@ std::vector<double> times = {/* your time points */};
 
 CubicSpline3D cubic_spline(times, waypoints);
 QuinticSpline3D quintic_spline(times, waypoints);
+SepticSpline3D septic_spline(times, waypoints);
 
 // These energy values correspond to:
 // - Spline theory: minimum norm solutions
 // - MINCO: minimum control effort solutions  
-double cubic_energy = cubic_spline.getEnergy();    
-double quintic_energy = quintic_spline.getEnergy(); 
+double cubic_energy = cubic_spline.getEnergy();    // minimum acceleration
+double quintic_energy = quintic_spline.getEnergy(); // minimum jerk
+double septic_energy = septic_spline.getEnergy();   // minimum snap
 
 std::cout << "Cubic spline energy (min curvature): " << cubic_energy << std::endl;
 std::cout << "Quintic spline energy (min jerk): " << quintic_energy << std::endl;
+std::cout << "Septic spline energy (min snap): " << septic_energy << std::endl;
 ```
 
 ### High-Performance Segmented Evaluation
@@ -766,12 +895,14 @@ make
 # Run performance benchmarks
 ./test_cubic_spline_vs_minco_nd
 ./test_quintic_spline_vs_minco_nd
+./test_septic_spline_vs_minco_nd
 
 # Run examples
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
 ./test_with_min_jerk_3d
+./test_with_min_snap_3d
 ```
 
 ## Contributing
@@ -787,7 +918,7 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 
 ## Future Plans
 - [ ] Add a gradient propagation mechanism equivalent to MINCO
-- [ ] Implement support for clamped 7th-order splines (Septic Spline, Minimum Snap)
+- [x] Implement support for clamped 7th-order splines (Septic Spline, Minimum Snap)
 - [ ] Implement support for N-dimensional Non-Uniform B-Splines
 - [ ] Implement support for the exact conversion from clamped splines to Non-Uniform B-Splines
 

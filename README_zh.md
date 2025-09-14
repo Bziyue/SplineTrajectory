@@ -35,7 +35,7 @@
 ## 特性
 
 - **多维样条**：支持开箱即用的 1D 到 10D 样条（可扩展到任何维度）
-- **多种样条类型**：三次和五次样条插值
+- **多种样条类型**：三次、五次和七次样条插值
 - **灵活的时间规范**：支持绝对时间点和相对时间段
 - **边界条件**：可配置的起始/结束速度和加速度约束（夹持样条）
 - **高效评估**：带缓存和分段批处理的优化多项式评估
@@ -63,6 +63,13 @@
 - **边界条件**：具有规定端点导数（到加速度）的夹持样条
 - **最优性**：在所有 C⁴ 插值函数中最小化 ∫₀ᵀ ||s'''(t)||² dt
 - **物理意义**：最小急动度能量（比三次样条更平滑）
+
+#### 七次样条（8阶）
+- **插值**：精确通过所有路径点
+- **连续性**：C⁶ 连续（位置到6阶导数）
+- **边界条件**：具有规定端点导数（到急动度）的夹持样条
+- **最优性**：在所有 C⁶ 插值函数中最小化 ∫₀ᵀ ||s⁽⁴⁾(t)||² dt（最小Snap）
+- **物理意义**：最小Snap能量（比五次样条更平滑，用于高精度机器人轨迹）
 
 ### MINCO 关系
 
@@ -109,12 +116,14 @@ make
 # 运行性能比较
 ./test_cubic_spline_vs_minco_nd
 ./test_quintic_spline_vs_minco_nd
+./test_septic_spline_vs_minco_nd
 
 # 运行示例
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
 ./test_with_min_jerk_3d
+./test_with_min_snap_3d
 ```
 在和[large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer)的比较中SplineTrajectory依然在轨迹构造和求值中性能更优，运行“./test_with_min_jerk_3d”查看测试结果。
 ## 安装
@@ -376,6 +385,68 @@ int main() {
 }
 ```
 
+### 3D 七次样条示例（最小Snap）
+
+```cpp
+// SepticSplineExample.cpp
+#include <iostream>
+#include <vector>
+#include <Eigen/Dense>
+#include <iomanip>
+#include "SplineTrajectory.hpp"
+
+int main() {
+    using namespace SplineTrajectory;
+    
+    // Define waypoints in 3D space
+    SplineVector<SplinePoint3d> waypoints = {
+        SplinePoint3d(0.0, 0.0, 0.0),
+        SplinePoint3d(1.0, 2.0, 1.0),
+        SplinePoint3d(3.0, 1.0, 2.0),
+        SplinePoint3d(4.0, 3.0, 0.5),
+        SplinePoint3d(6.0, 2.0, 1.5)
+    };
+    
+    // Using time points method
+    std::vector<double> time_points = {0.0, 1.0, 2.0, 3.0, 4.5};
+    
+    // Set boundary conditions with velocity, acceleration and jerk
+    BoundaryConditions<3> boundary;
+    boundary.start_velocity = SplinePoint3d(0.5, 0.0, 0.2);
+    boundary.start_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.start_jerk = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.end_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.end_jerk = SplinePoint3d(0.0, 0.0, 0.0);
+    
+    // Create septic spline (minimum snap by spline theory)
+    SepticSpline3D spline(time_points, waypoints, boundary);
+    
+    // Generate trajectory points
+    std::vector<double> eval_times = spline.getTrajectory().generateTimeSequence(0.1);
+    auto positions = spline.getTrajectory().getPos(eval_times);
+    auto velocities = spline.getTrajectory().getVel(eval_times);
+    auto accelerations = spline.getTrajectory().getAcc(eval_times);
+    auto jerks = spline.getTrajectory().getJerk(eval_times);
+    
+    // Print some trajectory points
+    for (size_t i = 0; i < std::min(size_t(10), eval_times.size()); ++i) {
+        std::cout << "t=" << std::fixed << std::setprecision(1) << eval_times[i] 
+                  << " pos=[" << std::setprecision(3) << positions[i].transpose() << "]"
+                  << " vel=[" << velocities[i].transpose() << "]"
+                  << " acc=[" << accelerations[i].transpose() << "]"
+                  << " jerk=[" << jerks[i].transpose() << "]\n";
+    }
+    
+    // Calculate trajectory energy (minimum snap norm by spline theory)
+    double energy = spline.getEnergy();
+    std::cout << "Trajectory energy (minimum snap norm): " << energy << std::endl;
+    
+    return 0;
+    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SepticSplineExample.cpp -o SepticSplineExample 
+}
+```
+
 ### 直接使用 PPolyND
 
 ```cpp
@@ -426,6 +497,9 @@ int main() {
 
 # 五次样条性能比较
 ./test_quintic_spline_vs_minco_nd
+
+# 七次样条性能比较测试
+./test_septic_spline_vs_minco_nd
 ```
 
 *性能结果可能因硬件和编译器优化而异*
@@ -509,6 +583,14 @@ double getEndTime() const;
 - **优化**：最小化 ∫ ||s'''(t)||² dt（样条理论中的最小范数定理）
 - **边界类型**：具有规定端点导数（到加速度）的夹持样条
 
+#### `SepticSplineND<DIM>`
+- **目的**：生成最高阶连续性的超平滑七次样条轨迹（MinSnap 等效，最小Snap）
+- **阶数**：8阶多项式（七次）
+- **连续性**：C⁶ 连续（位置到6阶导数）
+- **优化**：最小化 ∫ ||s⁽⁴⁾(t)||² dt（样条理论中的最小范数定理）
+- **边界类型**：具有规定端点导数（到急动度）的夹持样条
+- **应用**：高精度机器人轨迹、平滑的相机运动、精密制造
+
 #### `PPolyND<DIM>`
 - **目的**：N 维分段多项式表示
 - **评估**：具有缓存和分段批处理的高效多项式评估
@@ -520,14 +602,19 @@ template<int DIM>
 struct BoundaryConditions {
     VectorType start_velocity;
     VectorType start_acceleration;
+    VectorType start_jerk;
     VectorType end_velocity;
     VectorType end_acceleration;
+    VectorType end_jerk;
     
     // 不同边界条件类型的构造函数
     BoundaryConditions();  // 零边界条件
     BoundaryConditions(const VectorType& start_vel, const VectorType& end_vel);
     BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
                        const VectorType& end_vel, const VectorType& end_acc);
+    BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
+                       const VectorType& end_vel, const VectorType& end_acc,
+                       const VectorType& start_jerk, const VectorType& end_jerk);
 };
 ```
 
@@ -550,6 +637,11 @@ using QuinticSpline1D = QuinticSplineND<1>;
 using QuinticSpline2D = QuinticSplineND<2>;
 using QuinticSpline3D = QuinticSplineND<3>;
 // ... 到 QuinticSpline10D
+
+using SepticSpline1D = SepticSplineND<1>;
+using SepticSpline2D = SepticSplineND<2>;
+using SepticSpline3D = SepticSplineND<3>;
+// ... 到 SepticSpline10D
 
 // PPoly 类型
 using PPoly1D = PPolyND<1>;
@@ -602,15 +694,18 @@ std::vector<double> times = {/* 你的时间点 */};
 
 CubicSpline3D cubic_spline(times, waypoints);
 QuinticSpline3D quintic_spline(times, waypoints);
+SepticSpline3D septic_spline(times, waypoints);
 
 // 这些能量值对应于：
 // - 样条理论：最小范数解
 // - MINCO：最小控制作用解
-double cubic_energy = cubic_spline.getEnergy();    
-double quintic_energy = quintic_spline.getEnergy(); 
+double cubic_energy = cubic_spline.getEnergy();    // 最小加速度
+double quintic_energy = quintic_spline.getEnergy(); // 最小急动度
+double septic_energy = septic_spline.getEnergy();   // 最小Snap
 
 std::cout << "三次样条能量（最小加速度）: " << cubic_energy << std::endl;
 std::cout << "五次样条能量（最小急动度）: " << quintic_energy << std::endl;
+std::cout << "七次样条能量（最小Snap）: " << septic_energy << std::endl;
 ```
 
 ### 高性能分段评估
@@ -692,12 +787,14 @@ make
 # 运行性能基准测试
 ./test_cubic_spline_vs_minco_nd
 ./test_quintic_spline_vs_minco_nd
+./test_septic_spline_vs_minco_nd
 
 # 运行示例
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
 ./test_with_min_jerk_3d
+./test_with_min_snap_3d
 ```
 
 ## 贡献
@@ -713,7 +810,7 @@ make
 
 ## 未来计划
 - [ ] 添加与 MINCO 相同的梯度传播机制
-- [ ] 添加夹持七次样条（Minimum Snap）支持
+- [x] 添加夹持七次样条（Minimum Snap）支持
 - [ ] 添加 N 维非均匀 B 样条（Non-Uniform B-Spline）支持
 - [ ] 添加夹持样条向非均匀 B 样条的精确转换支持
 
