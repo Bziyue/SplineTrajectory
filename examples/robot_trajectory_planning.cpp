@@ -18,13 +18,32 @@ int main() {
     std::cout << "=== 6-DOF Robot Arm Trajectory Planning ===" << std::endl;
     
     // Define joint space waypoints (6 joints in radians)
-    SplineVector<SplinePoint6d> joint_waypoints = {
-        SplinePoint6d(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),                    // Home position
-        SplinePoint6d(M_PI/4, M_PI/6, -M_PI/3, 0.0, M_PI/4, 0.0),      // Intermediate 1
-        SplinePoint6d(M_PI/2, M_PI/3, -M_PI/2, M_PI/4, M_PI/2, M_PI/6), // Target position
-        SplinePoint6d(M_PI/3, M_PI/4, -M_PI/4, M_PI/6, M_PI/3, M_PI/4), // Intermediate 2
-        SplinePoint6d(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)                     // Return home
-    };
+    SplineVector<SplinePoint6d> joint_waypoints;
+    
+    // Home position
+    SplinePoint6d home_pos;
+    home_pos << 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+    joint_waypoints.push_back(home_pos);
+    
+    // Intermediate 1
+    SplinePoint6d intermediate1;
+    intermediate1 << M_PI/4, M_PI/6, -M_PI/3, 0.0, M_PI/4, 0.0;
+    joint_waypoints.push_back(intermediate1);
+    
+    // Target position
+    SplinePoint6d target_pos;
+    target_pos << M_PI/2, M_PI/3, -M_PI/2, M_PI/4, M_PI/2, M_PI/6;
+    joint_waypoints.push_back(target_pos);
+    
+    // Intermediate 2
+    SplinePoint6d intermediate2;
+    intermediate2 << M_PI/3, M_PI/4, -M_PI/4, M_PI/6, M_PI/3, M_PI/4;
+    joint_waypoints.push_back(intermediate2);
+    
+    // Return home
+    SplinePoint6d return_home;
+    return_home << 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+    joint_waypoints.push_back(return_home);
     
     // Define time points with varying speeds
     std::vector<double> time_points = {0.0, 2.0, 4.0, 6.0, 8.0};
@@ -49,8 +68,12 @@ int main() {
     std::cout << "Trajectory energy: " << robot_trajectory.getEnergy() << std::endl;
     
     // Define joint limits and velocity/acceleration constraints
-    SplinePoint6d joint_limits_min = SplinePoint6d(-M_PI, -M_PI/2, -2*M_PI/3, -M_PI, -M_PI, -M_PI);
-    SplinePoint6d joint_limits_max = SplinePoint6d(M_PI, M_PI/2, 2*M_PI/3, M_PI, M_PI, M_PI);
+    SplinePoint6d joint_limits_min;
+    joint_limits_min << -M_PI, -M_PI/2, -2*M_PI/3, -M_PI, -M_PI, -M_PI;
+    
+    SplinePoint6d joint_limits_max;
+    joint_limits_max << M_PI, M_PI/2, 2*M_PI/3, M_PI, M_PI, M_PI;
+    
     SplinePoint6d velocity_limits = SplinePoint6d::Constant(M_PI);  // 180 deg/s max
     SplinePoint6d acceleration_limits = SplinePoint6d::Constant(2*M_PI);  // 360 deg/s² max
     
