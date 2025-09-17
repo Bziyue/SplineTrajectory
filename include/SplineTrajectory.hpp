@@ -97,7 +97,6 @@ namespace SplineTrajectory
         }
     };
 
-    template <int DIM>
     struct SegmentedTimeSequence
     {
         struct SegmentInfo
@@ -127,7 +126,6 @@ namespace SplineTrajectory
     public:
         using VectorType = Eigen::Matrix<double, DIM, 1>;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM>;
-        using SegmentedTimeSeq = SegmentedTimeSequence<DIM>;
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     private:
         std::vector<double> breakpoints_;
@@ -224,9 +222,9 @@ namespace SplineTrajectory
             return evaluateSegmented(segmented_seq, derivative_order);
         }
 
-        SegmentedTimeSeq generateSegmentedTimeSequence(double start_t, double end_t, double dt) const
+        SegmentedTimeSequence generateSegmentedTimeSequence(double start_t, double end_t, double dt) const
         {
-            SegmentedTimeSeq segmented_seq;
+            SegmentedTimeSequence segmented_seq;
 
             if (start_t > end_t || dt <= 0.0)
                 return segmented_seq;
@@ -241,7 +239,7 @@ namespace SplineTrajectory
                                          ? breakpoints_[current_segment_idx + 1]
                                          : std::numeric_limits<double>::max();
 
-                typename SegmentedTimeSeq::SegmentInfo segment_info;
+                typename SegmentedTimeSequence::SegmentInfo segment_info;
                 segment_info.segment_idx = current_segment_idx;
                 segment_info.segment_start = segment_start;
 
@@ -278,7 +276,7 @@ namespace SplineTrajectory
                 }
                 else
                 {
-                    typename SegmentedTimeSeq::SegmentInfo end_segment;
+                    typename SegmentedTimeSequence::SegmentInfo end_segment;
                     end_segment.segment_idx = end_seg_idx;
                     end_segment.segment_start = breakpoints_[end_seg_idx];
                     end_segment.times.push_back(end_t);
@@ -290,7 +288,7 @@ namespace SplineTrajectory
             return segmented_seq;
         }
 
-        SplineVector<VectorType> evaluateSegmented(const SegmentedTimeSeq &segmented_seq, int derivative_order = 0) const
+        SplineVector<VectorType> evaluateSegmented(const SegmentedTimeSequence &segmented_seq, int derivative_order = 0) const
         {
             if (derivative_order >= order_)
             {
@@ -376,11 +374,11 @@ namespace SplineTrajectory
         SplineVector<VectorType> getJerk(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 3); }
         SplineVector<VectorType> getSnap(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 4); }
 
-        SplineVector<VectorType> getPos(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 0); }
-        SplineVector<VectorType> getVel(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 1); }
-        SplineVector<VectorType> getAcc(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 2); }
-        SplineVector<VectorType> getJerk(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 3); }
-        SplineVector<VectorType> getSnap(const SegmentedTimeSeq &segmented_seq) const { return evaluateSegmented(segmented_seq, 4); }
+        SplineVector<VectorType> getPos(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 0); }
+        SplineVector<VectorType> getVel(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 1); }
+        SplineVector<VectorType> getAcc(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 2); }
+        SplineVector<VectorType> getJerk(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 3); }
+        SplineVector<VectorType> getSnap(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 4); }
 
         double getTrajectoryLength(double dt = 0.01) const
         {

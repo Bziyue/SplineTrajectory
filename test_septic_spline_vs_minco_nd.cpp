@@ -225,7 +225,7 @@ void printConsistency(const ConsistencyResult &r)
 
 // 新增：从段化时间序列提取时间点
 template <int DIM>
-std::vector<double> extractTimePointsFromSegmented(const typename SplineTrajectory::PPolyND<DIM>::SegmentedTimeSeq& segmented_seq)
+std::vector<double> extractTimePointsFromSegmented(const SegmentedTimeSequence& segmented_seq)
 {
     std::vector<double> time_points;
     time_points.reserve(segmented_seq.getTotalSize());

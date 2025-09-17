@@ -1,6 +1,6 @@
 # SplineTrajectory
 
-A high-performance C++ library for generating smooth spline trajectories in N-dimensional space with Eigen integration. This library provides **MINCO-equivalent** cubic and quintic spline interpolation with boundary conditions support, making it ideal for robotics, path planning, and trajectory generation applications.
+A high-performance C++ library for generating smooth spline trajectories in N-dimensional space with Eigen integration. This library provides **MINCO-equivalent** cubic、quintic and septic spline interpolation with boundary conditions support, making it ideal for robotics, path planning, and trajectory generation applications.
 
 **English** | [中文](README_zh.md)
 
