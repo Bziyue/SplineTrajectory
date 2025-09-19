@@ -302,13 +302,13 @@ g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o Spli
 ---
 ## Future Plans
 
-[ ] Add a gradient propagation mechanism equivalent to MINCO
+- [ ] Add a gradient propagation mechanism equivalent to MINCO
     
-[x] Implement support for clamped 7th-order splines (Septic Spline, Minimum Snap)
+- [x] Implement support for clamped 7th-order splines (Septic Spline, Minimum Snap)
     
-[ ] Implement support for N-dimensional Non-Uniform B-Splines
+- [ ] Implement support for N-dimensional Non-Uniform B-Splines
     
-[ ] Implement support for the exact conversion from clamped splines to Non-Uniform B-Splines
+- [ ] Implement support for the exact conversion from clamped splines to Non-Uniform B-Splines
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
