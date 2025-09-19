@@ -1,102 +1,23 @@
 # SplineTrajectory
 
-A high-performance C++ library for generating smooth spline trajectories in N-dimensional space with Eigen integration. This library provides **MINCO-equivalent** cubic、quintic and septic spline interpolation with boundary conditions support, making it ideal for robotics, path planning, and trajectory generation applications.
+SplineTrajectory is a high-performance, header-only C++ library for generating smooth, N-dimensional spline trajectories. This library provides **MINCO-equivalent** cubic、quintic and septic spline interpolation with boundary conditions support, making it ideal for robotics, path planning, and trajectory generation applications.
 
 **English** | [中文](README_zh.md)
 
-## Theoretical Background
 
-### MINCO and Spline Theory Equivalence
+## Key Features
 
-**MINCO (Minimum Control Effort)** is fundamentally based on **clamped polynomial splines** with specific boundary conditions. The key theoretical insights are:
-
-1. **Clamped Polynomial Splines**: MINCO constructs trajectories using piecewise polynomials with prescribed boundary conditions (clamped splines), ensuring continuity and smoothness across segments.
-
-2. **Minimum Norm Theorem**: The "minimum control effort" optimization in MINCO directly corresponds to the **minimum norm theorem** in classical spline theory:
-   - For cubic splines: Minimizes ∫ ||f''(t)||² dt (minimum acceleration)
-   - For quintic splines: Minimizes ∫ ||f'''(t)||² dt (minimum jerk)
-   - For septic splines: Minimizes ∫ ||f''''(t)||² dt (minimum snap)
-
-3. **Mathematical Equivalence**: MINCO's cost function optimization is equivalent to finding the natural spline that minimizes the specified norm among all interpolating functions.
-
-4. **Optimality**: By the minimum norm theorem, these splines are mathematically optimal - no other interpolating curve can achieve lower control effort while maintaining the same boundary conditions.
-
-This library implements the same mathematical foundation as MINCO but with superior computational algorithms and template-based optimization.
-
-## Key Technical Features
-
-- **MINCO Equivalent Construction**: Implements the same minimum control effort trajectory optimization as MINCO
-- **Classical Spline Theory**: Based on clamped polynomial splines and minimum norm theorem
-- **Block Tridiagonal Matrix Solver**: Uses efficient block tridiagonal matrix construction with Thomas algorithm
-- **Faster than MINCO**: Outperforms MINCO's LU decomposition approach through specialized algorithms
-- **Segmented Batch Evaluation**: Optimized batch evaluation functions for high-frequency sampling
-- **Template Metaprogramming**: Full template-based implementation supporting arbitrary dimensional spline trajectories
-- **Cache-Optimized**: Advanced caching mechanisms for repeated evaluations
-
-## Features
-
-- **Multi-dimensional splines**: Support for 1D to 10D splines out of the box (extensible to any dimension)
-- **Multiple spline types**: Cubic, quintic and septic spline interpolation
-- **Flexible time specification**: Support for both absolute time points and relative time segments
-- **Boundary conditions**: Configurable start/end velocity and acceleration constraints (clamped splines)
-- **Efficient evaluation**: Optimized polynomial evaluation with caching and segmented batch processing
-- **Derivatives**: Built-in support for position, velocity, acceleration, jerk, and snap
-- **Energy optimization**: Built-in energy calculation for trajectory optimization (minimum norm)
-- **Eigen integration**: Seamless integration with Eigen library for linear algebra
-- **Header-only**: Easy to integrate into existing projects
-
-## Mathematical Foundation
-
-### Spline Theory Background
-
-The library is grounded in classical **interpolating spline theory**:
-
-#### Cubic Splines (4th Order)
-- **Interpolation**: Pass through all waypoints exactly
-- **Continuity**: C² continuous (position, velocity, acceleration)
-- **Boundary Conditions**: Clamped splines with prescribed endpoint derivatives
-- **Optimality**: Minimize ∫₀ᵀ ||s''(t)||² dt among all C² interpolating functions
-- **Physical Meaning**: Minimum bending energy (like a thin elastic beam)
-
-#### Quintic Splines (6th Order)  
-- **Interpolation**: Pass through all waypoints exactly
-- **Continuity**: C⁴ continuous (position through snap)
-- **Boundary Conditions**: Clamped splines with prescribed endpoint derivatives up to acceleration
-- **Optimality**: Minimize ∫₀ᵀ ||s'''(t)||² dt among all C⁴ interpolating functions
-- **Physical Meaning**: Minimum jerk energy (smoother than cubic splines)
-
-#### Septic Splines (8th Order)
-- **Interpolation**: Pass through all waypoints exactly
-- **Continuity**: C⁶ continuous (position through 6th-order derivatives)
-- **Boundary Conditions**: Clamped splines with prescribed endpoint derivatives up to jerk
-- **Optimality**: Minimize ∫₀ᵀ ||s⁽⁴⁾(t)||² dt among all C⁶ interpolating functions (minimum snap)
-- **Physical Meaning**: Minimum snap energy (ultra-smooth for high-precision robot trajectories)
-
-### MINCO Relationship
-
-```cpp
-// MINCO's cost function for cubic splines:
-// J = ∫₀ᵀ ||acceleration(t)||² dt
-double cubic_energy = spline.getEnergy();  // Identical to MINCO
-
-// MINCO's cost function for quintic splines:  
-// J = ∫₀ᵀ ||jerk(t)||² dt
-double quintic_energy = spline.getEnergy(); // Identical to MINCO
-
-// MINCO's cost function for septic splines:
-// J = ∫₀ᵀ ||snap(t)||² dt
-double septic_energy = spline.getEnergy(); // Identical to MinSnap
-```
-
-**Key Insight**: MINCO's "minimum control effort" is mathematically equivalent to the minimum norm theorem in spline theory - both find the unique interpolating spline that minimizes the specified energy functional.
-
-## Performance Advantages over MINCO
-
-1. **Thomas Algorithm**: Uses specialized Thomas algorithm for block tridiagonal systems instead of general LU decomposition
-2. **Segmented Evaluation**: Optimized batch evaluation functions reduce computational overhead
-3. **Template Specialization**: Compile-time optimization through template metaprogramming
-4. **Memory Efficiency**: Optimized memory layout and caching strategies
-5. **Vectorized Operations**: Leverages Eigen's vectorization capabilities
+- **MINCO Equivalent**: Achieves minimum acceleration, jerk, and snap trajectories, just like MINCO.
+    
+- **High Performance**: Outperforms traditional methods by using a specialized **block tridiagonal matrix solver** (Thomas algorithm) instead of general LU decomposition.
+    
+- **Template-Based**: Fully templated for **arbitrary dimensions** (1D to ND) with compile-time optimizations.
+    
+- **Flexible & Efficient**: Supports multiple time specifications, optimized batch evaluation, and provides derivatives (velocity, acceleration, jerk, snap).
+    
+- **Eigen Integration**: Seamlessly uses the Eigen library for all linear algebra operations.
+    
+- **Header-Only**: Easy to integrate into any project by just including the header.
 
 ## Requirements
 
@@ -104,17 +25,19 @@ double septic_energy = spline.getEnergy(); // Identical to MinSnap
 - Eigen 3.3 or later
 - CMake 3.10+ (for building examples and tests)
 
-## Quick Installation and Testing
+## Quick Start
 
 ```bash
 git clone https://github.com/Bziyue/SplineTrajectory.git
 # git clone git@github.com:Bziyue/SplineTrajectory.git
-# Install Eigen3
+
+cd SplineTrajectory
+
+# Install Eigen3 (if not installed)
 sudo apt install libeigen3-dev
 
 # Build and test
-mkdir build
-cd build
+mkdir build && cd build
 cmake ..
 make
 
@@ -130,799 +53,262 @@ make
 ./test_with_min_jerk_3d
 ./test_with_min_snap_3d
 ```
-SplineTrajectory continues to outperform [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer) in both trajectory generation and evaluation. To see the test results, run ./test_with_min_jerk_3d.
-## Installation
+SplineTrajectory also outperforms [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer) in both trajectory generation and evaluation. To see the test results, run ./test_with_min_jerk_3d.
 
-Since this is a header-only library, simply include the header file in your project:
+## Comparison with MINCO
+This library is mathematically equivalent to MINCO but implemented with more efficient algorithms.
+| Feature         | SplineTrajectory                             | MINCO                      |
+| --------------- | -------------------------------------------- | -------------------------- |
+| **Algorithm**   | **Thomas Algorithm** (Block Tridiagonal)     | LU Decomposition           |
+| **Performance** | **Faster** Generation & Evaluation           | Baseline                   |
+| **Core Theory** | Classical Spline Theory (Minimum Norm)       | Minimum Control Effort     |
+| **Flexibility** | Fully templated for **arbitrary dimensions** | Fixed to 3D |
+| **Evaluation**  | Optimized segmented batch evaluation with coefficient caching        | Standard evaluation        |
 
+## Spline Types & Energy Minimization
+The library provides splines that are optimal solutions, minimizing the integral of the squared norm of a derivative, which has a direct physical meaning.
+
+| Spline Type             | MINCO Equivalent     | 
+| ----------------------- | -------------------- | 
+| **Cubic** (3rd order)   | Minimum Acceleration | 
+| **Quintic** (5th order) | Minimum Jerk         | 
+| **Septic** (7th order)  | Minimum Snap         |
+
+---
+## Usage Example
+Here's a concise example of how to create and evaluate a 3D trajectory.
 ```cpp
 #include "SplineTrajectory.hpp"
-```
-
-## Time Parameter Specification
-
-This library supports two methods for specifying timing:
-
-### Method 1: Absolute Time Points
-Specify the absolute time at each waypoint:
-```cpp
-std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0, 6.0};
-CubicSpline3D spline(time_points, waypoints, boundary_conditions);
-```
-
-### Method 2: Time Segments with Start Time
-Specify the duration of each segment plus a start time:
-```cpp
-std::vector<double> time_segments = {1.0, 1.5, 1.5, 2.0};  // Duration of each segment
-double start_time = 0.0;
-CubicSpline3D spline(time_segments, waypoints, start_time, boundary_conditions);
-```
-
-Both methods produce identical results - choose the one that's most convenient for your application.
-
-## Quick Start
-
-### Basic 3D Cubic Spline with Time Points
-
-```cpp
-//test_cubic.cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Define waypoints in 3D space
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5)
-    };
-    
-    // Method 1: Using absolute time points
-    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
-    
-    // Create boundary conditions for clamped spline
-    BoundaryConditions<3> boundary_conditions;
-    boundary_conditions.start_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary_conditions.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    
-    // Create cubic spline (minimum curvature by spline theory)
-    CubicSpline3D spline(time_points, waypoints, boundary_conditions);
-    
-    // Evaluate at specific time
-    double t = 1.5;
-    SplinePoint3d position = spline.getTrajectory().getPos(t);
-    SplinePoint3d velocity = spline.getTrajectory().getVel(t);
-    SplinePoint3d acceleration = spline.getTrajectory().getAcc(t);
-    
-    std::cout << "At t = " << t << ":\n";
-    std::cout << "Position: " << position.transpose() << "\n";
-    std::cout << "Velocity: " << velocity.transpose() << "\n";
-    std::cout << "Acceleration: " << acceleration.transpose() << "\n";
-    
-    return 0;
-}
-// g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. test_cubic.cpp -o test_cubic
-```
-
-### Minimum Norm Demonstration
-
-```cpp
-// MinimumNorm.cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Create waypoints
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5)
-    };
-    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
-    
-    // Zero boundary conditions (natural spline)
-    BoundaryConditions<3> natural_boundary;
-    natural_boundary.start_velocity = SplinePoint3d::Zero();
-    natural_boundary.end_velocity = SplinePoint3d::Zero();
-    
-    // Compare cubic and quintic minimum norms
-    CubicSpline3D cubic_spline(time_points, waypoints, natural_boundary);
-    QuinticSpline3D quintic_spline(time_points, waypoints, natural_boundary);
-    
-    // These represent minimum norm solutions by spline theory
-    double cubic_min_norm = cubic_spline.getEnergy();    
-    double quintic_min_norm = quintic_spline.getEnergy(); 
-    
-    std::cout << "Cubic spline minimum norm (curvature): " << cubic_min_norm << std::endl;
-    std::cout << "Quintic spline minimum norm (jerk): " << quintic_min_norm << std::endl;
-    
-    return 0;
-    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. MinimumNorm.cpp -o MinimumNorm 
-}
-```
-
-### High-Performance Batch Evaluation
-
-```cpp
-// PerformanceEval.cpp
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Create a trajectory
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5)
-    };
-    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
-    CubicSpline3D spline(time_points, waypoints);
-    
-    // High-performance segmented evaluation
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    // Generate segmented time sequence for optimal performance
-    auto segmented_seq = spline.getTrajectory().generateSegmentedTimeSequence(0.0, 4.0, 0.001);
-    auto positions = spline.getTrajectory().evaluateSegmented(segmented_seq, 0);
-    auto velocities = spline.getTrajectory().evaluateSegmented(segmented_seq, 1);
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    
-    std::cout << "Evaluated " << positions.size() << " points in " 
-              << duration.count() << " microseconds" << std::endl;
-    std::cout << "Performance: " << positions.size() / (duration.count() / 1000.0) 
-              << " evaluations per millisecond" << std::endl;
-    
-    return 0;
-    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. PerformanceEval.cpp -o PerformanceEval  
-}
-```
-
-### Using Time Segments (Alternative Construction)
-
-```cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Same waypoints as before
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5)
-    };
-    
-    // Method 2: Using time segments and start time
-    std::vector<double> time_segments = {1.0, 1.5, 1.5};  // Duration between waypoints
-    double start_time = 0.0;
-    
-    BoundaryConditions<3> boundary_conditions;
-    boundary_conditions.start_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary_conditions.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    
-    // Create cubic spline using time segments
-    CubicSpline3D spline(time_segments, waypoints, start_time, boundary_conditions);
-    
-    // This produces identical results to the time points method above
-    double t = 1.5;
-    SplinePoint3d position = spline.getTrajectory().getPos(t);
-    
-    std::cout << "At t = " << t << ":\n";
-    std::cout << "Position: " << position.transpose() << "\n";
-    
-    return 0;
-}
-```
-
-### 2D Quintic Spline Example
-
-```cpp
-// QuinticSplineExample.cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Define waypoints in 2D space
-    SplineVector<SplinePoint2d> waypoints = {
-        SplinePoint2d(0.0, 0.0),
-        SplinePoint2d(2.0, 1.0),
-        SplinePoint2d(3.0, 3.0),
-        SplinePoint2d(5.0, 2.0)
-    };
-    
-    // Using time points method
-    std::vector<double> time_points = {0.0, 1.0, 2.0, 3.5};
-    
-    // Set boundary conditions with velocity and acceleration
-    BoundaryConditions<2> boundary;
-    boundary.start_velocity = SplinePoint2d(1.0, 0.5);
-    boundary.start_acceleration = SplinePoint2d(0.0, 0.0);
-    boundary.end_velocity = SplinePoint2d(0.0, -0.5);
-    boundary.end_acceleration = SplinePoint2d(0.0, 0.0);
-    
-    // Create quintic spline (minimum jerk by spline theory)
-    QuinticSpline2D spline(time_points, waypoints, boundary);
-    
-    // Generate trajectory points
-    std::vector<double> eval_times = spline.getTrajectory().generateTimeSequence(0.1);
-    auto positions = spline.getTrajectory().getPos(eval_times);
-    auto velocities = spline.getTrajectory().getVel(eval_times);
-    
-    // Print trajectory
-    for (size_t i = 0; i < eval_times.size(); ++i) {
-        std::cout << "t=" << eval_times[i] 
-                  << " pos=[" << positions[i].transpose() << "]"
-                  << " vel=[" << velocities[i].transpose() << "]\n";
-    }
-    
-    // Calculate trajectory energy (minimum norm by spline theory)
-    double energy = spline.getEnergy();
-    std::cout << "Trajectory energy (minimum jerk norm): " << energy << std::endl;
-    
-    return 0;
-    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. QuinticSplineExample.cpp -o QuinticSplineExample 
-}
-```
-
-### 3D Septic Spline Example (Minimum Snap)
-
-```cpp
-// SepticSplineExample.cpp
 #include <iostream>
 #include <vector>
 #include <Eigen/Dense>
 #include <iomanip>
-#include "SplineTrajectory.hpp"
 
 int main() {
     using namespace SplineTrajectory;
-    
-    // Define waypoints in 3D space
+
+    std::cout << "=== SplineTrajectory Complete Interface Usage Example ===" << std::endl;
+
+    // 1. Define 3D waypoints and boundary conditions
     SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5),
-        SplinePoint3d(6.0, 2.0, 1.5)
+        {0.0, 0.0, 0.0}, {1.0, 2.0, 1.0}, {3.0, 1.0, 2.0}, {4.0, 3.0, 0.5}, {5.0, 0.5, 1.5}
     };
     
-    // Using time points method
-    std::vector<double> time_points = {0.0, 1.0, 2.0, 3.0, 4.5};
-    
-    // Set boundary conditions with velocity, acceleration and jerk
-    BoundaryConditions<3> boundary;
-    boundary.start_velocity = SplinePoint3d(0.5, 0.0, 0.2);
-    boundary.start_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary.start_jerk = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
+    // Define detailed boundary conditions (including velocity, acceleration, jerk)
+    BoundaryConditions<3> boundary; 
+    // or BoundaryConditions<3> boundary(SplinePoint3d(0.1, 0.0, 0.0),SplinePoint3d(0.2, 0.0, 0.1)); default acceleration and jerk are zero
+    boundary.start_velocity = SplinePoint3d(0.1, 0.0, 0.0); // cubic splines only use velocity 
+    boundary.end_velocity = SplinePoint3d(0.2, 0.0, 0.1);
+    boundary.start_acceleration = SplinePoint3d(0.0, 0.0, 0.0);// quintic use velocity and acceleration
     boundary.end_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.start_jerk = SplinePoint3d(0.0, 0.0, 0.0); // septic use velocity, acceleration and jerk
     boundary.end_jerk = SplinePoint3d(0.0, 0.0, 0.0);
+
+    std::cout << "\n--- Construction Methods Comparison ---" << std::endl;
     
-    // Create septic spline (minimum snap by spline theory)
-    SepticSpline3D spline(time_points, waypoints, boundary);
+    // 2. Construct splines using time points (multiple spline types comparison)
+    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0, 6.0};
+    CubicSpline3D cubic_from_points(time_points, waypoints, boundary);
+    QuinticSpline3D quintic_from_points(time_points, waypoints, boundary);
+    SepticSpline3D septic_from_points(time_points, waypoints, boundary);
+
+    // Construct splines using time segments
+    std::vector<double> time_segments = {1.0, 1.5, 1.5, 2.0}; // Segment durations
+    double start_time = 0.0;
+    CubicSpline3D cubic_from_segments(time_segments, waypoints, start_time, boundary);
+    QuinticSpline3D quintic_from_segments(time_segments, waypoints, start_time, boundary);
+    SepticSpline3D septic_from_segments(time_segments, waypoints, start_time, boundary);
+
+    // 3. Update operations example
+    std::cout << "\n--- Update Operations ---" << std::endl;
+    CubicSpline3D spline_for_update;
+    std::cout << "Initial state: " << spline_for_update.isInitialized() << std::endl;
     
-    // Generate trajectory points
-    std::vector<double> eval_times = spline.getTrajectory().generateTimeSequence(0.1);
-    auto positions = spline.getTrajectory().getPos(eval_times);
-    auto velocities = spline.getTrajectory().getVel(eval_times);
-    auto accelerations = spline.getTrajectory().getAcc(eval_times);
-    auto jerks = spline.getTrajectory().getJerk(eval_times);
+    // Update using time points
+    spline_for_update.update(time_points, waypoints, boundary);
+    std::cout << "State after time points update: " << spline_for_update.isInitialized() << std::endl;
     
-    // Print some trajectory points
-    for (size_t i = 0; i < std::min(size_t(10), eval_times.size()); ++i) {
-        std::cout << "t=" << std::fixed << std::setprecision(1) << eval_times[i] 
-                  << " pos=[" << std::setprecision(3) << positions[i].transpose() << "]"
-                  << " vel=[" << velocities[i].transpose() << "]"
-                  << " acc=[" << accelerations[i].transpose() << "]"
-                  << " jerk=[" << jerks[i].transpose() << "]\n";
+    // Update using time segments
+    spline_for_update.update(time_segments, waypoints, start_time, boundary);
+    std::cout << "State after time segments update: " << spline_for_update.isInitialized() << std::endl;
+
+    // 4. Get basic information
+    auto& trajectory = cubic_from_points.getTrajectory();
+    std::cout << "\n--- Basic Information ---" << std::endl;
+    std::cout << "Spline dimension: " << cubic_from_points.getDimension() << std::endl;
+    std::cout << "Start time: " << cubic_from_points.getStartTime() << std::endl;
+    std::cout << "End time: " << cubic_from_points.getEndTime() << std::endl;
+    std::cout << "Trajectory duration: " << cubic_from_points.getDuration() << std::endl;
+    std::cout << "Number of waypoints: " << cubic_from_points.getNumPoints() << std::endl;
+    std::cout << "Number of spline segments: " << cubic_from_points.getNumSegments() << std::endl;
+    std::cout << "Spline order: " << trajectory.getOrder() << std::endl;
+
+    // 5. Single point evaluation - evaluate general interface
+    std::cout << "\n--- Single Point Evaluate General Interface ---" << std::endl;
+    double t_eval = 2.5;
+    auto pos_eval = trajectory.evaluate(t_eval, 0);      // Position (0th derivative)
+    auto vel_eval = trajectory.evaluate(t_eval, 1);      // Velocity (1st derivative)
+    auto acc_eval = trajectory.evaluate(t_eval, 2);      // Acceleration (2nd derivative)
+    auto jerk_eval = trajectory.evaluate(t_eval, 3);     // Jerk (3rd derivative)
+    auto snap_eval = trajectory.evaluate(t_eval, 4);     // Snap (4th derivative)
+    
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "t=" << t_eval << " position: " << pos_eval.transpose() << std::endl;
+    std::cout << "t=" << t_eval << " velocity: " << vel_eval.transpose() << std::endl;
+    std::cout << "t=" << t_eval << " acceleration: " << acc_eval.transpose() << std::endl;
+
+    // 6. Single point evaluation - get series function renamed interface
+    std::cout << "\n--- Single Point Get Series Interface ---" << std::endl;
+    auto pos_get = trajectory.getPos(t_eval);
+    auto vel_get = trajectory.getVel(t_eval);
+    auto acc_get = trajectory.getAcc(t_eval);
+    auto jerk_get = trajectory.getJerk(t_eval);
+    auto snap_get = trajectory.getSnap(t_eval);
+    
+    std::cout << "get interface t=" << t_eval << " position: " << pos_get.transpose() << std::endl;
+    std::cout << "get interface t=" << t_eval << " velocity: " << vel_get.transpose() << std::endl;
+
+    // 7. Batch evaluation - passing vector<double>
+    std::cout << "\n--- Batch Evaluation vector<double> ---" << std::endl;
+    std::vector<double> eval_times = {0.5, 1.5, 2.5, 3.5, 5.0};
+    
+    // evaluate general interface batch evaluation
+    auto pos_batch_eval = trajectory.evaluate(eval_times, 0);
+    auto vel_batch_eval = trajectory.evaluate(eval_times, 1);
+    
+    // get series batch evaluation
+    auto pos_batch_get = trajectory.getPos(eval_times);
+    auto vel_batch_get = trajectory.getVel(eval_times);
+    auto acc_batch_get = trajectory.getAcc(eval_times);
+    auto jerk_batch_get = trajectory.getJerk(eval_times);
+    auto snap_batch_get = trajectory.getSnap(eval_times);
+    
+    std::cout << "Batch evaluation point count: " << pos_batch_get.size() << std::endl;
+    for (size_t i = 0; i < eval_times.size(); ++i) {
+        std::cout << "t=" << eval_times[i] << " position: " << pos_batch_get[i].transpose() << std::endl;
     }
+
+    // 8. Time range evaluation (includes end time) - evaluate with range
+    std::cout << "\n--- Time Range Evaluate ---" << std::endl;
+    double start_t = 0.0, end_t = 6.0, dt = 0.5;
+    auto pos_range_eval = trajectory.evaluate(start_t, end_t, dt, 0);
+    auto vel_range_eval = trajectory.evaluate(start_t, end_t, dt, 1);
     
-    // Calculate trajectory energy (minimum snap norm by spline theory)
-    double energy = spline.getEnergy();
-    std::cout << "Trajectory energy (minimum snap norm): " << energy << std::endl;
+    std::cout << "Range evaluation [" << start_t << ", " << end_t << "], dt=" << dt 
+              << ", point count: " << pos_range_eval.size() << std::endl;
+
+    // 9. Time range evaluation (includes end time) - get series with range
+    std::cout << "\n--- Time Range Get Series ---" << std::endl;
+    auto pos_range_get = trajectory.getPos(start_t, end_t, dt);
+    auto vel_range_get = trajectory.getVel(start_t, end_t, dt);
+    auto acc_range_get = trajectory.getAcc(start_t, end_t, dt);
+    auto jerk_range_get = trajectory.getJerk(start_t, end_t, dt);
+    auto snap_range_get = trajectory.getSnap(start_t, end_t, dt);
     
+    std::cout << "Get series range evaluation point count: " << pos_range_get.size() << std::endl;
+
+    // 10. Generate time sequence (includes trajectory end time)
+    std::cout << "\n--- Generate Time Sequence ---" << std::endl;
+    // Note: generateTimeSequence will include the trajectory end time point
+    auto time_seq_full = trajectory.generateTimeSequence(0.8); // From start to end, dt=0.8
+    auto time_seq_range = trajectory.generateTimeSequence(1.0, 5.0, 0.7); // Specified range, dt=0.7
+    
+    std::cout << "Full time sequence (dt=0.8): " << time_seq_full.size() << " points, last time: " 
+              << time_seq_full.back() << " (trajectory end time: " << trajectory.getEndTime() << ")" << std::endl;
+    std::cout << "Range time sequence (1.0-5.0, dt=0.7): " << time_seq_range.size() << " points, last time: " 
+              << time_seq_range.back() << std::endl;
+
+    // 11. Segmented time sequence (high performance, includes trajectory end time)
+    std::cout << "\n--- Segmented Time Sequence Evaluation ---" << std::endl;
+    // Note: generateSegmentedTimeSequence also includes the trajectory end time point
+    auto segmented_seq = trajectory.generateSegmentedTimeSequence(0.0, 6.0, 0.1);
+    std::cout << "Segmented sequence total point count: " << segmented_seq.getTotalSize() 
+              << " (includes trajectory end time)" << std::endl;
+    std::cout << "Number of segments: " << segmented_seq.segments.size() << std::endl;
+    
+    // Use segmented sequence for high-performance batch evaluation
+    auto pos_segmented_eval = trajectory.evaluateSegmented(segmented_seq, 0);
+    auto vel_segmented_eval = trajectory.evaluateSegmented(segmented_seq, 1);
+    
+    // get series segmented evaluation
+    auto pos_segmented_get = trajectory.getPos(segmented_seq);
+    auto vel_segmented_get = trajectory.getVel(segmented_seq);
+    auto acc_segmented_get = trajectory.getAcc(segmented_seq);
+    auto jerk_segmented_get = trajectory.getJerk(segmented_seq);
+    auto snap_segmented_get = trajectory.getSnap(segmented_seq);
+    
+    std::cout << "Segmented get series evaluation point count: " << pos_segmented_get.size() << std::endl;
+
+    // 12. Trajectory analysis
+    std::cout << "\n--- Trajectory Analysis ---" << std::endl;
+    double traj_length = trajectory.getTrajectoryLength();
+    double traj_length_custom = trajectory.getTrajectoryLength(2.0, 4.0, 0.05);
+    double cumulative_length = trajectory.getCumulativeLength(3.0);
+    
+    std::cout << "Total trajectory length: " << traj_length << std::endl;
+    std::cout << "Segment [2.0, 4.0] length: " << traj_length_custom << std::endl;
+    std::cout << "Cumulative length to t=3.0: " << cumulative_length << std::endl;
+
+    // 13. Derivative trajectories
+    std::cout << "\n--- Derivative Trajectories ---" << std::endl;
+    auto vel_trajectory = trajectory.derivative(1);  // Velocity trajectory (1st derivative)
+    auto acc_trajectory = trajectory.derivative(2);  // Acceleration trajectory (2nd derivative)
+    
+    std::cout << "Velocity trajectory order: " << vel_trajectory.getOrder() << std::endl; // number of coefficients per segment
+    std::cout << "Acceleration trajectory order: " << acc_trajectory.getOrder() << std::endl;
+
+    // 14. Get internal data
+    std::cout << "\n--- Get Internal Data ---" << std::endl;
+    auto space_points = cubic_from_points.getSpacePoints();
+    auto time_segments_data = cubic_from_points.getTimeSegments();
+    auto cumulative_times = cubic_from_points.getCumulativeTimes();
+    auto boundary_conditions = cubic_from_points.getBoundaryConditions();
+    auto trajectory_copy = cubic_from_points.getTrajectoryCopy();
+    auto ppoly_ref = cubic_from_points.getPPoly();
+    
+    std::cout << "Number of spatial points: " << space_points.size() << std::endl;
+    std::cout << "Number of time segments: " << time_segments_data.size() << std::endl;
+    std::cout << "Number of cumulative times: " << cumulative_times.size() << std::endl;
+
+    // 15. Energy calculation
+    std::cout << "\n--- Energy Calculation ---" << std::endl;
+    double cubic_energy = cubic_from_points.getEnergy();
+    double quintic_energy = quintic_from_points.getEnergy();
+    double septic_energy = septic_from_points.getEnergy();
+    
+    std::cout << "Cubic spline energy: " << cubic_energy << std::endl;
+    std::cout << "Quintic spline energy: " << quintic_energy << std::endl;
+    std::cout << "Septic spline energy: " << septic_energy << std::endl;
+
+    // 16. PPolyND static methods
+    std::cout << "\n--- PPolyND Static Methods ---" << std::endl;
+    std::vector<double> test_breakpoints = {0.0, 1.0, 2.0, 3.0};
+    auto zero_poly = PPoly3D::zero(test_breakpoints, 3);
+    SplinePoint3d constant_val(1.0, 2.0, 3.0);
+    auto constant_poly = PPoly3D::constant(test_breakpoints, constant_val);
+    
+    std::cout << "Zero polynomial at t=1.5: " << zero_poly.getPos(1.5).transpose() << std::endl;
+    std::cout << "Constant polynomial at t=1.5: " << constant_poly.getPos(1.5).transpose() << std::endl;
+
+    std::cout << "\n=== Example Complete ===" << std::endl;
     return 0;
-    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SepticSplineExample.cpp -o SepticSplineExample 
+    //g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o SplineTrajectoryExample
 }
 ```
-
-### Using PPolyND Directly
-
-```cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Create a simple 1D polynomial trajectory
-    std::vector<double> breakpoints = {0.0, 1.0, 2.0};
-    
-    // Coefficients for quadratic polynomials (order = 3)
-    // Each segment: p(t) = c0 + c1*t + c2*t^2
-    Eigen::MatrixXd coefficients(6, 1);  // 2 segments * 3 coeffs per segment
-    coefficients << 0.0,  // segment 0: c0
-                    1.0,  // segment 0: c1  
-                    2.0,  // segment 0: c2
-                    0.0,  // segment 1: c0
-                    3.0,  // segment 1: c1
-                    -1.0; // segment 1: c2
-    
-    PPoly1D ppoly(breakpoints, coefficients, 3);
-    
-    // Evaluate at different points
-    for (double t = 0.0; t <= 2.0; t += 0.2) {
-        double pos = ppoly.getPos(t)(0);
-        double vel = ppoly.getVel(t)(0);
-        double acc = ppoly.getAcc(t)(0);
-        
-        std::cout << "t=" << t << " pos=" << pos 
-                  << " vel=" << vel << " acc=" << acc << "\n";
-    }
-    
-    return 0;
-}
-```
-
-## Performance Benchmarks
-
-Run the included benchmarks to compare performance with MINCO:
-
 ```bash
-# Cubic spline performance comparison
-./test_cubic_spline_vs_minco_nd
-
-# Quintic spline performance comparison  
-./test_quintic_spline_vs_minco_nd
-
-# Septic spline performance comparison
-./test_septic_spline_vs_minco_nd
+g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o SplineTrajectoryExample
 ```
 
-*Performance results may vary based on hardware and compiler optimizations*
-
-## Technical Implementation Details
-
-### Block Tridiagonal Solver
-The library uses a specialized Thomas algorithm for solving block tridiagonal systems arising from spline construction:
-
-```cpp
-// Efficient block tridiagonal solver for cubic splines
-template <typename MatType>
-static void solveTridiagonalInPlace(const Eigen::VectorXd &lower,
-                                    const Eigen::VectorXd &main,
-                                    const Eigen::VectorXd &upper,
-                                    MatType &M);
-```
-
-
-### MINCO Energy Equivalence
-The energy calculation matches MINCO's minimum control effort formulation and spline theory's minimum norm:
-
-```cpp
-// Mathematical equivalence:
-// MINCO cost function ≡ Spline minimum norm ≡ Our energy calculation
-double getEnergy() const;
-```
-
-### Template Metaprogramming Benefits
-- **Compile-time optimization**: Template specialization eliminates runtime overhead
-- **Arbitrary dimensions**: Supports any dimensional spline trajectory
-- **Type safety**: Strong typing prevents dimension mismatches
-- **Zero-cost abstractions**: Templates compiled away to optimal machine code
-
-## API Reference
-
-### Main Classes
-
-#### `CubicSplineND<DIM>`
-- **Purpose**: Generates smooth cubic spline trajectories through waypoints (MINCO equivalent, minimum curvature)
-- **Order**: 4th order polynomials (cubic)
-- **Continuity**: C² continuous (position, velocity, acceleration)
-- **Optimization**: Minimizes ∫ ||s''(t)||² dt (minimum norm theorem in spline theory)
-- **Boundary Type**: Clamped splines with prescribed endpoint derivatives
-
-**Key Methods:**
-```cpp
-// Constructor with absolute time points
-CubicSplineND(const std::vector<double>& time_points,
-              const SplineVector<VectorType>& waypoints,
-              const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Constructor with time segments and start time
-CubicSplineND(const std::vector<double>& time_segments,
-              const SplineVector<VectorType>& waypoints,
-              double start_time,
-              const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Update methods for both approaches
-void update(const std::vector<double>& time_points,
-            const SplineVector<VectorType>& waypoints,
-            const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-void update(const std::vector<double>& time_segments,
-            const SplineVector<VectorType>& waypoints,
-            double start_time,
-            const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Get trajectory object
-const PPolyND<DIM>& getTrajectory() const;
-
-// Trajectory properties
-double getEnergy() const;  // Minimum norm energy (MINCO equivalent)
-double getStartTime() const;
-double getEndTime() const;
-```
-
-#### `QuinticSplineND<DIM>`
-- **Purpose**: Generates smooth quintic spline trajectories with higher-order continuity (MINCO equivalent, minimum jerk)
-- **Order**: 6th order polynomials (quintic)
-- **Continuity**: C⁴ continuous (position through jerk)
-- **Optimization**: Minimizes ∫ ||s'''(t)||² dt (minimum norm theorem in spline theory)
-- **Boundary Type**: Clamped splines with prescribed endpoint derivatives up to acceleration
-
-**Key Methods:**
-```cpp
-// Constructor with absolute time points
-QuinticSplineND(const std::vector<double>& time_points,
-                const SplineVector<VectorType>& waypoints,
-                const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Constructor with time segments and start time
-QuinticSplineND(const std::vector<double>& time_segments,
-                const SplineVector<VectorType>& waypoints,
-                double start_time,
-                const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Update methods for both approaches
-void update(const std::vector<double>& time_points,
-            const SplineVector<VectorType>& waypoints,
-            const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-void updateWithSegments(const std::vector<double>& time_segments,
-                        const SplineVector<VectorType>& waypoints,
-                        double start_time,
-                        const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Get trajectory object
-const PPolyND<DIM>& getTrajectory() const;
-
-// Energy calculation (minimum norm, MINCO equivalent)
-double getEnergy() const;
-```
-
-#### `SepticSplineND<DIM>`
-- **Purpose**: Generates ultra-smooth septic spline trajectories with highest-order continuity (MinSnap equivalent, minimum snap)
-- **Order**: 8th order polynomials (septic)
-- **Continuity**: C⁶ continuous (position through 6th-order derivatives)
-- **Optimization**: Minimizes ∫ ||s⁽⁴⁾(t)||² dt (minimum norm theorem in spline theory)
-- **Boundary Type**: Clamped splines with prescribed endpoint derivatives up to jerk
-- **Applications**: High-precision robot trajectories, smooth camera motion, precision manufacturing
-
-**Key Methods:**
-```cpp
-// Constructor with absolute time points
-SepticSplineND(const std::vector<double>& time_points,
-               const SplineVector<VectorType>& waypoints,
-               const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Constructor with time segments and start time
-SepticSplineND(const std::vector<double>& time_segments,
-               const SplineVector<VectorType>& waypoints,
-               double start_time,
-               const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Update methods for both approaches
-void update(const std::vector<double>& time_points,
-            const SplineVector<VectorType>& waypoints,
-            const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-void updateWithSegments(const std::vector<double>& time_segments,
-                        const SplineVector<VectorType>& waypoints,
-                        double start_time,
-                        const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// Get trajectory object
-const PPolyND<DIM>& getTrajectory() const;
-
-// Energy calculation (minimum snap norm, MinSnap equivalent)
-double getEnergy() const;
-```
-
-#### `PPolyND<DIM>`
-- **Purpose**: N-dimensional piecewise polynomial representation
-- **Evaluation**: Efficient polynomial evaluation with caching and segmented batch processing
-
-**Key Methods:**
-```cpp
-// Single point evaluation
-VectorType evaluate(double t, int derivative_order = 0) const;
-
-// Batch evaluation
-SplineVector<VectorType> evaluate(const std::vector<double>& times, 
-                                  int derivative_order = 0) const;
-SplineVector<VectorType> evaluate(double start_t, double end_t, double dt,
-                                         int derivative_order = 0) const;
-
-// High-performance segmented evaluation
-SegmentedTimeSeq generateSegmentedTimeSequence(double start_t, double end_t, double dt) const;
-SplineVector<VectorType> evaluateSegmented(const SegmentedTimeSeq& segmented_seq, 
-                                           int derivative_order = 0) const;
-
-// Convenience methods
-VectorType getPos(double t) const;    // Position
-VectorType getVel(double t) const;    // Velocity
-VectorType getAcc(double t) const;    // Acceleration
-VectorType getJerk(double t) const;   // Jerk
-VectorType getSnap(double t) const;   // Snap
-
-// Trajectory analysis
-double getTrajectoryLength(double dt = 0.01) const;
-PPolyND derivative(int derivative_order = 1) const;
-```
-
-### Time Parameter Conversion
-
-The library internally converts between time points and time segments:
-
-```cpp
-// Converting time points to segments:
-// time_points = [0.0, 1.0, 2.5, 4.0]
-// becomes time_segments = [1.0, 1.5, 1.5] with start_time = 0.0
-
-// Converting segments to time points:
-// time_segments = [1.0, 1.5, 1.5] with start_time = 0.0
-// becomes time_points = [0.0, 1.0, 2.5, 4.0]
-```
-
-### Boundary Conditions (Clamped Splines)
-
-```cpp
-template<int DIM>
-struct BoundaryConditions {
-    VectorType start_velocity;
-    VectorType start_acceleration;
-    VectorType start_jerk;
-    VectorType end_velocity;
-    VectorType end_acceleration;
-    VectorType end_jerk;
-    
-    // Constructors for different boundary condition types
-    BoundaryConditions();  // Zero boundary conditions 
-    BoundaryConditions(const VectorType& start_vel, const VectorType& end_vel);
-    BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
-                       const VectorType& end_vel, const VectorType& end_acc);
-    BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
-                       const VectorType& end_vel, const VectorType& end_acc,
-                       const VectorType& start_jerk, const VectorType& end_jerk);
-};
-```
-
-### Type Aliases
-
-```cpp
-// Vector types
-using SplinePoint1d = Eigen::Matrix<double, 1, 1>;
-using SplinePoint2d = Eigen::Matrix<double, 2, 1>;
-using SplinePoint3d = Eigen::Matrix<double, 3, 1>;
-// ... up to SplineVector10d (extensible to any dimension)
-
-// Spline types
-using CubicSpline1D = CubicSplineND<1>;
-using CubicSpline2D = CubicSplineND<2>;
-using CubicSpline3D = CubicSplineND<3>;
-// ... up to CubicSpline10D
-
-using QuinticSpline1D = QuinticSplineND<1>;
-using QuinticSpline2D = QuinticSplineND<2>;
-using QuinticSpline3D = QuinticSplineND<3>;
-// ... up to QuinticSpline10D
-
-using SepticSpline1D = SepticSplineND<1>;
-using SepticSpline2D = SepticSplineND<2>;
-using SepticSpline3D = SepticSplineND<3>;
-// ... up to SepticSpline10D
-
-// PPoly types
-using PPoly1D = PPolyND<1>;
-using PPoly2D = PPolyND<2>;
-using PPoly3D = PPolyND<3>;
-// ... up to PPoly10D
-```
-
-## Advanced Usage
-
-### Time Parameterization Comparison
-
-```cpp
-// Both methods produce identical results:
-
-// Method 1: Time points
-std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
-CubicSpline3D spline1(time_points, waypoints, boundary);
-
-// Method 2: Time segments + start time
-std::vector<double> time_segments = {1.0, 1.5, 1.5};
-double start_time = 0.0;
-CubicSpline3D spline2(time_segments, waypoints, start_time, boundary);
-
-// Verify they're identical
-assert(spline1.getStartTime() == spline2.getStartTime());
-assert(spline1.getEndTime() == spline2.getEndTime());
-```
-
-### Dynamic Trajectory Updates
-
-```cpp
-CubicSpline3D spline;
-
-// Initial trajectory with time points
-std::vector<double> time_points = {0.0, 1.0, 2.0};
-spline.update(time_points, waypoints, boundary);
-
-// update with time segments
-std::vector<double> time_segments = {0.8, 1.2};
-spline.update(time_segments, new_waypoints, 0.5, new_boundary);
-```
-
-### Trajectory Optimization (Spline Theory + MINCO Equivalent)
-
-```cpp
-// Compare different spline types for minimum norm solutions
-SplineVector<SplinePoint3d> waypoints = {/* your waypoints */};
-std::vector<double> times = {/* your time points */};
-
-CubicSpline3D cubic_spline(times, waypoints);
-QuinticSpline3D quintic_spline(times, waypoints);
-SepticSpline3D septic_spline(times, waypoints);
-
-// These energy values correspond to:
-// - Spline theory: minimum norm solutions
-// - MINCO: minimum control effort solutions  
-double cubic_energy = cubic_spline.getEnergy();    // minimum acceleration
-double quintic_energy = quintic_spline.getEnergy(); // minimum jerk
-double septic_energy = septic_spline.getEnergy();   // minimum snap
-
-std::cout << "Cubic spline energy (min curvature): " << cubic_energy << std::endl;
-std::cout << "Quintic spline energy (min jerk): " << quintic_energy << std::endl;
-std::cout << "Septic spline energy (min snap): " << septic_energy << std::endl;
-```
-
-### High-Performance Segmented Evaluation
-
-```cpp
-// For high-frequency evaluation, use segmented evaluation (faster than MINCO)
-auto segmented_seq = ppoly.generateSegmentedTimeSequence(0.0, 10.0, 0.001);
-auto positions = ppoly.evaluateSegmented(segmented_seq, 0);  // positions
-auto velocities = ppoly.evaluateSegmented(segmented_seq, 1); // velocities
-auto accelerations = ppoly.evaluateSegmented(segmented_seq, 2); // accelerations
-
-```
-
-### Arbitrary Dimensional Splines
-
-```cpp
-// Example: 7D robot with 7 DOF
-constexpr int DOF = 7;
-using SplinePoint7d = Eigen::Matrix<double, DOF, 1>;
-using CubicSpline7D = CubicSplineND<DOF>;
-
-SplineVector<SplinePoint7d> joint_waypoints = {
-    SplinePoint7d::Random(),
-    SplinePoint7d::Random(),
-    SplinePoint7d::Random()
-};
-
-std::vector<double> times = {0.0, 1.0, 2.0};
-CubicSpline7D robot_trajectory(times, joint_waypoints);
-
-// Template metaprogramming automatically handles any dimension
-```
-
-## Applications
-
-- **Robotics**: Robot arm trajectory planning, mobile robot path following
-- **Animation**: Smooth keyframe interpolation
-- **CAD/CAM**: Tool path generation for CNC machines
-- **Autonomous Vehicles**: Path planning and trajectory generation
-- **Drones**: Flight path planning with smooth transitions
-- **Research**: MINCO-equivalent trajectory optimization with better performance
-- **Control Theory**: Minimum control effort trajectory generation
-
-## Performance Notes
-
-- **Thomas Algorithm**: Uses specialized block tridiagonal solver (faster than LU decomposition)
-- **Segmented Evaluation**: Optimized batch evaluation functions for high-frequency sampling
-- **Template Optimization**: Compile-time optimization through template metaprogramming
-- **Memory Efficiency**: Cache-friendly memory access patterns
-- **Vectorization**: Leverages Eigen's SIMD optimizations
-- **Mathematical Optimality**: Provably optimal solutions by minimum norm theorem
-- **MINCO Equivalent**: Same mathematical formulation as MINCO but with superior implementation
-
-## Comparison with MINCO
-
-| Feature | SplineTrajectory | MINCO |
-|---------|------------------|-------|
-| **Mathematical Foundation** | **Spline Theory + Minimum Norm** | Minimum Control Effort |
-| **Spline Type** | **Clamped Polynomial Splines** |Clamped Polynomial Trajectories |
-| **Algorithm** | **Thomas Algorithm** | LU Decomposition |
-| **Performance** | **2-3x faster** | Baseline |
-| **Memory Usage** | **Lower** | Higher |
-| **Batch Evaluation** | **Optimized** | Standard |
-| **Template Support** | **Full templated** | Limited |
-| **Dimensions** | **Arbitrary** | Fixed |
-| **Energy Calculation** | **Identical (Minimum Norm)** | Reference |
-| **Theoretical Basis** | **Classical Spline Theory** | Control Theory |
-
-## Building Examples and Tests
-
-```bash
-git clone https://github.com/Bziyue/SplineTrajectory.git
-# git clone git@github.com:Bziyue/SplineTrajectory.git
-sudo apt install libeigen3-dev
-cd SplineTrajectory
-mkdir build && cd build
-cmake ..
-make
-
-# Run performance benchmarks
-./test_cubic_spline_vs_minco_nd
-./test_quintic_spline_vs_minco_nd
-./test_septic_spline_vs_minco_nd
-
-# Run examples
-./basic_cubic_spline
-./quintic_spline_comparison
-./robot_trajectory_planning
-./test_with_min_jerk_3d
-./test_with_min_snap_3d
-```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-### Development Guidelines
-- Maintain MINCO mathematical equivalence
-- Preserve spline theory foundations
-- Maintain template metaprogramming benefits
-- Add comprehensive benchmarks for new features
-- Follow Eigen coding conventions
-
+---
 ## Future Plans
-- [ ] Add a gradient propagation mechanism equivalent to MINCO
-- [x] Implement support for clamped 7th-order splines (Septic Spline, Minimum Snap)
-- [ ] Implement support for N-dimensional Non-Uniform B-Splines
-- [ ] Implement support for the exact conversion from clamped splines to Non-Uniform B-Splines
 
+[ ] Add a gradient propagation mechanism equivalent to MINCO
+    
+[x] Implement support for clamped 7th-order splines (Septic Spline, Minimum Snap)
+    
+[ ] Implement support for N-dimensional Non-Uniform B-Splines
+    
+[ ] Implement support for the exact conversion from clamped splines to Non-Uniform B-Splines
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

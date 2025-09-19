@@ -1,826 +1,310 @@
 # SplineTrajectory
 
-一个高性能的 C++ 库，用于在 N 维空间中生成平滑的样条轨迹，集成 Eigen 库。该库提供**MINCO 等效**的三次、五次、七次样条插值，支持边界条件，非常适合机器人学、路径规划和轨迹生成应用。
+SplineTrajectory 是一个高性能、纯头文件的 C++ 库，用于生成平滑的N维样条轨迹。该库提供了与 **MINCO 等效** 的三次、五次和七次样条插值，并支持边界条件，是机器人学、路径规划和轨迹生成应用的理想选择。
 
 [English](README.md) | **中文**
 
-## 理论背景
+## 核心特性
 
-### MINCO 与样条理论等效性
+- **与MINCO等效**: 实现与MINCO相同的最小化加速度、加加速度(Jerk)和加加加速度(Snap)轨迹。   
+- **高性能**: 使用专门的 **块三对角矩阵求解器** (托马斯算法) 代替通用的LU分解，性能超越传统方法。
+- **基于模板**: 完全模板化，支持 **任意维度** (1D到ND)，并进行编译时优化。
+- **灵活高效**: 支持多种时间规格，优化的分段批量求值，并提供导数 (速度、加速度、Jerk、Snap)。
+- **集成Eigen**: 无缝使用 Eigen 库进行所有线性代数运算。
+- **纯头文件**: 只需包含头文件即可轻松集成到任何项目中。
 
-**MINCO（最小控制作用）**基本上基于具有特定边界条件的**夹持多项式样条**。关键理论见解包括：
-
-1. **夹持多项式样条**：MINCO 使用具有规定边界条件的分段多项式（夹持样条）构造轨迹，确保跨段的连续性和平滑性。
-
-2. **最小范数定理**：MINCO 中的"最小控制作用"优化直接对应于经典样条理论中的**最小范数定理**：
-   - 对于三次样条：最小化 ∫ ||f''(t)||² dt（最小加速度）
-   - 对于五次样条：最小化 ∫ ||f'''(t)||² dt（最小加加速度）
-   - 对于七次样条：最小化 ∫ ||f''''(t)||² dt（最小加加加速度）
-
-3. **数学等效性**：MINCO 的成本函数优化等效于找到在所有插值函数中最小化指定范数的自然样条。
-
-4. **最优性**：根据最小范数定理，这些样条在数学上是最优的——在维持相同边界条件的情况下，没有其他插值曲线能够实现更低的控制作用。
-
-该库实现了与 MINCO 相同的数学基础，但具有更优的计算算法和基于模板的优化。
-
-## 核心技术特性
-
-- **MINCO 等效构造**：实现与 MINCO 相同的最小控制作用轨迹优化
-- **经典样条理论**：基于夹持多项式样条和最小范数定理
-- **块三对角矩阵求解器**：使用托马斯算法的高效块三对角矩阵构造
-- **比 MINCO 更快**：通过专用算法超越 MINCO 的 LU 分解方法
-- **分段批量评估**：针对高频采样的优化批量评估函数
-- **模板元编程**：支持任意维度样条轨迹的完整基于模板的实现
-- **缓存优化**：针对重复评估的高级缓存机制
-
-## 特性
-
-- **多维样条**：支持开箱即用的 1D 到 10D 样条（可扩展到任何维度）
-- **多种样条类型**：三次、五次和七次样条插值
-- **灵活的时间规范**：支持绝对时间点和相对时间段
-- **边界条件**：可配置的起始/结束速度和加速度约束（夹持样条）
-- **高效评估**：带缓存和分段批处理的优化多项式评估
-- **导数**：内置支持位置、速度、加速度、加加速度和加加加速度
-- **能量优化**：用于轨迹优化的内置能量计算（最小范数）
-- **Eigen 集成**：与 Eigen 库的无缝集成用于线性代数
-- **纯头文件**：易于集成到现有项目中
-
-## 数学基础
-
-### 样条理论背景
-
-该库基于经典的**插值样条理论**：
-
-#### 三次样条（4阶）
-- **插值**：精确通过所有路径点
-- **连续性**：C² 连续（位置、速度、加速度）
-- **边界条件**：具有规定端点导数的夹持样条
-- **最优性**：在所有 C² 插值函数中最小化 ∫₀ᵀ ||s''(t)||² dt
-- **物理意义**：最小弯曲能量（如薄弹性梁）
-
-#### 五次样条（6阶）
-- **插值**：精确通过所有路径点
-- **连续性**：C⁴ 连续（位置到急动度）
-- **边界条件**：具有规定端点导数（到加速度）的夹持样条
-- **最优性**：在所有 C⁴ 插值函数中最小化 ∫₀ᵀ ||s'''(t)||² dt
-- **物理意义**：最小急动度能量（比三次样条更平滑）
-
-#### 七次样条（8阶）
-- **插值**：精确通过所有路径点
-- **连续性**：C⁶ 连续（位置到6阶导数）
-- **边界条件**：具有规定端点导数（到急动度）的夹持样条
-- **最优性**：在所有 C⁶ 插值函数中最小化 ∫₀ᵀ ||s⁽⁴⁾(t)||² dt（最小Snap）
-- **物理意义**：最小Snap能量（比五次样条更平滑，用于高精度机器人轨迹）
-
-### MINCO 关系
-
-```cpp
-// MINCO 三次样条的成本函数：
-// J = ∫₀ᵀ ||acceleration(t)||² dt
-double cubic_energy = spline.getEnergy();  // 与 MINCO 相同
-
-// MINCO 五次样条的成本函数：
-// J = ∫₀ᵀ ||jerk(t)||² dt
-double quintic_energy = spline.getEnergy(); // 与 MINCO 相同
-```
-
-**关键说明**：MINCO 的"最小控制作用"在数学上等效于样条理论中的最小范数定理——两者都找到最小化指定能量函数的唯一插值样条。
-
-## 相对于 MINCO 的性能优势
-
-1. **托马斯算法**：对块三对角系统使用专用托马斯算法而不是通用 LU 分解
-2. **分段评估**：优化的批量评估函数减少计算开销
-3. **模板特化**：通过模板元编程的编译时优化
-4. **内存效率**：优化的内存布局和缓存策略
-5. **向量化操作**：利用 Eigen 的向量化能力
-
-## 系统要求
+## 环境要求
 
 - C++11 或更高版本
 - Eigen 3.3 或更高版本
-- CMake 3.10+（用于构建示例和测试）
-
-## 快速安装和测试
-
-```bash
-git clone https://github.com/Bziyue/SplineTrajectory.git
-# git clone git@github.com:Bziyue/SplineTrajectory.git
-# 安装 Eigen3
-sudo apt install libeigen3-dev
-
-# 构建和测试
-mkdir build
-cd build
-cmake ..
-make
-
-# 运行性能比较
-./test_cubic_spline_vs_minco_nd
-./test_quintic_spline_vs_minco_nd
-./test_septic_spline_vs_minco_nd
-
-# 运行示例
-./basic_cubic_spline
-./quintic_spline_comparison
-./robot_trajectory_planning
-./test_with_min_jerk_3d
-./test_with_min_snap_3d
-```
-在和[large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer)的比较中SplineTrajectory依然在轨迹构造和求值中性能更优，运行“./test_with_min_jerk_3d”查看测试结果。
-## 安装
-
-由于这是一个纯头文件库，只需在项目中包含头文件：
-
-```cpp
-#include "SplineTrajectory.hpp"
-```
-
-## 时间参数规范
-
-该库支持两种指定时间的方法：
-
-### 方法1：绝对时间点
-指定每个路径点的绝对时间：
-```cpp
-std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0, 6.0};
-CubicSpline3D spline(time_points, waypoints, boundary_conditions);
-```
-
-### 方法2：时间段加起始时间
-指定每段的持续时间加起始时间：
-```cpp
-std::vector<double> time_segments = {1.0, 1.5, 1.5, 2.0};  // 每段持续时间
-double start_time = 0.0;
-CubicSpline3D spline(time_segments, waypoints, start_time, boundary_conditions);
-```
-
-两种方法产生相同的结果——选择最适合你应用的方法。
+- CMake 3.10+ (用于编译示例和测试)
 
 ## 快速开始
 
-### 基本 3D 三次样条与时间点
-
-```cpp
-//test_cubic.cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Define waypoints in 3D space
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5)
-    };
-    
-    // Method 1: Using absolute time points
-    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
-    
-    // Create boundary conditions for clamped spline
-    BoundaryConditions<3> boundary_conditions;
-    boundary_conditions.start_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary_conditions.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    
-    // Create cubic spline (minimum curvature by spline theory)
-    CubicSpline3D spline(time_points, waypoints, boundary_conditions);
-    
-    // Evaluate at specific time
-    double t = 1.5;
-    SplinePoint3d position = spline.getTrajectory().getPos(t);
-    SplinePoint3d velocity = spline.getTrajectory().getVel(t);
-    SplinePoint3d acceleration = spline.getTrajectory().getAcc(t);
-    
-    std::cout << "At t = " << t << ":\n";
-    std::cout << "Position: " << position.transpose() << "\n";
-    std::cout << "Velocity: " << velocity.transpose() << "\n";
-    std::cout << "Acceleration: " << acceleration.transpose() << "\n";
-    
-    return 0;
-}
-// g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. test_cubic.cpp -o test_cubic
-```
-
-### 最小范数演示
-
-```cpp
-// MinimumNorm.cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Create waypoints
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5)
-    };
-    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
-    
-    // Zero boundary conditions (natural spline)
-    BoundaryConditions<3> natural_boundary;
-    natural_boundary.start_velocity = SplinePoint3d::Zero();
-    natural_boundary.end_velocity = SplinePoint3d::Zero();
-    
-    // Compare cubic and quintic minimum norms
-    CubicSpline3D cubic_spline(time_points, waypoints, natural_boundary);
-    QuinticSpline3D quintic_spline(time_points, waypoints, natural_boundary);
-    
-    // These represent minimum norm solutions by spline theory
-    double cubic_min_norm = cubic_spline.getEnergy();    
-    double quintic_min_norm = quintic_spline.getEnergy(); 
-    
-    std::cout << "Cubic spline minimum norm (Acceleration): " << cubic_min_norm << std::endl;
-    std::cout << "Quintic spline minimum norm (jerk): " << quintic_min_norm << std::endl;
-    
-    return 0;
-    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. MinimumNorm.cpp -o MinimumNorm 
-}
-```
-
-### 高性能批量评估
-
-```cpp
-// PerformanceEval.cpp
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Create a trajectory
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5)
-    };
-    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
-    CubicSpline3D spline(time_points, waypoints);
-    
-    // High-performance segmented evaluation
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    // Generate segmented time sequence for optimal performance
-    auto segmented_seq = spline.getTrajectory().generateSegmentedTimeSequence(0.0, 4.0, 0.001);
-    auto positions = spline.getTrajectory().evaluateSegmented(segmented_seq, 0);
-    auto velocities = spline.getTrajectory().evaluateSegmented(segmented_seq, 1);
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    
-    std::cout << "Evaluated " << positions.size() << " points in " 
-              << duration.count() << " microseconds" << std::endl;
-    std::cout << "Performance: " << positions.size() / (duration.count() / 1000.0) 
-              << " evaluations per millisecond" << std::endl;
-    
-    return 0;
-    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. PerformanceEval.cpp -o PerformanceEval  
-}
-```
-
-### 使用时间段（替代构造方法）
-
-```cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Same waypoints as before
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5)
-    };
-    
-    // Method 2: Using time segments and start time
-    std::vector<double> time_segments = {1.0, 1.5, 1.5};  // Duration between waypoints
-    double start_time = 0.0;
-    
-    BoundaryConditions<3> boundary_conditions;
-    boundary_conditions.start_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary_conditions.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    
-    // Create cubic spline using time segments
-    CubicSpline3D spline(time_segments, waypoints, start_time, boundary_conditions);
-    
-    // This produces identical results to the time points method above
-    double t = 1.5;
-    SplinePoint3d position = spline.getTrajectory().getPos(t);
-    
-    std::cout << "At t = " << t << ":\n";
-    std::cout << "Position: " << position.transpose() << "\n";
-    
-    return 0;
-}
-```
-
-### 2D 五次样条示例
-
-```cpp
-// QuinticSplineExample.cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Define waypoints in 2D space
-    SplineVector<SplinePoint2d> waypoints = {
-        SplinePoint2d(0.0, 0.0),
-        SplinePoint2d(2.0, 1.0),
-        SplinePoint2d(3.0, 3.0),
-        SplinePoint2d(5.0, 2.0)
-    };
-    
-    // Using time points method
-    std::vector<double> time_points = {0.0, 1.0, 2.0, 3.5};
-    
-    // Set boundary conditions with velocity and acceleration
-    BoundaryConditions<2> boundary;
-    boundary.start_velocity = SplinePoint2d(1.0, 0.5);
-    boundary.start_acceleration = SplinePoint2d(0.0, 0.0);
-    boundary.end_velocity = SplinePoint2d(0.0, -0.5);
-    boundary.end_acceleration = SplinePoint2d(0.0, 0.0);
-    
-    // Create quintic spline (minimum jerk by spline theory)
-    QuinticSpline2D spline(time_points, waypoints, boundary);
-    
-    // Generate trajectory points
-    std::vector<double> eval_times = spline.getTrajectory().generateTimeSequence(0.1);
-    auto positions = spline.getTrajectory().getPos(eval_times);
-    auto velocities = spline.getTrajectory().getVel(eval_times);
-    
-    // Print trajectory
-    for (size_t i = 0; i < eval_times.size(); ++i) {
-        std::cout << "t=" << eval_times[i] 
-                  << " pos=[" << positions[i].transpose() << "]"
-                  << " vel=[" << velocities[i].transpose() << "]\n";
-    }
-    
-    // Calculate trajectory energy (minimum norm by spline theory)
-    double energy = spline.getEnergy();
-    std::cout << "Trajectory energy (minimum jerk norm): " << energy << std::endl;
-    
-    return 0;
-    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. QuinticSplineExample.cpp -o QuinticSplineExample 
-}
-```
-
-### 3D 七次样条示例（最小Snap）
-
-```cpp
-// SepticSplineExample.cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include <iomanip>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Define waypoints in 3D space
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),
-        SplinePoint3d(1.0, 2.0, 1.0),
-        SplinePoint3d(3.0, 1.0, 2.0),
-        SplinePoint3d(4.0, 3.0, 0.5),
-        SplinePoint3d(6.0, 2.0, 1.5)
-    };
-    
-    // Using time points method
-    std::vector<double> time_points = {0.0, 1.0, 2.0, 3.0, 4.5};
-    
-    // Set boundary conditions with velocity, acceleration and jerk
-    BoundaryConditions<3> boundary;
-    boundary.start_velocity = SplinePoint3d(0.5, 0.0, 0.2);
-    boundary.start_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary.start_jerk = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary.end_velocity = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary.end_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary.end_jerk = SplinePoint3d(0.0, 0.0, 0.0);
-    
-    // Create septic spline (minimum snap by spline theory)
-    SepticSpline3D spline(time_points, waypoints, boundary);
-    
-    // Generate trajectory points
-    std::vector<double> eval_times = spline.getTrajectory().generateTimeSequence(0.1);
-    auto positions = spline.getTrajectory().getPos(eval_times);
-    auto velocities = spline.getTrajectory().getVel(eval_times);
-    auto accelerations = spline.getTrajectory().getAcc(eval_times);
-    auto jerks = spline.getTrajectory().getJerk(eval_times);
-    
-    // Print some trajectory points
-    for (size_t i = 0; i < std::min(size_t(10), eval_times.size()); ++i) {
-        std::cout << "t=" << std::fixed << std::setprecision(1) << eval_times[i] 
-                  << " pos=[" << std::setprecision(3) << positions[i].transpose() << "]"
-                  << " vel=[" << velocities[i].transpose() << "]"
-                  << " acc=[" << accelerations[i].transpose() << "]"
-                  << " jerk=[" << jerks[i].transpose() << "]\n";
-    }
-    
-    // Calculate trajectory energy (minimum snap norm by spline theory)
-    double energy = spline.getEnergy();
-    std::cout << "Trajectory energy (minimum snap norm): " << energy << std::endl;
-    
-    return 0;
-    // g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SepticSplineExample.cpp -o SepticSplineExample 
-}
-```
-
-### 直接使用 PPolyND
-
-```cpp
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include "SplineTrajectory.hpp"
-
-int main() {
-    using namespace SplineTrajectory;
-    
-    // Create a simple 1D polynomial trajectory
-    std::vector<double> breakpoints = {0.0, 1.0, 2.0};
-    
-    // Coefficients for quadratic polynomials (order = 3)
-    // Each segment: p(t) = c0 + c1*t + c2*t^2
-    Eigen::MatrixXd coefficients(6, 1);  // 2 segments * 3 coeffs per segment
-    coefficients << 0.0,  // segment 0: c0
-                    1.0,  // segment 0: c1  
-                    2.0,  // segment 0: c2
-                    0.0,  // segment 1: c0
-                    3.0,  // segment 1: c1
-                    -1.0; // segment 1: c2
-    
-    PPoly1D ppoly(breakpoints, coefficients, 3);
-    
-    // Evaluate at different points
-    for (double t = 0.0; t <= 2.0; t += 0.2) {
-        double pos = ppoly.getPos(t)(0);
-        double vel = ppoly.getVel(t)(0);
-        double acc = ppoly.getAcc(t)(0);
-        
-        std::cout << "t=" << t << " pos=" << pos 
-                  << " vel=" << vel << " acc=" << acc << "\n";
-    }
-    
-    return 0;
-}
-```
-
-## 性能基准测试
-
-运行包含的基准测试来与 MINCO 比较性能：
-
 ```bash
-# 三次样条性能比较
-./test_cubic_spline_vs_minco_nd
-
-# 五次样条性能比较
-./test_quintic_spline_vs_minco_nd
-
-# 七次样条性能比较测试
-./test_septic_spline_vs_minco_nd
-```
-
-*性能结果可能因硬件和编译器优化而异*
-
-## 技术实现细节
-
-### 块三对角求解器
-该库使用专用的托马斯算法求解样条构造中的块三对角系统：
-
-```cpp
-// 三次样条的高效块三对角求解器
-template <typename MatType>
-static void solveTridiagonalInPlace(const Eigen::VectorXd &lower,
-                                    const Eigen::VectorXd &main,
-                                    const Eigen::VectorXd &upper,
-                                    MatType &M);
-```
-
-### MINCO 能量等效性
-能量计算与 MINCO 的最小控制作用公式和样条理论的最小范数匹配：
-
-```cpp
-// 数学等效性：
-// MINCO 成本函数 ≡ 样条最小范数 ≡ 我们的能量计算
-double getEnergy() const;
-```
-
-### 模板元编程优势
-- **编译时优化**：模板特化消除运行时开销
-- **任意维度**：支持任何维度的样条轨迹
-- **类型安全**：强类型防止维度不匹配
-- **零成本抽象**：模板编译为最优机器代码
-
-## API 参考
-
-### 主要类
-
-#### `CubicSplineND<DIM>`
-- **目的**：通过路径点生成平滑的三次样条轨迹（MINCO 等效，最小曲率）
-- **阶数**：4阶多项式（三次）
-- **连续性**：C² 连续（位置、速度、加速度）
-- **优化**：最小化 ∫ ||s''(t)||² dt（样条理论中的最小范数定理）
-- **边界类型**：具有规定端点导数的夹持样条
-
-**关键方法：**
-```cpp
-// 使用绝对时间点的构造函数
-CubicSplineND(const std::vector<double>& time_points,
-              const SplineVector<VectorType>& waypoints,
-              const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// 使用时间段和起始时间的构造函数
-CubicSplineND(const std::vector<double>& time_segments,
-              const SplineVector<VectorType>& waypoints,
-              double start_time,
-              const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// 两种方法的更新方法
-void update(const std::vector<double>& time_points,
-            const SplineVector<VectorType>& waypoints,
-            const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-void update(const std::vector<double>& time_segments,
-            const SplineVector<VectorType>& waypoints,
-            double start_time,
-            const BoundaryConditions<DIM>& boundary = BoundaryConditions<DIM>());
-
-// 获取轨迹对象
-const PPolyND<DIM>& getTrajectory() const;
-
-// 轨迹属性
-double getEnergy() const;  // 最小范数能量（MINCO 等效）
-double getStartTime() const;
-double getEndTime() const;
-```
-
-#### `QuinticSplineND<DIM>`
-- **目的**：生成具有高阶连续性的平滑五次样条轨迹（MINCO 等效，最小急动度）
-- **阶数**：6阶多项式（五次）
-- **连续性**：C⁴ 连续（位置到Snap）
-- **优化**：最小化 ∫ ||s'''(t)||² dt（样条理论中的最小范数定理）
-- **边界类型**：具有规定端点导数（到加速度）的夹持样条
-
-#### `SepticSplineND<DIM>`
-- **目的**：生成最高阶连续性的超平滑七次样条轨迹（MinSnap 等效，最小Snap）
-- **阶数**：8阶多项式（七次）
-- **连续性**：C⁶ 连续（位置到6阶导数）
-- **优化**：最小化 ∫ ||s⁽⁴⁾(t)||² dt（样条理论中的最小范数定理）
-- **边界类型**：具有规定端点导数（到急动度）的夹持样条
-- **应用**：高精度机器人轨迹、平滑的相机运动、精密制造
-
-#### `PPolyND<DIM>`
-- **目的**：N 维分段多项式表示
-- **评估**：具有缓存和分段批处理的高效多项式评估
-
-### 边界条件（夹持样条）
-
-```cpp
-template<int DIM>
-struct BoundaryConditions {
-    VectorType start_velocity;
-    VectorType start_acceleration;
-    VectorType start_jerk;
-    VectorType end_velocity;
-    VectorType end_acceleration;
-    VectorType end_jerk;
-    
-    // 不同边界条件类型的构造函数
-    BoundaryConditions();  // 零边界条件
-    BoundaryConditions(const VectorType& start_vel, const VectorType& end_vel);
-    BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
-                       const VectorType& end_vel, const VectorType& end_acc);
-    BoundaryConditions(const VectorType& start_vel, const VectorType& start_acc,
-                       const VectorType& end_vel, const VectorType& end_acc,
-                       const VectorType& start_jerk, const VectorType& end_jerk);
-};
-```
-
-### 类型别名
-
-```cpp
-// 向量类型
-using SplinePoint1d = Eigen::Matrix<double, 1, 1>;
-using SplinePoint2d = Eigen::Matrix<double, 2, 1>;
-using SplinePoint3d = Eigen::Matrix<double, 3, 1>;
-// ... 到 SplineVector10d（可扩展到任何维度）
-
-// 样条类型
-using CubicSpline1D = CubicSplineND<1>;
-using CubicSpline2D = CubicSplineND<2>;
-using CubicSpline3D = CubicSplineND<3>;
-// ... 到 CubicSpline10D
-
-using QuinticSpline1D = QuinticSplineND<1>;
-using QuinticSpline2D = QuinticSplineND<2>;
-using QuinticSpline3D = QuinticSplineND<3>;
-// ... 到 QuinticSpline10D
-
-using SepticSpline1D = SepticSplineND<1>;
-using SepticSpline2D = SepticSplineND<2>;
-using SepticSpline3D = SepticSplineND<3>;
-// ... 到 SepticSpline10D
-
-// PPoly 类型
-using PPoly1D = PPolyND<1>;
-using PPoly2D = PPolyND<2>;
-using PPoly3D = PPolyND<3>;
-// ... 到 PPoly10D
-```
-
-## 高级用法
-
-### 时间参数化比较
-
-```cpp
-// 两种方法产生相同的结果：
-
-// 方法1：时间点
-std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0};
-CubicSpline3D spline1(time_points, waypoints, boundary);
-
-// 方法2：时间段 + 起始时间
-std::vector<double> time_segments = {1.0, 1.5, 1.5};
-double start_time = 0.0;
-CubicSpline3D spline2(time_segments, waypoints, start_time, boundary);
-
-// 验证它们是相同的
-assert(spline1.getStartTime() == spline2.getStartTime());
-assert(spline1.getEndTime() == spline2.getEndTime());
-```
-
-### 动态轨迹更新
-
-```cpp
-CubicSpline3D spline;
-
-// 使用时间点的初始轨迹
-std::vector<double> time_points = {0.0, 1.0, 2.0};
-spline.update(time_points, waypoints, boundary);
-
-// 使用时间段更新
-std::vector<double> time_segments = {0.8, 1.2};
-spline.update(time_segments, new_waypoints, 0.5, new_boundary);
-```
-
-### 轨迹优化（样条理论 + MINCO 等效）
-
-```cpp
-// 比较不同样条类型的最小范数解
-std::vector<SplineVector3d> waypoints = {/* 你的路径点 */};
-std::vector<double> times = {/* 你的时间点 */};
-
-CubicSpline3D cubic_spline(times, waypoints);
-QuinticSpline3D quintic_spline(times, waypoints);
-SepticSpline3D septic_spline(times, waypoints);
-
-// 这些能量值对应于：
-// - 样条理论：最小范数解
-// - MINCO：最小控制作用解
-double cubic_energy = cubic_spline.getEnergy();    // 最小加速度
-double quintic_energy = quintic_spline.getEnergy(); // 最小急动度
-double septic_energy = septic_spline.getEnergy();   // 最小Snap
-
-std::cout << "三次样条能量（最小加速度）: " << cubic_energy << std::endl;
-std::cout << "五次样条能量（最小急动度）: " << quintic_energy << std::endl;
-std::cout << "七次样条能量（最小Snap）: " << septic_energy << std::endl;
-```
-
-### 高性能分段评估
-
-```cpp
-// 对于高频评估，使用分段评估（比 MINCO 更快）
-auto segmented_seq = ppoly.generateSegmentedTimeSequence(0.0, 10.0, 0.001);
-auto positions = ppoly.evaluateSegmented(segmented_seq, 0);  // 位置
-auto velocities = ppoly.evaluateSegmented(segmented_seq, 1); // 速度
-auto accelerations = ppoly.evaluateSegmented(segmented_seq, 2); // 加速度
-```
-
-### 任意维样条
-
-```cpp
-// 示例：7自由度的7维机器人
-constexpr int DOF = 7;
-using SplineVector7d = Eigen::Matrix<double, DOF, 1>;
-using CubicSpline7D = CubicSplineND<DOF>;
-
-std::vector<SplineVector7d> joint_waypoints = {
-    SplineVector7d::Random(),
-    SplineVector7d::Random(),
-    SplineVector7d::Random()
-};
-
-std::vector<double> times = {0.0, 1.0, 2.0};
-CubicSpline7D robot_trajectory(times, joint_waypoints);
-
-// 模板元编程自动处理任何维度
-```
-
-## 应用
-
-- **机器人学**：机器人臂轨迹规划，移动机器人路径跟随
-- **动画**：平滑关键帧插值
-- **CAD/CAM**：CNC 机床的刀具路径生成
-- **自动驾驶车辆**：路径规划和轨迹生成
-- **无人机**：具有平滑过渡的飞行路径规划
-- **研究**：具有更好性能的 MINCO 等效轨迹优化
-- **控制理论**：最小控制作用轨迹生成
-
-## 性能说明
-
-- **托马斯算法**：使用专用块三对角求解器（比 LU 分解更快）
-- **分段评估**：针对高频采样的优化批量评估函数
-- **模板优化**：通过模板元编程的编译时优化
-- **内存效率**：缓存友好的内存访问模式
-- **向量化**：利用 Eigen 的 SIMD 优化
-- **数学最优性**：通过最小范数定理可证明的最优解
-- **MINCO 等效**：与 MINCO 相同的数学公式但具有更优的实现
-
-## 与 MINCO 的比较
-
-| 特性 | SplineTrajectory | MINCO |
-|------|------------------|-------|
-| **数学基础** | **样条理论 + 最小范数** | 最小控制作用 |
-| **样条类型** | **夹持多项式样条** | 夹持多项式轨迹 |
-| **算法** | **托马斯算法** | LU 分解 |
-| **性能** | **快 2-3 倍** | 基准 |
-| **内存使用** | **更低** | 更高 |
-| **批量评估** | **优化** | 标准 |
-| **模板支持** | **完整模板化** | 有限 |
-| **维度** | **任意** | 固定 |
-| **能量计算** | **相同（最小范数）** | 参考 |
-| **理论基础** | **经典样条理论** | 控制理论 |
-
-## 构建示例和测试
-
-```bash
-sudo apt install libeigen3-dev
 git clone https://github.com/Bziyue/SplineTrajectory.git
 # git clone git@github.com:Bziyue/SplineTrajectory.git
+
 cd SplineTrajectory
+
+# Install Eigen3 (if not installed)
+sudo apt install libeigen3-dev
+
+# Build and test
 mkdir build && cd build
 cmake ..
 make
 
-# 运行性能基准测试
+# Run performance comparisons
 ./test_cubic_spline_vs_minco_nd
 ./test_quintic_spline_vs_minco_nd
 ./test_septic_spline_vs_minco_nd
 
-# 运行示例
+# Run examples
 ./basic_cubic_spline
 ./quintic_spline_comparison
 ./robot_trajectory_planning
 ./test_with_min_jerk_3d
 ./test_with_min_snap_3d
 ```
+SplineTrajectory 在轨迹生成和求值方面也优于 [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer) 。查看测试结果，请运行 `./test_with_min_jerk_3d`。
 
-## 贡献
+## 与MINCO的对比
+该库在数学上与MINCO等效，但采用了更高效的算法实现。
+| 特性         | SplineTrajectory                             | MINCO                      |
+| --------------- | -------------------------------------------- | -------------------------- |
+| **算法**   | **追赶法** (块三对角矩阵求解)     | LU分解          |
+| **性能** | 更快的轨迹生成和求值           | 基准                   |
+| **核心理论** |夹持样条（最小范数定理）       | 最小化控制能量     |
+| **灵活性** | 完全模板化，支持**任意维度** | 固定为三维 |
+| **求值**  | 优化的分段批量与系数缓存机制求值         | 标准线性查找求值        |
 
-欢迎贡献！请随时提交拉取请求。对于重大更改，请先开启一个问题来讨论你想要更改的内容。
+## 样条类型与最小能量对应
+该库通过最小化一个具有明确物理意义的目标函数（即某阶导数范数的平方积分），来生成最优的样条轨迹。
+| Spline Type             | MINCO Equivalent     | 
+| ----------------------- | -------------------- | 
+| **三次样条**  | 最小化加速度 | 
+| **五次样条** | 最小化加加速度         | 
+| **七次样条**| 最小化加加加速度          |
 
-### 开发指南
-- 保持 MINCO 数学等效性
-- 保持样条理论基础
-- 维持模板元编程优势
-- 为新功能添加全面的基准测试
-- 遵循 Eigen 编码约定
+---
+## 使用示例
+这是一个创建和评估3D轨迹的简明示例。
+```cpp
+#include "SplineTrajectory.hpp"
+#include <iostream>
+#include <vector>
+#include <Eigen/Dense>
+#include <iomanip>
+
+int main() {
+    using namespace SplineTrajectory;
+
+    std::cout << "=== SplineTrajectory 全接口使用示例 ===" << std::endl;
+
+    // 1. 定义3D航点和边界条件
+    SplineVector<SplinePoint3d> waypoints = {
+        {0.0, 0.0, 0.0}, {1.0, 2.0, 1.0}, {3.0, 1.0, 2.0}, {4.0, 3.0, 0.5}, {5.0, 0.5, 1.5}
+    };
+    
+    // 定义详细的边界条件（包含速度、加速度、Jerk）
+    BoundaryConditions<3> boundary(
+        SplinePoint3d(0.1, 0.0, 0.0),  // 起始速度
+        SplinePoint3d(0.2, 0.0, 0.1),  // 起始加速度
+        SplinePoint3d(0.0, -0.1, 0.0), // 终点速度
+        SplinePoint3d(0.0, 0.0, -0.1), // 终点加速度
+        SplinePoint3d(0.0, 0.0, 0.0),  // 起始Jerk（用于7次样条）
+        SplinePoint3d(0.0, 0.0, 0.0)   // 终点Jerk（用于7次样条）
+    );
+
+    std::cout << "\n--- 构造方式对比 ---" << std::endl;
+    
+    // 2. 使用时间点构造样条（多种样条类型对比）
+    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0, 6.0};
+    CubicSpline3D cubic_from_points(time_points, waypoints, boundary);
+    QuinticSpline3D quintic_from_points(time_points, waypoints, boundary);
+    SepticSpline3D septic_from_points(time_points, waypoints, boundary);
+
+    // 使用时间段构造样条
+    std::vector<double> time_segments = {1.0, 1.5, 1.5, 2.0}; // 段时长
+    double start_time = 0.0;
+    CubicSpline3D cubic_from_segments(time_segments, waypoints, start_time, boundary);
+    QuinticSpline3D quintic_from_segments(time_segments, waypoints, start_time, boundary);
+    SepticSpline3D septic_from_segments(time_segments, waypoints, start_time, boundary);
+
+    // 3. 更新操作示例
+    std::cout << "\n--- 更新操作 ---" << std::endl;
+    CubicSpline3D spline_for_update;
+    std::cout << "初始化状态: " << spline_for_update.isInitialized() << std::endl;
+    
+    // 使用时间点更新
+    spline_for_update.update(time_points, waypoints, boundary);
+    std::cout << "时间点更新后状态: " << spline_for_update.isInitialized() << std::endl;
+    
+    // 使用时间段更新
+    spline_for_update.update(time_segments, waypoints, start_time, boundary);
+    std::cout << "时间段更新后状态: " << spline_for_update.isInitialized() << std::endl;
+
+    // 4. 获取基本信息
+    auto& trajectory = cubic_from_points.getTrajectory();
+    std::cout << "\n--- 基本信息 ---" << std::endl;
+    std::cout << "样条维度: " << cubic_from_points.getDimension() << std::endl;
+    std::cout << "起始时间: " << cubic_from_points.getStartTime() << std::endl;
+    std::cout << "结束时间: " << cubic_from_points.getEndTime() << std::endl;
+    std::cout << "轨迹时长: " << cubic_from_points.getDuration() << std::endl;
+    std::cout << "航点数量: " << cubic_from_points.getNumPoints() << std::endl;
+    std::cout << "样条段数: " << cubic_from_points.getNumSegments() << std::endl;
+    std::cout << "样条阶数: " << trajectory.getOrder() << std::endl;
+
+    // 5. 单点求值 - evaluate通用接口
+    std::cout << "\n--- 单点evaluate通用求值 ---" << std::endl;
+    double t_eval = 2.5;
+    auto pos_eval = trajectory.evaluate(t_eval, 0);      // 位置（0阶导数）
+    auto vel_eval = trajectory.evaluate(t_eval, 1);      // 速度（1阶导数）
+    auto acc_eval = trajectory.evaluate(t_eval, 2);      // 加速度（2阶导数）
+    auto jerk_eval = trajectory.evaluate(t_eval, 3);     // Jerk（3阶导数）
+    auto snap_eval = trajectory.evaluate(t_eval, 4);     // Snap（4阶导数）
+    
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "t=" << t_eval << " 位置: " << pos_eval.transpose() << std::endl;
+    std::cout << "t=" << t_eval << " 速度: " << vel_eval.transpose() << std::endl;
+    std::cout << "t=" << t_eval << " 加速度: " << acc_eval.transpose() << std::endl;
+
+    // 6. 单点求值 - get系列函数重命名接口
+    std::cout << "\n--- 单点get系列求值 ---" << std::endl;
+    auto pos_get = trajectory.getPos(t_eval);
+    auto vel_get = trajectory.getVel(t_eval);
+    auto acc_get = trajectory.getAcc(t_eval);
+    auto jerk_get = trajectory.getJerk(t_eval);
+    auto snap_get = trajectory.getSnap(t_eval);
+    
+    std::cout << "get接口 t=" << t_eval << " 位置: " << pos_get.transpose() << std::endl;
+    std::cout << "get接口 t=" << t_eval << " 速度: " << vel_get.transpose() << std::endl;
+
+    // 7. 批量求值 - 传入vector<double>
+    std::cout << "\n--- 批量求值vector<double> ---" << std::endl;
+    std::vector<double> eval_times = {0.5, 1.5, 2.5, 3.5, 5.0};
+    
+    // evaluate通用接口批量求值
+    auto pos_batch_eval = trajectory.evaluate(eval_times, 0);
+    auto vel_batch_eval = trajectory.evaluate(eval_times, 1);
+    
+    // get系列批量求值
+    auto pos_batch_get = trajectory.getPos(eval_times);
+    auto vel_batch_get = trajectory.getVel(eval_times);
+    auto acc_batch_get = trajectory.getAcc(eval_times);
+    auto jerk_batch_get = trajectory.getJerk(eval_times);
+    auto snap_batch_get = trajectory.getSnap(eval_times);
+    
+    std::cout << "批量求值点数: " << pos_batch_get.size() << std::endl;
+    for (size_t i = 0; i < eval_times.size(); ++i) {
+        std::cout << "t=" << eval_times[i] << " 位置: " << pos_batch_get[i].transpose() << std::endl;
+    }
+
+    // 8. 时间范围求值（包含结束时间） - evaluate带范围
+    std::cout << "\n--- 时间范围evaluate求值 ---" << std::endl;
+    double start_t = 0.0, end_t = 6.0, dt = 0.5;
+    auto pos_range_eval = trajectory.evaluate(start_t, end_t, dt, 0);
+    auto vel_range_eval = trajectory.evaluate(start_t, end_t, dt, 1);
+    
+    std::cout << "范围求值[" << start_t << ", " << end_t << "], dt=" << dt 
+              << ", 点数: " << pos_range_eval.size() << std::endl;
+
+    // 9. 时间范围求值（包含结束时间） - get系列带范围
+    std::cout << "\n--- 时间范围get系列求值 ---" << std::endl;
+    auto pos_range_get = trajectory.getPos(start_t, end_t, dt);
+    auto vel_range_get = trajectory.getVel(start_t, end_t, dt);
+    auto acc_range_get = trajectory.getAcc(start_t, end_t, dt);
+    auto jerk_range_get = trajectory.getJerk(start_t, end_t, dt);
+    auto snap_range_get = trajectory.getSnap(start_t, end_t, dt);
+    
+    std::cout << "get系列范围求值点数: " << pos_range_get.size() << std::endl;
+
+    // 10. 生成时间序列（包含轨迹结束时间）
+    std::cout << "\n--- 生成时间序列 ---" << std::endl;
+    // 注意：generateTimeSequence会包含轨迹的结束时间点
+    auto time_seq_full = trajectory.generateTimeSequence(0.8); // 从开始到结束，dt=0.8
+    auto time_seq_range = trajectory.generateTimeSequence(1.0, 5.0, 0.7); // 指定范围，dt=0.7
+    
+    std::cout << "完整时间序列(dt=0.8): " << time_seq_full.size() << " 点，最后时间: " 
+              << time_seq_full.back() << " (轨迹结束时间: " << trajectory.getEndTime() << ")" << std::endl;
+    std::cout << "范围时间序列(1.0-5.0, dt=0.7): " << time_seq_range.size() << " 点，最后时间: " 
+              << time_seq_range.back() << std::endl;
+
+    // 11. 段化时间序列（高性能，包含轨迹结束时间）
+    std::cout << "\n--- 段化时间序列求值 ---" << std::endl;
+    // 注意：generateSegmentedTimeSequence也会包含轨迹的结束时间点
+    auto segmented_seq = trajectory.generateSegmentedTimeSequence(0.0, 6.0, 0.1);
+    std::cout << "段化序列总点数: " << segmented_seq.getTotalSize() 
+              << " (包含轨迹结束时间)" << std::endl;
+    std::cout << "段数: " << segmented_seq.segments.size() << std::endl;
+    
+    // 使用段化序列进行高性能批量求值
+    auto pos_segmented_eval = trajectory.evaluateSegmented(segmented_seq, 0);
+    auto vel_segmented_eval = trajectory.evaluateSegmented(segmented_seq, 1);
+    
+    // get系列段化求值
+    auto pos_segmented_get = trajectory.getPos(segmented_seq);
+    auto vel_segmented_get = trajectory.getVel(segmented_seq);
+    auto acc_segmented_get = trajectory.getAcc(segmented_seq);
+    auto jerk_segmented_get = trajectory.getJerk(segmented_seq);
+    auto snap_segmented_get = trajectory.getSnap(segmented_seq);
+    
+    std::cout << "段化get系列求值点数: " << pos_segmented_get.size() << std::endl;
+
+    // 12. 轨迹分析
+    std::cout << "\n--- 轨迹分析 ---" << std::endl;
+    double traj_length = trajectory.getTrajectoryLength();
+    double traj_length_custom = trajectory.getTrajectoryLength(2.0, 4.0, 0.05);
+    double cumulative_length = trajectory.getCumulativeLength(3.0);
+    
+    std::cout << "轨迹总长度: " << traj_length << std::endl;
+    std::cout << "段[2.0, 4.0]长度: " << traj_length_custom << std::endl;
+    std::cout << "累积长度到t=3.0: " << cumulative_length << std::endl;
+
+    // 13. 导数轨迹
+    std::cout << "\n--- 导数轨迹 ---" << std::endl;
+    auto vel_trajectory = trajectory.derivative(1);  // 速度轨迹（1阶导数）
+    auto acc_trajectory = trajectory.derivative(2);  // 加速度轨迹（2阶导数）
+    
+    std::cout << "速度轨迹阶数: " << vel_trajectory.getOrder() << std::endl;
+    std::cout << "加速度轨迹阶数: " << acc_trajectory.getOrder() << std::endl;
+
+    // 14. 获取内部数据
+    std::cout << "\n--- 获取内部数据 ---" << std::endl;
+    auto space_points = cubic_from_points.getSpacePoints();
+    auto time_segments_data = cubic_from_points.getTimeSegments();
+    auto cumulative_times = cubic_from_points.getCumulativeTimes();
+    auto boundary_conditions = cubic_from_points.getBoundaryConditions();
+    auto trajectory_copy = cubic_from_points.getTrajectoryCopy();
+    auto ppoly_ref = cubic_from_points.getPPoly();
+    
+    std::cout << "空间点数量: " << space_points.size() << std::endl;
+    std::cout << "时间段数量: " << time_segments_data.size() << std::endl;
+    std::cout << "累积时间数量: " << cumulative_times.size() << std::endl;
+
+    // 15. 能量计算
+    std::cout << "\n--- 能量计算 ---" << std::endl;
+    double cubic_energy = cubic_from_points.getEnergy();
+    double quintic_energy = quintic_from_points.getEnergy();
+    double septic_energy = septic_from_points.getEnergy();
+    
+    std::cout << "三次样条能量: " << cubic_energy << std::endl;
+    std::cout << "五次样条能量: " << quintic_energy << std::endl;
+    std::cout << "七次样条能量: " << septic_energy << std::endl;
+
+    // 16. PPolyND静态方法
+    std::cout << "\n--- PPolyND静态方法 ---" << std::endl;
+    std::vector<double> test_breakpoints = {0.0, 1.0, 2.0, 3.0};
+    auto zero_poly = PPoly3D::zero(test_breakpoints, 3);
+    SplinePoint3d constant_val(1.0, 2.0, 3.0);
+    auto constant_poly = PPoly3D::constant(test_breakpoints, constant_val);
+    
+    std::cout << "零多项式在t=1.5: " << zero_poly.getPos(1.5).transpose() << std::endl;
+    std::cout << "常数多项式在t=1.5: " << constant_poly.getPos(1.5).transpose() << std::endl;
+
+    std::cout << "\n=== 示例完成 ===" << std::endl;
+    return 0;
+    //编译：g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o SplineTrajectoryExample
+}
+```
+```bash
+g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o SplineTrajectoryExample
+```
 
 ## 未来计划
-- [ ] 添加与 MINCO 相同的梯度传播机制
-- [x] 添加夹持七次样条（Minimum Snap）支持
-- [ ] 添加 N 维非均匀 B 样条（Non-Uniform B-Spline）支持
-- [ ] 添加夹持样条向非均匀 B 样条的精确转换支持
+
+- [ ] 增加与MINCO等效的梯度传播机制
+- [x] 实现对夹持七次样条的支持 (Septic Spline, Minimum Snap)
+- [ ] 实现对N维非均匀B样条的支持
+- [ ] 实现从夹持样条到非均匀B样条的精确转换
 
 ## 许可证
 
-该项目根据 MIT 许可证获得许可 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
+本项目采用 MIT 许可证 - 详情请见 [LICENSE](LICENSE) 文件。
 
 ## 致谢
 
 - 使用 [Eigen](http://eigen.tuxfamily.org/) 进行线性代数运算
-- 受 [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER) 轨迹优化启发
-- 基于**经典样条插值理论**和**最小范数定理**
+- 灵感来源于 [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER) 轨迹优化
+- 基于 **经典样条插值理论** 和 **最小范数定理**
