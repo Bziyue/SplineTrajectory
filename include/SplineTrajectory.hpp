@@ -382,9 +382,7 @@ namespace SplineTrajectory
 
         double getTrajectoryLength(double dt = 0.01) const
         {
-            double start_time = getStartTime();
-            double end_time = getEndTime();
-            return getTrajectoryLength(start_time, end_time, dt);
+            return getTrajectoryLength(getStartTime(), getEndTime(), dt);
         }
 
         double getTrajectoryLength(double start_t, double end_t, double dt = 0.01) const
@@ -456,8 +454,8 @@ namespace SplineTrajectory
             return breakpoints_.back() - breakpoints_.front();
         }
 
-        std::vector<double> getBreakpoints() { return breakpoints_; }
-        MatrixType getCoefficients() { return coefficients_; }
+        const std::vector<double> &getBreakpoints() const { return breakpoints_; }
+        const MatrixType &getCoefficients() const { return coefficients_; }
 
         static PPolyND zero(const std::vector<double> &breakpoints, int order = 1)
         {
@@ -677,14 +675,15 @@ namespace SplineTrajectory
             return num_segments_;
         }
 
-        SplineVector<VectorType> getSpacePoints() const { return spatial_points_; }
-        std::vector<double> getTimeSegments() const { return time_segments_; }
-        std::vector<double> getCumulativeTimes() const { return cumulative_times_; }
-        BoundaryConditions<DIM> getBoundaryConditions() const { return boundary_velocities_; }
+        const SplineVector<VectorType>& getSpacePoints() const { return spatial_points_; }
+        const std::vector<double>& getTimeSegments() const { return time_segments_; }
+        const std::vector<double>& getCumulativeTimes() const { return cumulative_times_; }
+        const BoundaryConditions<DIM>& getBoundaryConditions() const { return boundary_velocities_; }
 
         const PPolyND<DIM> &getTrajectory() const { return trajectory_; }
         PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
-        PPolyND<DIM> getPPoly() const { return trajectory_; }
+        const PPolyND<DIM> &getPPoly() const { return trajectory_; }
+        PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
 
         double getEnergy() const
         {
@@ -960,14 +959,15 @@ namespace SplineTrajectory
             return num_segments_;
         }
 
-        SplineVector<VectorType> getSpacePoints() const { return spatial_points_; }
-        std::vector<double> getTimeSegments() const { return time_segments_; }
-        std::vector<double> getCumulativeTimes() const { return cumulative_times_; }
-        BoundaryConditions<DIM> getBoundaryConditions() const { return boundary_; }
+        const SplineVector<VectorType>& getSpacePoints() const { return spatial_points_; }
+        const std::vector<double>& getTimeSegments() const { return time_segments_; }
+        const std::vector<double>& getCumulativeTimes() const { return cumulative_times_; }
+        const BoundaryConditions<DIM>& getBoundaryConditions() const { return boundary_; }
 
         const PPolyND<DIM> &getTrajectory() const { return trajectory_; }
         PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
-        PPolyND<DIM> getPPoly() const { return trajectory_; }
+        const PPolyND<DIM> &getPPoly() const { return trajectory_; }
+        PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
 
         double getEnergy() const
         {
@@ -1337,14 +1337,15 @@ namespace SplineTrajectory
             return num_segments_;
         }
 
-        SplineVector<VectorType> getSpacePoints() const { return spatial_points_; }
-        std::vector<double> getTimeSegments() const { return time_segments_; }
-        std::vector<double> getCumulativeTimes() const { return cumulative_times_; }
-        BoundaryConditions<DIM> getBoundaryConditions() const { return boundary_; }
+        const SplineVector<VectorType>& getSpacePoints() const { return spatial_points_; }
+        const std::vector<double>& getTimeSegments() const { return time_segments_; }
+        const std::vector<double>& getCumulativeTimes() const { return cumulative_times_; }
+        const BoundaryConditions<DIM>& getBoundaryConditions() const { return boundary_; }
 
         const PPolyND<DIM> &getTrajectory() const { return trajectory_; }
         PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
-        PPolyND<DIM> getPPoly() const { return trajectory_; }
+        const PPolyND<DIM> &getPPoly() const { return trajectory_; }
+        PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
 
         double getEnergy() const
         {
