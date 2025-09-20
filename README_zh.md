@@ -49,6 +49,8 @@ make
 ```
 SplineTrajectory 在轨迹生成和求值方面也优于 [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer) 。查看测试结果，请运行 `./test_with_min_jerk_3d`。
 
+如果需要一个集成了此库的完整运动规划工具包，请查看 [ST-opt-tools](https://github.com/MarineRock10/ST-opt-tools)。这是一个运动规划工具包，具有 ESDF 建图、A* 路径规划和与 SplineTrajectory 库集成的 L-BFGS 轨迹优化功能。
+
 ## 与MINCO的对比
 该库在数学上与MINCO等效，但采用了更高效的算法实现。
 | 特性         | SplineTrajectory                             | MINCO                      |
@@ -86,16 +88,15 @@ int main() {
     SplineVector<SplinePoint3d> waypoints = {
         {0.0, 0.0, 0.0}, {1.0, 2.0, 1.0}, {3.0, 1.0, 2.0}, {4.0, 3.0, 0.5}, {5.0, 0.5, 1.5}
     };
-    
+    BoundaryConditions<3> boundary; //默认速度、加速度、加加速度为0
     // 定义详细的边界条件（包含速度、加速度、Jerk）
-    BoundaryConditions<3> boundary(
-        SplinePoint3d(0.1, 0.0, 0.0),  // 起始速度
-        SplinePoint3d(0.2, 0.0, 0.1),  // 起始加速度
-        SplinePoint3d(0.0, -0.1, 0.0), // 终点速度
-        SplinePoint3d(0.0, 0.0, -0.1), // 终点加速度
-        SplinePoint3d(0.0, 0.0, 0.0),  // 起始Jerk（用于7次样条）
-        SplinePoint3d(0.0, 0.0, 0.0)   // 终点Jerk（用于7次样条）
-    );
+    // 或者 BoundaryConditions<3> boundary(SplinePoint3d(0.1, 0.0, 0.0),SplinePoint3d(0.2, 0.0, 0.1)); 默认加速度和加加速度为0
+    boundary.start_velocity = SplinePoint3d(0.1, 0.0, 0.0); // 三次样条只会用到速度作为边界条件 
+    boundary.end_velocity = SplinePoint3d(0.2, 0.0, 0.1);
+    boundary.start_acceleration = SplinePoint3d(0.0, 0.0, 0.0);// 五次样条使用速度、加速度
+    boundary.end_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
+    boundary.start_jerk = SplinePoint3d(0.0, 0.0, 0.0); // 七次样条使用速度、加速度、加加速度
+    boundary.end_jerk = SplinePoint3d(0.0, 0.0, 0.0);
 
     std::cout << "\n--- 构造方式对比 ---" << std::endl;
     

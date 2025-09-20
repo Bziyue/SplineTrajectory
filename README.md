@@ -55,6 +55,8 @@ make
 ```
 SplineTrajectory also outperforms [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer) in both trajectory generation and evaluation. To see the test results, run ./test_with_min_jerk_3d.
 
+For a complete motion planning toolkit that integrates this library, check out [ST-opt-tools](https://github.com/MarineRock10/ST-opt-tools). It's a motion planning toolkit featuring ESDF mapping, A* path planning, and L-BFGS trajectory optimization integrated with SplineTrajectory library.
+
 ## Comparison with MINCO
 This library is mathematically equivalent to MINCO but implemented with more efficient algorithms.
 | Feature         | SplineTrajectory                             | MINCO                      |
@@ -95,7 +97,7 @@ int main() {
     };
     
     // Define detailed boundary conditions (including velocity, acceleration, jerk)
-    BoundaryConditions<3> boundary; 
+    BoundaryConditions<3> boundary; //default velocity、acceleration and jerk are zero
     // or BoundaryConditions<3> boundary(SplinePoint3d(0.1, 0.0, 0.0),SplinePoint3d(0.2, 0.0, 0.1)); default acceleration and jerk are zero
     boundary.start_velocity = SplinePoint3d(0.1, 0.0, 0.0); // cubic splines only use velocity 
     boundary.end_velocity = SplinePoint3d(0.2, 0.0, 0.1);
