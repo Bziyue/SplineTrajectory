@@ -391,7 +391,12 @@ void runEvaluationTests()
     std::cout << "Position\t" << std::scientific << std::setprecision(3) << pos_max_error << std::endl;
     std::cout << "Velocity\t" << vel_max_error << std::endl;
     std::cout << "Acceleration\t" << acc_max_error << std::endl;
-    
+
+    // energy consistency
+    double ms_energy = snapOpt.getObjective();
+    double ss_energy = septicSpline.getEnergy();
+    bool energy_consistent = std::abs(ms_energy - ss_energy) < 1e-6;
+
     // Check if results are consistent (within reasonable tolerance)
     const double tolerance_pos = 1e-10;
     const double tolerance_vel = 1e-8;
@@ -407,8 +412,10 @@ void runEvaluationTests()
     std::cout << "Position: " << (pos_consistent ? "PASS" : "FAIL") << std::endl;
     std::cout << "Velocity: " << (vel_consistent ? "PASS" : "FAIL") << std::endl;
     std::cout << "Acceleration: " << (acc_consistent ? "PASS" : "FAIL") << std::endl;
-    
-    if (pos_consistent && vel_consistent && acc_consistent)
+    std::cout << "Energy: " << (energy_consistent ? "PASS" : "FAIL") 
+              << " (MinSnap: " << ms_energy << ", SepticSpline: " << ss_energy << ")" << std::endl;
+
+    if (pos_consistent && vel_consistent && acc_consistent && energy_consistent)
     {
         std::cout << "\n✓ All consistency tests PASSED!" << std::endl;
     }

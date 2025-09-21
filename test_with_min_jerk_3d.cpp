@@ -390,6 +390,11 @@ void runEvaluationTests()
     std::cout << "Velocity\t" << vel_max_error << std::endl;
     std::cout << "Acceleration\t" << acc_max_error << std::endl;
     
+    // energy consistency
+    double mj_energy = jerkOpt.getObjective();
+    double qs_energy = quinticSpline.getEnergy();
+    bool energy_consistent = std::abs(mj_energy - qs_energy) < 1e-6;
+
     // Check if results are consistent (within reasonable tolerance)
     const double tolerance_pos = 1e-10;
     const double tolerance_vel = 1e-8;
@@ -405,8 +410,10 @@ void runEvaluationTests()
     std::cout << "Position: " << (pos_consistent ? "PASS" : "FAIL") << std::endl;
     std::cout << "Velocity: " << (vel_consistent ? "PASS" : "FAIL") << std::endl;
     std::cout << "Acceleration: " << (acc_consistent ? "PASS" : "FAIL") << std::endl;
-    
-    if (pos_consistent && vel_consistent && acc_consistent)
+    std::cout << "Energy: " << (energy_consistent ? "PASS" : "FAIL") 
+              << " (MinJerk: " << mj_energy << ", QuinticSpline: " << qs_energy << ")" << std::endl;
+
+    if (pos_consistent && vel_consistent && acc_consistent && energy_consistent)
     {
         std::cout << "\n✓ All consistency tests PASSED!" << std::endl;
     }
