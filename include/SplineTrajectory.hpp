@@ -1066,14 +1066,12 @@ namespace SplineTrajectory
             B_right.row(0) = boundary_.end_velocity.transpose();
             B_right.row(1) = boundary_.end_acceleration.transpose();
 
-            std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> L_blocks;
-            L_blocks.reserve(std::max(0, num_blocks - 1));
-            std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> D_blocks;
-            D_blocks.reserve(num_blocks);
             std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> U_blocks;
             U_blocks.reserve(std::max(0, num_blocks - 1));
-            std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> rhs_blocks;
-            rhs_blocks.reserve(num_blocks);
+            std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> D_mod;
+            D_mod.reserve(num_blocks);
+            std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> rhs_mod;
+            rhs_mod.reserve(num_blocks);
 
             for (int i = 0; i < num_blocks; ++i)
             {
@@ -1099,62 +1097,47 @@ namespace SplineTrajectory
                 r.row(0) = r3;
                 r.row(1) = r4;
 
-                Eigen::Matrix2d L;
-                L << -24.0 * hL2_inv, -3.0 * hL_inv,
-                    -168.0 * hL3_inv, -24.0 * hL2_inv;
-
                 Eigen::Matrix2d D;
                 D << -36.0 * hL2_inv + 36.0 * hR2_inv, 9.0 * (hL_inv + hR_inv),
                     -192.0 * (hL3_inv + hR3_inv), 36.0 * (hL2_inv - hR2_inv);
 
-                Eigen::Matrix2d U;
-                U << 24.0 * hR2_inv, -3.0 * hR_inv,
-                    -168.0 * hR3_inv, 24.0 * hR2_inv;
-
                 if (k == 2)
                 {
+                    Eigen::Matrix2d L;
+                    L << -24.0 * hL2_inv, -3.0 * hL_inv,
+                        -168.0 * hL3_inv, -24.0 * hL2_inv;
                     r.noalias() -= L * B_left;
                 }
                 else
                 {
-                    L_blocks.push_back(L);
+                    Eigen::Matrix2d L;
+                    L << -24.0 * hL2_inv, -3.0 * hL_inv,
+                        -168.0 * hL3_inv, -24.0 * hL2_inv;
+                    
+                    const Eigen::Matrix2d X = solve2x2(D_mod[i - 1], U_blocks[i - 1]);
+                    const Eigen::Matrix<double, 2, DIM> Y = solve2x2(D_mod[i - 1], rhs_mod[i - 1]);
+                    
+                    D.noalias() -= L * X;
+                    r.noalias() -= L * Y;
                 }
 
                 if (k == n - 1)
                 {
+                    Eigen::Matrix2d U;
+                    U << 24.0 * hR2_inv, -3.0 * hR_inv,
+                        -168.0 * hR3_inv, 24.0 * hR2_inv;
                     r.noalias() -= U * B_right;
                 }
                 else
                 {
+                    Eigen::Matrix2d U;
+                    U << 24.0 * hR2_inv, -3.0 * hR_inv,
+                        -168.0 * hR3_inv, 24.0 * hR2_inv;
                     U_blocks.push_back(U);
                 }
 
-                D_blocks.push_back(D);
-                rhs_blocks.push_back(r);
-            }
-
-            std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> D_mod;
-            D_mod.reserve(num_blocks);
-            std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> rhs_mod;
-            rhs_mod.reserve(num_blocks);
-
-            D_mod.push_back(D_blocks[0]);
-            rhs_mod.push_back(rhs_blocks[0]);
-
-            for (int i = 1; i < num_blocks; ++i)
-            {
-                const Eigen::Matrix2d &D_prev = D_mod[i - 1];
-                const Eigen::Matrix2d &L = L_blocks[i - 1];
-                const Eigen::Matrix2d &U = U_blocks[i - 1];
-
-                const Eigen::Matrix2d X = solve2x2(D_prev, U);
-                const Eigen::Matrix<double, 2, DIM> Y = solve2x2(D_prev, rhs_mod[i - 1]);
-
-                const Eigen::Matrix2d D_new = D_blocks[i] - L * X;
-                const Eigen::Matrix<double, 2, DIM> rhs_new = rhs_blocks[i] - L * Y;
-
-                D_mod.push_back(D_new);
-                rhs_mod.push_back(rhs_new);
+                D_mod.push_back(D);
+                rhs_mod.push_back(r);
             }
 
             std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> solution(num_blocks);
@@ -1464,14 +1447,14 @@ namespace SplineTrajectory
             B_right.row(1) = boundary_.end_acceleration.transpose();
             B_right.row(2) = boundary_.end_jerk.transpose();
 
-            std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> L_blocks;
-            L_blocks.reserve(std::max(0, num_blocks - 1));
-            std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_blocks;
-            D_blocks.reserve(num_blocks);
+
             std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> U_blocks;
             U_blocks.reserve(std::max(0, num_blocks - 1));
-            std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> rhs_blocks;
-            rhs_blocks.reserve(num_blocks);
+            std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_mod;
+            D_mod.reserve(num_blocks);
+            std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> rhs_mod;
+            rhs_mod.reserve(num_blocks);
+
 
             for (int i = 0; i < num_blocks; ++i)
             {
@@ -1504,65 +1487,55 @@ namespace SplineTrajectory
                 r.row(1) = r4;
                 r.row(2) = r5;
 
-                Eigen::Matrix3d L;
-                L << 360.0 * hL3_inv, 60.0 * hL2_inv, 4 * hL_inv,
-                    4680.0 * hL4_inv, 840.0 * hL3_inv, 60 * hL2_inv,
-                    24480.0 * hL5_inv, 4680.0 * hL4_inv, 360 * hL3_inv;
 
                 Eigen::Matrix3d D;
                 D << 480.0 * (hL3_inv + hR3_inv), 120.0 * (hR2_inv - hL2_inv), 16 * (hL_inv + hR_inv),
                     5400.0 * (hL4_inv - hR4_inv), -1200.0 * (hL3_inv + hR3_inv), 120 * (hL2_inv - hR2_inv),
                     25920.0 * (hL5_inv + hR5_inv), 5400.0 * (hR4_inv - hL4_inv), 480 * (hL3_inv + hR3_inv);
 
-                Eigen::Matrix3d U;
-                U << 360.0 * hR3_inv, -60.0 * hR2_inv, 4 * hR_inv,
-                    -4680.0 * hR4_inv, 840.0 * hR3_inv, -60 * hR2_inv,
-                    24480.0 * hR5_inv, -4680.0 * hR4_inv, 360 * hR3_inv;
 
                 if (k == 2)
                 {
+                    Eigen::Matrix3d L;
+                    L << 360.0 * hL3_inv, 60.0 * hL2_inv, 4 * hL_inv,
+                        4680.0 * hL4_inv, 840.0 * hL3_inv, 60 * hL2_inv,
+                        24480.0 * hL5_inv, 4680.0 * hL4_inv, 360 * hL3_inv;
                     r.noalias() -= L * B_left;
                 }
                 else
                 {
-                    L_blocks.push_back(L);
+                    Eigen::Matrix3d L;
+                    L << 360.0 * hL3_inv, 60.0 * hL2_inv, 4 * hL_inv,
+                        4680.0 * hL4_inv, 840.0 * hL3_inv, 60 * hL2_inv,
+                        24480.0 * hL5_inv, 4680.0 * hL4_inv, 360 * hL3_inv;
+                    
+                    const Eigen::Matrix3d X = solve3x3(D_mod[i - 1], U_blocks[i - 1]);
+                    const Eigen::Matrix<double, 3, DIM> Y = solve3x3(D_mod[i - 1], rhs_mod[i - 1]);
+                    
+                    D.noalias() -= L * X;
+                    r.noalias() -= L * Y;
                 }
 
                 if (k == n - 1)
                 {
+                    Eigen::Matrix3d U;
+                    U << 360.0 * hR3_inv, -60.0 * hR2_inv, 4 * hR_inv,
+                        -4680.0 * hR4_inv, 840.0 * hR3_inv, -60 * hR2_inv,
+                        24480.0 * hR5_inv, -4680.0 * hR4_inv, 360 * hR3_inv;
                     r.noalias() -= U * B_right;
                 }
                 else
                 {
+
+                    Eigen::Matrix3d U;
+                    U << 360.0 * hR3_inv, -60.0 * hR2_inv, 4 * hR_inv,
+                        -4680.0 * hR4_inv, 840.0 * hR3_inv, -60 * hR2_inv,
+                        24480.0 * hR5_inv, -4680.0 * hR4_inv, 360 * hR3_inv;
                     U_blocks.push_back(U);
                 }
 
-                D_blocks.push_back(D);
-                rhs_blocks.push_back(r);
-            }
-
-            std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_mod;
-            D_mod.reserve(num_blocks);
-            std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> rhs_mod;
-            rhs_mod.reserve(num_blocks);
-
-            D_mod.push_back(D_blocks[0]);
-            rhs_mod.push_back(rhs_blocks[0]);
-
-            for (int i = 1; i < num_blocks; ++i)
-            {
-                const Eigen::Matrix3d &D_prev = D_mod[i - 1];
-                const Eigen::Matrix3d &L = L_blocks[i - 1];
-                const Eigen::Matrix3d &U = U_blocks[i - 1];
-
-                const Eigen::Matrix3d X = solve3x3(D_prev, U);
-                const Eigen::Matrix<double, 3, DIM> Y = solve3x3(D_prev, rhs_mod[i - 1]);
-
-                const Eigen::Matrix3d D_new = D_blocks[i] - L * X;
-                const Eigen::Matrix<double, 3, DIM> rhs_new = rhs_blocks[i] - L * Y;
-
-                D_mod.push_back(D_new);
-                rhs_mod.push_back(rhs_new);
+                D_mod.push_back(D);
+                rhs_mod.push_back(r);
             }
 
             std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> solution(num_blocks);
