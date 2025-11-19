@@ -590,6 +590,12 @@ namespace SplineTrajectory
         static constexpr int kStorageOrder = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using WorkMat = Eigen::Matrix<double, Eigen::Dynamic, DIM, kStorageOrder>;
 
+        struct Gradients
+        {
+            MatrixType points;
+            Eigen::VectorXd times;
+        };
+
     private:
         std::vector<double> time_segments_;
         SplineVector<VectorType> spatial_points_;
@@ -784,6 +790,14 @@ namespace SplineTrajectory
                 gradByTimes(k) -= lambda.row(k).dot(term_k);
                 gradByTimes(k) -= lambda.row(k + 1).dot(term_k1);
             }
+        }
+
+        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+                                const Eigen::VectorXd &partialGradByTimes)
+        {
+            Gradients result;
+            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times);
+            return result;
         }
 
     private:
