@@ -602,6 +602,8 @@ namespace SplineTrajectory
         PPolyND<DIM> trajectory_;
 
         MatrixType internal_derivatives_;
+        Eigen::VectorXd cached_c_prime_;    
+        Eigen::VectorXd cached_inv_denoms_;      
 
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -755,28 +757,9 @@ namespace SplineTrajectory
             }
 
             MatrixType lambda(n + 1, dim);
-
-            if (n > 0)
-            {
-                Eigen::VectorXd A_main(n + 1);
-                Eigen::VectorXd A_upper(n);
-                Eigen::VectorXd A_lower(n);
-
-                if (n > 1)
-                {
-                    A_lower.segment(0, n - 1) = h.segment(0, n - 1);
-                    A_upper.segment(1, n - 1) = h.segment(1, n - 1);
-                    A_main.segment(1, n - 1) = 2.0 * (h.segment(0, n - 1) + h.segment(1, n - 1));
-                }
-                A_main(0) = 2.0 * h(0);
-                A_upper(0) = h(0);
-                A_main(n) = 2.0 * h(n - 1);
-                A_lower(n - 1) = h(n - 1);
-
-                lambda = gradM;
-                solveTridiagonalInPlace(A_lower, A_main, A_upper, lambda);
-            }
-
+            lambda = gradM;
+            solveWithCachedLU(lambda);
+            
             for (int k = 0; k < n; ++k)
             {
                 double h_k = h(k);
@@ -834,107 +817,120 @@ namespace SplineTrajectory
             }
         }
 
-        template <typename MatType>
-        static void solveTridiagonalInPlace(const Eigen::VectorXd &lower,
-                                            const Eigen::VectorXd &main,
-                                            const Eigen::VectorXd &upper,
-                                            MatType &M /* (n x DIM) */)
-        {
-            const int n = static_cast<int>(main.size());
-            if (n <= 0)
-                return;
-
-            Eigen::VectorXd c_prime(n - 1);
-
-            double inv = 1.0 / main(0);
-            c_prime(0) = upper(0) * inv;
-            M.row(0) *= inv;
-
-            for (int i = 1; i < n - 1; ++i)
-            {
-                double denom = main(i) - lower(i - 1) * c_prime(i - 1);
-                double inv_d = 1.0 / denom;
-                c_prime(i) = upper(i) * inv_d;
-
-                M.row(i).noalias() -= lower(i - 1) * M.row(i - 1);
-                M.row(i) *= inv_d;
-            }
-
-            if (n >= 2)
-            {
-                double denom = main(n - 1) - lower(n - 2) * c_prime(n - 2);
-                double inv_d = 1.0 / denom;
-                M.row(n - 1).noalias() -= lower(n - 2) * M.row(n - 2);
-                M.row(n - 1) *= inv_d;
-            }
-
-            for (int i = n - 2; i >= 0; --i)
-            {
-                M.row(i).noalias() -= c_prime(i) * M.row(i + 1);
-            }
-        }
-
         MatrixType solveSpline()
         {
-            const int n_pts = static_cast<int>(spatial_points_.size());
             const int n = num_segments_;
             Eigen::Map<const Eigen::VectorXd> h(time_segments_.data(), n);
 
-            WorkMat P(n_pts, DIM);
-            for (int i = 0; i < n_pts; ++i)
-                P.row(i) = spatial_points_[i].transpose();
+            WorkMat p_diff_h(n, DIM);
+            for (int i = 0; i < n; ++i)
+            {
+                p_diff_h.row(i) = (spatial_points_[i + 1] - spatial_points_[i]).transpose() / h(i);
+            }
 
-            WorkMat p_diff_h = (P.bottomRows(n) - P.topRows(n)).array().colwise() / h.array();
+            internal_derivatives_.resize(n + 1, DIM);
+            MatrixType &M = internal_derivatives_;
 
-            WorkMat D(n + 1, DIM);
             if (n >= 2)
             {
-                D.block(1, 0, n - 1, DIM) = 6.0 * (p_diff_h.bottomRows(n - 1) - p_diff_h.topRows(n - 1));
+                M.block(1, 0, n - 1, DIM) = 6.0 * (p_diff_h.bottomRows(n - 1) - p_diff_h.topRows(n - 1));
             }
-            D.row(0) = 6.0 * (p_diff_h.row(0) - boundary_velocities_.start_velocity.transpose());
-            D.row(n) = 6.0 * (boundary_velocities_.end_velocity.transpose() - p_diff_h.row(n - 1));
+            M.row(0) = 6.0 * (p_diff_h.row(0) - boundary_velocities_.start_velocity.transpose());
+            M.row(n) = 6.0 * (boundary_velocities_.end_velocity.transpose() - p_diff_h.row(n - 1));
 
-            Eigen::VectorXd A_main(n + 1);
-            Eigen::VectorXd A_lower(n);
-            Eigen::VectorXd A_upper(n);
-
-            if (n > 1)
-            {
-                A_lower.segment(0, n - 1) = h.segment(0, n - 1);
-                A_upper.segment(1, n - 1) = h.segment(1, n - 1);
-                A_main.segment(1, n - 1) =
-                    2.0 * (h.segment(0, n - 1).array() + h.segment(1, n - 1).array()).matrix();
-            }
-            A_main(0) = 2.0 * h(0);
-            A_upper(0) = h(0);
-            A_main(n) = 2.0 * h(n - 1);
-            A_lower(n - 1) = h(n - 1);
-
-            solveTridiagonalInPlace(A_lower, A_main, A_upper, D);
-            WorkMat &M = D;
-            internal_derivatives_ = D;
-
-            WorkMat a = P.topRows(n);
-            WorkMat M_i = M.topRows(n);
-            WorkMat M_i1 = M.bottomRows(n);
-
-            const auto diag_h_over_6 = (h.array() / 6.0).matrix().asDiagonal();
-            WorkMat b = p_diff_h - diag_h_over_6 * (2.0 * M_i + M_i1);
-            WorkMat c = M_i * 0.5;
-            const auto diag_inv_6h = (1.0 / (6.0 * h.array())).matrix().asDiagonal();
-            WorkMat d = diag_inv_6h * (M_i1 - M_i);
+            computeLUAndSolve(h, M);
 
             MatrixType coeffs(n * 4, DIM);
 
             for (int i = 0; i < n; ++i)
             {
-                coeffs.row(i * 4 + 0) = a.row(i);
-                coeffs.row(i * 4 + 1) = b.row(i);
-                coeffs.row(i * 4 + 2) = c.row(i);
-                coeffs.row(i * 4 + 3) = d.row(i);
+                double h_i = h(i);
+                double h_inv = 1.0 / h_i;
+
+                coeffs.row(i * 4 + 0) = spatial_points_[i].transpose();
+
+                coeffs.row(i * 4 + 1) = p_diff_h.row(i) - (h_i / 6.0) * (2.0 * M.row(i) + M.row(i + 1));
+
+                coeffs.row(i * 4 + 2) = M.row(i) * 0.5;
+
+                coeffs.row(i * 4 + 3) = (M.row(i + 1) - M.row(i)) * (h_inv / 6.0);
             }
 
             return coeffs;
+        }
+
+        template <typename MatType>
+        void computeLUAndSolve(const Eigen::VectorXd &h,
+                               MatType &M /* (n+1 x DIM) */)
+        {
+            const int n_seg = static_cast<int>(h.size());
+            const int n_mat = n_seg + 1;
+
+            cached_c_prime_.resize(n_mat - 1);
+            cached_inv_denoms_.resize(n_mat);
+
+            double main_0 = 2.0 * h(0);
+            double inv = 1.0 / main_0;
+            cached_inv_denoms_(0) = inv;
+
+            double upper_0 = h(0);
+            cached_c_prime_(0) = upper_0 * inv;
+            M.row(0) *= inv;
+
+            for (int i = 1; i < n_mat - 1; ++i)
+            {
+                double main_i = 2.0 * (h(i - 1) + h(i));
+                double lower_prev = h(i - 1);
+                double upper_i = h(i);
+
+                double denom = main_i - lower_prev * cached_c_prime_(i - 1);
+                double inv_d = 1.0 / denom;
+
+                cached_inv_denoms_(i) = inv_d;
+                cached_c_prime_(i) = upper_i * inv_d;
+
+                M.row(i).noalias() -= lower_prev * M.row(i - 1);
+                M.row(i) *= inv_d;
+            }
+
+            if (n_mat >= 2)
+            {
+                int i = n_mat - 1;
+                double main_last = 2.0 * h(n_seg - 1);
+                double lower_prev = h(n_seg - 1);
+
+                double denom = main_last - lower_prev * cached_c_prime_(i - 1);
+                double inv_d = 1.0 / denom;
+                cached_inv_denoms_(i) = inv_d;
+
+                M.row(i).noalias() -= lower_prev * M.row(i - 1);
+                M.row(i) *= inv_d;
+            }
+
+            for (int i = n_mat - 2; i >= 0; --i)
+            {
+                M.row(i).noalias() -= cached_c_prime_(i) * M.row(i + 1);
+            }
+        }
+
+        template <typename MatType>
+        void solveWithCachedLU(MatType &X)
+        {
+
+            const int n = static_cast<int>(cached_inv_denoms_.size());
+
+            X.row(0) *= cached_inv_denoms_(0);
+
+            for (int i = 1; i < n; ++i)
+            {
+                X.row(i).noalias() -= time_segments_[i - 1] * X.row(i - 1);
+                X.row(i) *= cached_inv_denoms_(i);
+            }
+
+            for (int i = n - 2; i >= 0; --i)
+            {
+                X.row(i).noalias() -= cached_c_prime_(i) * X.row(i + 1);
+            }
         }
 
         void initializePPoly()
