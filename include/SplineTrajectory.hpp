@@ -125,7 +125,8 @@ namespace SplineTrajectory
     {
     public:
         using VectorType = Eigen::Matrix<double, DIM, 1>;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM>;
+        static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
+        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     private:
         std::vector<double> breakpoints_;
@@ -586,9 +587,8 @@ namespace SplineTrajectory
     public:
         using VectorType = Eigen::Matrix<double, DIM, 1>;
         using RowVectorType = Eigen::Matrix<double, 1, DIM>;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM>;
-        static constexpr int kStorageOrder = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using WorkMat = Eigen::Matrix<double, Eigen::Dynamic, DIM, kStorageOrder>;
+        static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
+        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
         struct Gradients
         {
@@ -836,7 +836,7 @@ namespace SplineTrajectory
             const int n = num_segments_;
             Eigen::Map<const Eigen::VectorXd> h(time_segments_.data(), n);
 
-            WorkMat p_diff_h(n, DIM);
+            MatrixType p_diff_h(n, DIM);
             for (int i = 0; i < n; ++i)
             {
                 p_diff_h.row(i) = (spatial_points_[i + 1] - spatial_points_[i]).transpose() / h(i);
@@ -960,7 +960,8 @@ namespace SplineTrajectory
     public:
         using VectorType = Eigen::Matrix<double, DIM, 1>;
         using RowVectorType = Eigen::Matrix<double, 1, DIM>;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM>;
+        static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
+        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
     private:
         std::vector<double> time_segments_;
@@ -1320,7 +1321,8 @@ namespace SplineTrajectory
     public:
         using VectorType = Eigen::Matrix<double, DIM, 1>;
         using RowVectorType = Eigen::Matrix<double, 1, DIM>;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM>;
+        static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
+        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
     private:
         std::vector<double> time_segments_;
