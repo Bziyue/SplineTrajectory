@@ -978,17 +978,33 @@ namespace SplineTrajectory
         MatrixType coeffs_;
         PPolyND<DIM> trajectory_;
 
-        // 在 QuinticSplineND 的 private 部分添加:
         std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> D_mod_cache_;
         std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> U_blocks_cache_;
-        MatrixType internal_velocities_;      // 内部速度（一阶导数）
-        MatrixType internal_accelerations_;   // 内部加速度（二阶导数）
+        std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> L_blocks_cache_;
+        MatrixType internal_vel_;
+        MatrixType internal_acc_;
+
+        struct TimePowers
+        {
+            double h;
+            double h_inv;  // h^-1
+            double h2_inv; // h^-2
+            double h3_inv; // h^-3
+            double h4_inv; // h^-4
+            double h5_inv; // h^-5
+            double h6_inv; // h^-6
+        };
+        std::vector<TimePowers> time_powers_;
+        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_d_rhs_mod_;
+        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_current_lambda_;
+        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_rhs_mod_;
 
     private:
         void updateSplineInternal()
         {
             num_segments_ = static_cast<int>(time_segments_.size());
             updateCumulativeTimes();
+            precomputeTimePowers();
             coeffs_ = solveQuintic();
             is_initialized_ = true;
             initializePPoly();
@@ -1129,22 +1145,16 @@ namespace SplineTrajectory
         {
             const int n = num_segments_;
             const int n_pts = static_cast<int>(spatial_points_.size());
-            Eigen::Map<const Eigen::VectorXd> h(time_segments_.data(), n);
 
             gradByPoints = MatrixType::Zero(n_pts, DIM);
-            gradByTimes = partialGradByTimes; 
+            gradByTimes = partialGradByTimes;
 
             MatrixType g_x = MatrixType::Zero(n_pts * 2, DIM);
 
             for (int i = 0; i < n; ++i)
             {
-                double hi = h(i);
-                double h_inv = 1.0 / hi;
-                double h2_inv = h_inv * h_inv;
-                double h3_inv = h2_inv * h_inv;
-                double h4_inv = h3_inv * h_inv;
-                double h5_inv = h4_inv * h_inv;
-                double h6_inv = h5_inv * h_inv;
+                const auto &tp = time_powers_[i];
+                double hi = tp.h;
 
                 const RowVectorType gc0 = partialGradByCoeffs.row(i * 6 + 0);
                 const RowVectorType gc1 = partialGradByCoeffs.row(i * 6 + 1);
@@ -1155,23 +1165,23 @@ namespace SplineTrajectory
 
                 const RowVectorType P_curr = spatial_points_[i].transpose();
                 const RowVectorType P_next = spatial_points_[i + 1].transpose();
-                const RowVectorType v_curr = internal_velocities_.row(i);
-                const RowVectorType a_curr = internal_accelerations_.row(i);
+                const RowVectorType v_curr = internal_vel_.row(i);
+                const RowVectorType a_curr = internal_acc_.row(i);
 
                 const RowVectorType R1 = P_next - P_curr - v_curr * hi - 0.5 * a_curr * hi * hi;
-                const RowVectorType R2 = internal_velocities_.row(i + 1) - v_curr - a_curr * hi;
-                const RowVectorType R3 = internal_accelerations_.row(i + 1) - a_curr;
+                const RowVectorType R2 = internal_vel_.row(i + 1) - v_curr - a_curr * hi;
+                const RowVectorType R3 = internal_acc_.row(i + 1) - a_curr;
 
                 gradByPoints.row(i) += gc0;
-                RowVectorType dJ_dR1 = gc3 * (10.0 * h3_inv) + gc4 * (-15.0 * h4_inv) + gc5 * (6.0 * h5_inv);
+                RowVectorType dJ_dR1 = gc3 * (10.0 * tp.h3_inv) + gc4 * (-15.0 * tp.h4_inv) + gc5 * (6.0 * tp.h5_inv);
                 gradByPoints.row(i + 1) += dJ_dR1;
                 gradByPoints.row(i) -= dJ_dR1;
 
                 g_x.row(2 * i) += gc1;
                 g_x.row(2 * i + 1) += 0.5 * gc2;
 
-                RowVectorType dJ_dR2 = gc3 * (-4.0 * h2_inv) + gc4 * (7.0 * h3_inv) + gc5 * (-3.0 * h4_inv);
-                RowVectorType dJ_dR3 = gc3 * (0.5 * h_inv) + gc4 * (-1.0 * h2_inv) + gc5 * (0.5 * h3_inv);
+                RowVectorType dJ_dR2 = gc3 * (-4.0 * tp.h2_inv) + gc4 * (7.0 * tp.h3_inv) + gc5 * (-3.0 * tp.h4_inv);
+                RowVectorType dJ_dR3 = gc3 * (0.5 * tp.h_inv) + gc4 * (-1.0 * tp.h2_inv) + gc5 * (0.5 * tp.h3_inv);
 
                 g_x.row(2 * i) += dJ_dR1 * (-hi);
                 g_x.row(2 * i + 1) += dJ_dR1 * (-0.5 * hi * hi);
@@ -1183,9 +1193,9 @@ namespace SplineTrajectory
                 g_x.row(2 * (i + 1) + 1) += dJ_dR3;
                 g_x.row(2 * i + 1) -= dJ_dR3;
 
-                RowVectorType dc3_dh = -30.0 * h4_inv * R1 + 8.0 * h3_inv * R2 - 0.5 * h2_inv * R3 - 10.0 * h3_inv * v_curr - 6.0 * h2_inv * a_curr;
-                RowVectorType dc4_dh = 60.0 * h5_inv * R1 - 21.0 * h4_inv * R2 + 2.0 * h3_inv * R3 + 15.0 * h4_inv * v_curr + 8.0 * h3_inv * a_curr;
-                RowVectorType dc5_dh = -30.0 * h6_inv * R1 + 12.0 * h5_inv * R2 - 1.5 * h4_inv * R3 - 6.0 * h5_inv * v_curr - 3.0 * h4_inv * a_curr;
+                RowVectorType dc3_dh = -30.0 * tp.h4_inv * R1 + 8.0 * tp.h3_inv * R2 - 0.5 * tp.h2_inv * R3 - 10.0 * tp.h3_inv * v_curr - 6.0 * tp.h2_inv * a_curr;
+                RowVectorType dc4_dh = 60.0 * tp.h5_inv * R1 - 21.0 * tp.h4_inv * R2 + 2.0 * tp.h3_inv * R3 + 15.0 * tp.h4_inv * v_curr + 8.0 * tp.h3_inv * a_curr;
+                RowVectorType dc5_dh = -30.0 * tp.h6_inv * R1 + 12.0 * tp.h5_inv * R2 - 1.5 * tp.h4_inv * R3 - 6.0 * tp.h5_inv * v_curr - 3.0 * tp.h4_inv * a_curr;
 
                 gradByTimes(i) += gc3.dot(dc3_dh) + gc4.dot(dc4_dh) + gc5.dot(dc5_dh);
             }
@@ -1194,112 +1204,94 @@ namespace SplineTrajectory
             if (num_blocks <= 0)
                 return;
 
-            std::vector<Eigen::Matrix<double, 2, DIM>> d_rhs_mod(num_blocks);
-            for (auto &val : d_rhs_mod)
-                val.setZero();
+            ws_d_rhs_mod_.resize(num_blocks);
+            ws_current_lambda_.resize(num_blocks);
 
-            std::vector<Eigen::Matrix<double, 2, DIM>> current_lambda(num_blocks);
+            for (auto &m : ws_d_rhs_mod_)
+                m.setZero();
+
             for (int i = 0; i < num_blocks; ++i)
             {
-                current_lambda[i].row(0) = g_x.row(2 * (i + 1));
-                current_lambda[i].row(1) = g_x.row(2 * (i + 1) + 1);
+                ws_current_lambda_[i].row(0) = g_x.row(2 * (i + 1));
+                ws_current_lambda_[i].row(1) = g_x.row(2 * (i + 1) + 1);
             }
 
             for (int i = 0; i < num_blocks - 1; ++i)
             {
-                Eigen::Matrix<double, 2, DIM> term = solve2x2(D_mod_cache_[i].transpose(), current_lambda[i]);
-                d_rhs_mod[i] += term;
-                current_lambda[i + 1] -= U_blocks_cache_[i].transpose() * term;
+                Eigen::Matrix<double, 2, DIM> term = solve2x2(D_mod_cache_[i].transpose(), ws_current_lambda_[i]);
+                ws_d_rhs_mod_[i] += term;
+                ws_current_lambda_[i + 1] -= U_blocks_cache_[i].transpose() * term;
             }
-            d_rhs_mod[num_blocks - 1] += solve2x2(D_mod_cache_.back().transpose(), current_lambda.back());
+            ws_d_rhs_mod_[num_blocks - 1] += solve2x2(D_mod_cache_.back().transpose(), ws_current_lambda_.back());
 
             for (int i = num_blocks - 1; i > 0; --i)
             {
-                const int k = i + 2;
-                double hL = h(k - 2);
+                const Eigen::Matrix2d &L = L_blocks_cache_[i];
 
-                Eigen::Matrix2d L;
-                double hL_inv = 1.0 / hL;
-                double hL2_inv = hL_inv * hL_inv;
-                double hL3_inv = hL2_inv * hL_inv;
-                L << -24.0 * hL2_inv, -3.0 * hL_inv,
-                    -168.0 * hL3_inv, -24.0 * hL2_inv;
-
-                Eigen::Matrix<double, 2, DIM> term = solve2x2(D_mod_cache_[i - 1].transpose(), (L.transpose() * d_rhs_mod[i]));
-                d_rhs_mod[i - 1] -= term;
+                Eigen::Matrix<double, 2, DIM> term = solve2x2(
+                    D_mod_cache_[i - 1].transpose(),
+                    (L.transpose() * ws_rhs_mod_[i]).eval());
+                ws_rhs_mod_[i - 1] -= term;
             }
 
             for (int i = 0; i < num_blocks; ++i)
             {
-                const int k = i + 2; 
-                const Eigen::Matrix<double, 1, DIM> lam_v = d_rhs_mod[i].row(0); 
-                const Eigen::Matrix<double, 1, DIM> lam_a = d_rhs_mod[i].row(1); 
+                const int k = i + 2;
+                const Eigen::Matrix<double, 1, DIM> lam_v = ws_d_rhs_mod_[i].row(0);
+                const Eigen::Matrix<double, 1, DIM> lam_a = ws_d_rhs_mod_[i].row(1);
 
-                double hL = h(k - 2);
-                double hR = h(k - 1);
+                const auto &tp_L = time_powers_[k - 2];
+                const auto &tp_R = time_powers_[k - 1];
 
-                double hL_inv = 1.0 / hL;
-                double hL2_inv = hL_inv * hL_inv;
-                double hL3_inv = hL2_inv * hL_inv;
-                double hL4_inv = hL3_inv * hL_inv;
-                double hL5_inv = hL4_inv * hL_inv;
-
-                double hR_inv = 1.0 / hR;
-                double hR2_inv = hR_inv * hR_inv;
-                double hR3_inv = hR2_inv * hR_inv;
-                double hR4_inv = hR3_inv * hR_inv;
-                double hR5_inv = hR4_inv * hR_inv;
-
-                gradByPoints.row(k) += lam_v * (60.0 * hR3_inv) + lam_a * (-360.0 * hR4_inv);
-                gradByPoints.row(k - 1) += lam_v * (-60.0 * (hR3_inv + hL3_inv)) + lam_a * (360.0 * (hR4_inv - hL4_inv));
-                gradByPoints.row(k - 2) += lam_v * (60.0 * hL3_inv) + lam_a * (360.0 * hL4_inv);
+                gradByPoints.row(k) += lam_v * (60.0 * tp_R.h3_inv) + lam_a * (-360.0 * tp_R.h4_inv);
+                gradByPoints.row(k - 1) += lam_v * (-60.0 * (tp_R.h3_inv + tp_L.h3_inv)) + lam_a * (360.0 * (tp_R.h4_inv - tp_L.h4_inv));
+                gradByPoints.row(k - 2) += lam_v * (60.0 * tp_L.h3_inv) + lam_a * (360.0 * tp_L.h4_inv);
 
                 const RowVectorType dP_R = spatial_points_[k].transpose() - spatial_points_[k - 1].transpose();
                 const RowVectorType dP_L = spatial_points_[k - 1].transpose() - spatial_points_[k - 2].transpose();
 
-                const RowVectorType v_prev = internal_velocities_.row(k - 1);
-                const RowVectorType a_prev = internal_accelerations_.row(k - 1);
-                const RowVectorType v_curr = internal_velocities_.row(k);
-                const RowVectorType a_curr = internal_accelerations_.row(k);
-                const RowVectorType v_next = internal_velocities_.row(k + 1);
-                const RowVectorType a_next = internal_accelerations_.row(k + 1);
+                const RowVectorType v_prev = internal_vel_.row(k - 1);
+                const RowVectorType a_prev = internal_acc_.row(k - 1);
+                const RowVectorType v_curr = internal_vel_.row(k);
+                const RowVectorType a_curr = internal_acc_.row(k);
+                const RowVectorType v_next = internal_vel_.row(k + 1);
+                const RowVectorType a_next = internal_acc_.row(k + 1);
 
-                double term_rhs_hR = lam_v.dot(dP_R * (-180.0 * hR4_inv)) +
-                                     lam_a.dot(dP_R * (1440.0 * hR5_inv));
-
-                double dD_R_row0 = -72.0 * hR3_inv;
-                double dD_R_row0_a = -9.0 * hR2_inv;
-                double dD_R_row1 = 576.0 * hR4_inv;
-                double dD_R_row1_a = 72.0 * hR3_inv;
+                double term_rhs_hR = lam_v.dot(dP_R * (-180.0 * tp_R.h4_inv)) +
+                                     lam_a.dot(dP_R * (1440.0 * tp_R.h5_inv));
+                double dD_R_row0 = -72.0 * tp_R.h3_inv;
+                double dD_R_row0_a = -9.0 * tp_R.h2_inv;
+                double dD_R_row1 = 576.0 * tp_R.h4_inv;
+                double dD_R_row1_a = 72.0 * tp_R.h3_inv;
 
                 double term_LHS_D_hR = lam_v.dot(v_curr * dD_R_row0 + a_curr * dD_R_row0_a) +
                                        lam_a.dot(v_curr * dD_R_row1 + a_curr * dD_R_row1_a);
 
-                double dU_row0 = -48.0 * hR3_inv;
-                double dU_row0_a = 3.0 * hR2_inv;
-                double dU_row1 = 504.0 * hR4_inv;
-                double dU_row1_a = -48.0 * hR3_inv;
+                double dU_row0 = -48.0 * tp_R.h3_inv;
+                double dU_row0_a = 3.0 * tp_R.h2_inv;
+                double dU_row1 = 504.0 * tp_R.h4_inv;
+                double dU_row1_a = -48.0 * tp_R.h3_inv;
 
                 double term_LHS_U_hR = lam_v.dot(v_next * dU_row0 + a_next * dU_row0_a) +
                                        lam_a.dot(v_next * dU_row1 + a_next * dU_row1_a);
 
                 gradByTimes(k - 1) += term_rhs_hR - (term_LHS_D_hR + term_LHS_U_hR);
 
-                double term_rhs_hL = lam_v.dot(dP_L * (180.0 * hL4_inv)) +
-                                     lam_a.dot(dP_L * (1440.0 * hL5_inv));
+                double term_rhs_hL = lam_v.dot(dP_L * (180.0 * tp_L.h4_inv)) +
+                                     lam_a.dot(dP_L * (1440.0 * tp_L.h5_inv));
 
-                double dL_row0 = 48.0 * hL3_inv;
-                double dL_row0_a = 3.0 * hL2_inv;
-                double dL_row1 = 504.0 * hL4_inv;
-                double dL_row1_a = 48.0 * hL3_inv;
+                double dL_row0 = 48.0 * tp_L.h3_inv;
+                double dL_row0_a = 3.0 * tp_L.h2_inv;
+                double dL_row1 = 504.0 * tp_L.h4_inv;
+                double dL_row1_a = 48.0 * tp_L.h3_inv;
 
                 double term_LHS_L_hL = lam_v.dot(v_prev * dL_row0 + a_prev * dL_row0_a) +
                                        lam_a.dot(v_prev * dL_row1 + a_prev * dL_row1_a);
 
-                double dD_L_row0 = 72.0 * hL3_inv;
-                double dD_L_row0_a = -9.0 * hL2_inv;
-                double dD_L_row1 = 576.0 * hL4_inv;
-                double dD_L_row1_a = -72.0 * hL3_inv;
+                double dD_L_row0 = 72.0 * tp_L.h3_inv;
+                double dD_L_row0_a = -9.0 * tp_L.h2_inv;
+                double dD_L_row1 = 576.0 * tp_L.h4_inv;
+                double dD_L_row1_a = -72.0 * tp_L.h3_inv;
 
                 double term_LHS_D_hL = lam_v.dot(v_curr * dD_L_row0 + a_curr * dD_L_row0_a) +
                                        lam_a.dot(v_curr * dD_L_row1 + a_curr * dD_L_row1_a);
@@ -1336,6 +1328,28 @@ namespace SplineTrajectory
                 cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
         }
 
+        void precomputeTimePowers()
+        {
+            int n = static_cast<int>(time_segments_.size());
+            time_powers_.resize(n);
+
+            for (int i = 0; i < n; ++i)
+            {
+                double h = time_segments_[i];
+                double iv = 1.0 / h;
+                double iv2 = iv * iv;
+                double iv3 = iv2 * iv;
+
+                time_powers_[i].h = h;
+                time_powers_[i].h_inv = iv;
+                time_powers_[i].h2_inv = iv2;
+                time_powers_[i].h3_inv = iv3;
+                time_powers_[i].h4_inv = iv3 * iv;
+                time_powers_[i].h5_inv = iv3 * iv2;
+                time_powers_[i].h6_inv = iv3 * iv3;
+            }
+        }
+
         template <typename DerivedB>
         static inline Eigen::Matrix<double, 2, DerivedB::ColsAtCompileTime>
         solve2x2(const Eigen::Matrix2d &A, const Eigen::MatrixBase<DerivedB> &B)
@@ -1354,7 +1368,6 @@ namespace SplineTrajectory
         }
 
         void solveInternalDerivatives(const MatrixType &P,
-                                      const Eigen::VectorXd &h,
                                       MatrixType &p_out,
                                       MatrixType &q_out)
         {
@@ -1377,49 +1390,39 @@ namespace SplineTrajectory
             B_right.row(0) = boundary_.end_velocity.transpose();
             B_right.row(1) = boundary_.end_acceleration.transpose();
 
-            U_blocks_cache_.clear();
-            D_mod_cache_.clear();
-            U_blocks_cache_.reserve(std::max(0, num_blocks - 1));
-            D_mod_cache_.reserve(num_blocks);
-
-            std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> rhs_mod;
-            rhs_mod.reserve(num_blocks);
+            U_blocks_cache_.resize(std::max(0, num_blocks - 1));
+            D_mod_cache_.resize(num_blocks);
+            L_blocks_cache_.resize(num_blocks);
+            ws_rhs_mod_.resize(num_blocks);
 
             for (int i = 0; i < num_blocks; ++i)
             {
-                const int k = i + 2; 
-                const double hL = h(k - 2);
-                const double hR = h(k - 1);
+                const int k = i + 2;
 
-                const double hL_inv = 1.0 / hL;
-                const double hL2_inv = hL_inv * hL_inv;
-                const double hL3_inv = hL2_inv * hL_inv;
-                const double hL4_inv = hL3_inv * hL_inv;
-                const double hR_inv = 1.0 / hR;
-                const double hR2_inv = hR_inv * hR_inv;
-                const double hR3_inv = hR2_inv * hR_inv;
-                const double hR4_inv = hR3_inv * hR_inv;
+                const auto &tp_L = time_powers_[k - 2];
+                const auto &tp_R = time_powers_[k - 1];
 
-                Eigen::Matrix<double, 1, DIM> r3 = 60.0 * ((P.row(k) - P.row(k - 1)) * hR3_inv - (P.row(k - 1) - P.row(k - 2)) * hL3_inv);
-                Eigen::Matrix<double, 1, DIM> r4 = 360.0 * ((P.row(k - 1) - P.row(k)) * hR4_inv + (P.row(k - 2) - P.row(k - 1)) * hL4_inv);
+                Eigen::Matrix<double, 1, DIM> r3 = 60.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h3_inv - (P.row(k - 1) - P.row(k - 2)) * tp_L.h3_inv);
+                Eigen::Matrix<double, 1, DIM> r4 = 360.0 * ((P.row(k - 1) - P.row(k)) * tp_R.h4_inv + (P.row(k - 2) - P.row(k - 1)) * tp_L.h4_inv);
                 Eigen::Matrix<double, 2, DIM> r;
                 r.row(0) = r3;
                 r.row(1) = r4;
 
                 Eigen::Matrix2d D;
-                D << -36.0 * hL2_inv + 36.0 * hR2_inv, 9.0 * (hL_inv + hR_inv),
-                    -192.0 * (hL3_inv + hR3_inv), 36.0 * (hL2_inv - hR2_inv);
+                D << -36.0 * tp_L.h2_inv + 36.0 * tp_R.h2_inv, 9.0 * (tp_L.h_inv + tp_R.h_inv),
+                    -192.0 * (tp_L.h3_inv + tp_R.h3_inv), 36.0 * (tp_L.h2_inv - tp_R.h2_inv);
 
                 Eigen::Matrix2d L;
-                L << -24.0 * hL2_inv, -3.0 * hL_inv,
-                    -168.0 * hL3_inv, -24.0 * hL2_inv;
+                L << -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv,
+                    -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv;
+                L_blocks_cache_[i] = L;
 
                 Eigen::Matrix2d U;
                 if (k < n - 1)
                 {
-                    U << 24.0 * hR2_inv, -3.0 * hR_inv,
-                        -168.0 * hR3_inv, 24.0 * hR2_inv;
-                    U_blocks_cache_.push_back(U);
+                    U << 24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv,
+                        -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv;
+                    U_blocks_cache_[i] = U;
                 }
 
                 if (k == 2)
@@ -1428,32 +1431,31 @@ namespace SplineTrajectory
                 }
                 else
                 {
-                    const Eigen::Matrix2d X = solve2x2(D_mod_cache_.back(), U_blocks_cache_[i - 1]);
-                    const Eigen::Matrix<double, 2, DIM> Y = solve2x2(D_mod_cache_.back(), rhs_mod.back());
+                    const Eigen::Matrix2d X = solve2x2(D_mod_cache_[i - 1], U_blocks_cache_[i - 1]);
+                    const Eigen::Matrix<double, 2, DIM> Y = solve2x2(D_mod_cache_[i - 1], ws_rhs_mod_[i - 1]);
                     D.noalias() -= L * X;
                     r.noalias() -= L * Y;
                 }
 
-
                 if (k == n - 1)
                 {
                     Eigen::Matrix2d U_last;
-                    U_last << 24.0 * hR2_inv, -3.0 * hR_inv,
-                        -168.0 * hR3_inv, 24.0 * hR2_inv;
+                    U_last << 24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv,
+                        -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv;
                     r.noalias() -= U_last * B_right;
                 }
 
-                D_mod_cache_.push_back(D); 
-                rhs_mod.push_back(r);
+                D_mod_cache_[i] = D;
+                ws_rhs_mod_[i] = r;
             }
 
             std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> solution(num_blocks);
 
-            solution[num_blocks - 1] = solve2x2(D_mod_cache_.back(), rhs_mod.back());
+            solution[num_blocks - 1] = solve2x2(D_mod_cache_[num_blocks - 1], ws_rhs_mod_[num_blocks - 1]);
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
-                const Eigen::Matrix<double, 2, DIM> rhs_temp = rhs_mod[i] - U_blocks_cache_[i] * solution[i + 1];
+                const Eigen::Matrix<double, 2, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * solution[i + 1];
                 solution[i] = solve2x2(D_mod_cache_[i], rhs_temp);
             }
 
@@ -1478,7 +1480,7 @@ namespace SplineTrajectory
             }
 
             // MatrixType p_nodes, q_nodes;
-            solveInternalDerivatives(P, h, internal_velocities_, internal_accelerations_);
+            solveInternalDerivatives(P, internal_vel_, internal_acc_);
 
             MatrixType coeffs(n * 6, DIM);
 
@@ -1490,12 +1492,12 @@ namespace SplineTrajectory
                 const double h3_inv = h2_inv * h_inv;
 
                 const RowVectorType c0 = P.row(i);
-                const RowVectorType c1 = internal_velocities_.row(i);
-                const RowVectorType c2 = internal_accelerations_.row(i) * 0.5;
+                const RowVectorType c1 = internal_vel_.row(i);
+                const RowVectorType c2 = internal_acc_.row(i) * 0.5;
 
                 const RowVectorType rhs1 = P.row(i + 1) - c0 - c1 * hi - c2 * (hi * hi);
-                const RowVectorType rhs2 = internal_velocities_.row(i + 1) - c1 - (2.0 * c2) * hi;
-                const RowVectorType rhs3 = internal_accelerations_.row(i + 1) - (2.0 * c2);
+                const RowVectorType rhs2 = internal_vel_.row(i + 1) - c1 - (2.0 * c2) * hi;
+                const RowVectorType rhs3 = internal_acc_.row(i + 1) - (2.0 * c2);
 
                 const RowVectorType c3 = (10.0 * h3_inv) * rhs1 - (4.0 * h2_inv) * rhs2 + (0.5 * h_inv) * rhs3;
                 const RowVectorType c4 = (-15.0 * h3_inv * h_inv) * rhs1 + (7.0 * h3_inv) * rhs2 - (h2_inv)*rhs3;
