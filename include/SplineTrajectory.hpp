@@ -1025,6 +1025,7 @@ namespace SplineTrajectory
         std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_d_rhs_mod_;
         std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_current_lambda_;
         std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_rhs_mod_;
+        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_solution_;
 
     private:
         void updateSplineInternal()
@@ -1495,20 +1496,20 @@ namespace SplineTrajectory
                 ws_rhs_mod_[i] = r;
             }
 
-            std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> solution(num_blocks);
+            ws_solution_.resize(num_blocks);
 
-            solution[num_blocks - 1] = D_inv_cache_[num_blocks - 1] * ws_rhs_mod_[num_blocks - 1];
+            ws_solution_[num_blocks - 1] = D_inv_cache_[num_blocks - 1] * ws_rhs_mod_[num_blocks - 1];
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
-                const Eigen::Matrix<double, 2, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * solution[i + 1];
-                solution[i] = D_inv_cache_[i] * rhs_temp;
+                const Eigen::Matrix<double, 2, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * ws_solution_[i + 1];
+                ws_solution_[i] = D_inv_cache_[i] * rhs_temp;
             }
 
             for (int i = 0; i < num_blocks; ++i)
             {
-                p_out.row(i + 1) = solution[i].row(0);
-                q_out.row(i + 1) = solution[i].row(1);
+                p_out.row(i + 1) = ws_solution_[i].row(0);
+                q_out.row(i + 1) = ws_solution_[i].row(1);
             }
         }
 
@@ -1600,10 +1601,11 @@ namespace SplineTrajectory
         std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_inv_cache_;
         std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> U_blocks_cache_;
         std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> L_blocks_cache_;
-        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_rhs_mod_;
 
+        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_rhs_mod_;
         std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_d_rhs_mod_;
         std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_current_lambda_;
+        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_solution_;
 
         MatrixType internal_vel_;
         MatrixType internal_acc_;
@@ -2177,22 +2179,22 @@ namespace SplineTrajectory
                 ws_rhs_mod_[i] = r;
             }
 
-            std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> solution(num_blocks);
+            ws_solution_.resize(num_blocks);
 
-            solution[num_blocks - 1] = D_inv_cache_[num_blocks - 1] * ws_rhs_mod_[num_blocks - 1];
+            ws_solution_[num_blocks - 1] = D_inv_cache_[num_blocks - 1] * ws_rhs_mod_[num_blocks - 1];
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
-                const Eigen::Matrix<double, 3, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * solution[i + 1];
-                solution[i] = D_inv_cache_[i] * rhs_temp;
+                const Eigen::Matrix<double, 3, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * ws_solution_[i + 1];
+                ws_solution_[i] = D_inv_cache_[i] * rhs_temp;
             }
 
             for (int i = 0; i < num_blocks; ++i)
             {
                 const int row = i + 1;
-                p_out.row(row) = solution[i].row(0);
-                q_out.row(row) = solution[i].row(1);
-                s_out.row(row) = solution[i].row(2);
+                p_out.row(row) = ws_solution_[i].row(0);
+                q_out.row(row) = ws_solution_[i].row(1);
+                s_out.row(row) = ws_solution_[i].row(2);
             }
         }
 
