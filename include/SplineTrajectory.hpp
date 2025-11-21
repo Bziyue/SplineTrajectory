@@ -978,7 +978,7 @@ namespace SplineTrajectory
         MatrixType coeffs_;
         PPolyND<DIM> trajectory_;
 
-        std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> D_mod_cache_;
+        std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> D_inv_cache_;
         std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> U_blocks_cache_;
         std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> L_blocks_cache_;
         MatrixType internal_vel_;
@@ -1218,19 +1218,17 @@ namespace SplineTrajectory
 
             for (int i = 0; i < num_blocks - 1; ++i)
             {
-                Eigen::Matrix<double, 2, DIM> term = solve2x2(D_mod_cache_[i].transpose(), ws_current_lambda_[i]);
+                Eigen::Matrix<double, 2, DIM> term = D_inv_cache_[i].transpose() * ws_current_lambda_[i];
                 ws_d_rhs_mod_[i] += term;
                 ws_current_lambda_[i + 1] -= U_blocks_cache_[i].transpose() * term;
             }
-            ws_d_rhs_mod_[num_blocks - 1] += solve2x2(D_mod_cache_.back().transpose(), ws_current_lambda_.back());
+            ws_d_rhs_mod_[num_blocks - 1] += D_inv_cache_.back().transpose() * ws_current_lambda_.back();
 
             for (int i = num_blocks - 1; i > 0; --i)
             {
                 const Eigen::Matrix2d &L = L_blocks_cache_[i];
 
-                Eigen::Matrix<double, 2, DIM> term = solve2x2(
-                    D_mod_cache_[i - 1].transpose(),
-                    (L.transpose() * ws_d_rhs_mod_[i]).eval());
+                Eigen::Matrix<double, 2, DIM> term = D_inv_cache_[i - 1].transpose() * (L.transpose() * ws_d_rhs_mod_[i]);
                 ws_d_rhs_mod_[i - 1] -= term;
             }
 
@@ -1350,21 +1348,16 @@ namespace SplineTrajectory
             }
         }
 
-        template <typename DerivedB>
-        static inline Eigen::Matrix<double, 2, DerivedB::ColsAtCompileTime>
-        solve2x2(const Eigen::Matrix2d &A, const Eigen::MatrixBase<DerivedB> &B)
+        static inline void Inverse2x2(const Eigen::Matrix2d &A, Eigen::Matrix2d &A_inv_out)
         {
-            static_assert(DerivedB::RowsAtCompileTime == 2, "B must have 2 rows");
             const double a = A(0, 0), b = A(0, 1), c = A(1, 0), d = A(1, 1);
             const double det = a * d - b * c;
-
             const double inv_det = 1.0 / det;
 
-            Eigen::Matrix<double, 2, DerivedB::ColsAtCompileTime> result;
-            result.row(0) = (d * B.row(0) - b * B.row(1)) * inv_det;
-            result.row(1) = (-c * B.row(0) + a * B.row(1)) * inv_det;
-
-            return result;
+            A_inv_out(0, 0) = d * inv_det;
+            A_inv_out(0, 1) = -b * inv_det;
+            A_inv_out(1, 0) = -c * inv_det;
+            A_inv_out(1, 1) = a * inv_det;
         }
 
         void solveInternalDerivatives(const MatrixType &P,
@@ -1391,14 +1384,13 @@ namespace SplineTrajectory
             B_right.row(1) = boundary_.end_acceleration.transpose();
 
             U_blocks_cache_.resize(std::max(0, num_blocks - 1));
-            D_mod_cache_.resize(num_blocks);
+            D_inv_cache_.resize(num_blocks); 
             L_blocks_cache_.resize(num_blocks);
             ws_rhs_mod_.resize(num_blocks);
 
             for (int i = 0; i < num_blocks; ++i)
             {
                 const int k = i + 2;
-
                 const auto &tp_L = time_powers_[k - 2];
                 const auto &tp_R = time_powers_[k - 1];
 
@@ -1425,14 +1417,15 @@ namespace SplineTrajectory
                     U_blocks_cache_[i] = U;
                 }
 
-                if (k == 2)
+                if (i == 0) // k == 2
                 {
                     r.noalias() -= L * B_left;
                 }
                 else
                 {
-                    const Eigen::Matrix2d X = solve2x2(D_mod_cache_[i - 1], U_blocks_cache_[i - 1]);
-                    const Eigen::Matrix<double, 2, DIM> Y = solve2x2(D_mod_cache_[i - 1], ws_rhs_mod_[i - 1]);
+                    const Eigen::Matrix2d X = D_inv_cache_[i - 1] * U_blocks_cache_[i - 1];
+                    const Eigen::Matrix<double, 2, DIM> Y = D_inv_cache_[i - 1] * ws_rhs_mod_[i - 1];
+
                     D.noalias() -= L * X;
                     r.noalias() -= L * Y;
                 }
@@ -1445,18 +1438,18 @@ namespace SplineTrajectory
                     r.noalias() -= U_last * B_right;
                 }
 
-                D_mod_cache_[i] = D;
+                Inverse2x2(D, D_inv_cache_[i]);
                 ws_rhs_mod_[i] = r;
             }
 
             std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> solution(num_blocks);
 
-            solution[num_blocks - 1] = solve2x2(D_mod_cache_[num_blocks - 1], ws_rhs_mod_[num_blocks - 1]);
+            solution[num_blocks - 1] = D_inv_cache_[num_blocks - 1] * ws_rhs_mod_[num_blocks - 1];
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
                 const Eigen::Matrix<double, 2, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * solution[i + 1];
-                solution[i] = solve2x2(D_mod_cache_[i], rhs_temp);
+                solution[i] = D_inv_cache_[i] * rhs_temp;
             }
 
             for (int i = 0; i < num_blocks; ++i)
@@ -1479,7 +1472,6 @@ namespace SplineTrajectory
                 P.row(i) = spatial_points_[i].transpose();
             }
 
-            // MatrixType p_nodes, q_nodes;
             solveInternalDerivatives(P, internal_vel_, internal_acc_);
 
             MatrixType coeffs(n * 6, DIM);
@@ -1557,7 +1549,7 @@ namespace SplineTrajectory
         };
         std::vector<TimePowers> time_powers_;
 
-        std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_mod_cache_;
+        std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_inv_cache_;
         std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> U_blocks_cache_;
         std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> L_blocks_cache_;
         std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_rhs_mod_;
@@ -1798,25 +1790,23 @@ namespace SplineTrajectory
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    ws_current_lambda_[i].row(0) = g_x.row(3 * (i + 1) + 0); 
-                    ws_current_lambda_[i].row(1) = g_x.row(3 * (i + 1) + 1); 
-                    ws_current_lambda_[i].row(2) = g_x.row(3 * (i + 1) + 2); 
+                    ws_current_lambda_[i].row(0) = g_x.row(3 * (i + 1) + 0);
+                    ws_current_lambda_[i].row(1) = g_x.row(3 * (i + 1) + 1);
+                    ws_current_lambda_[i].row(2) = g_x.row(3 * (i + 1) + 2);
                 }
 
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    Eigen::Matrix<double, 3, DIM> term = solve3x3(D_mod_cache_[i].transpose(), ws_current_lambda_[i]);
+                    Eigen::Matrix<double, 3, DIM> term = D_inv_cache_[i].transpose() * ws_current_lambda_[i];
                     ws_d_rhs_mod_[i] += term;
                     ws_current_lambda_[i + 1] -= U_blocks_cache_[i].transpose() * term;
                 }
-                ws_d_rhs_mod_[num_blocks - 1] += solve3x3(D_mod_cache_.back().transpose(), ws_current_lambda_.back());
+                ws_d_rhs_mod_[num_blocks - 1] += D_inv_cache_.back().transpose() * ws_current_lambda_.back();
 
                 for (int i = num_blocks - 1; i > 0; --i)
                 {
                     const Eigen::Matrix3d &L = L_blocks_cache_[i];
-                    Eigen::Matrix<double, 3, DIM> term = solve3x3(
-                        D_mod_cache_[i - 1].transpose(),
-                        (L.transpose() * ws_d_rhs_mod_[i]).eval());
+                    Eigen::Matrix<double, 3, DIM> term = D_inv_cache_[i - 1].transpose() * (L.transpose() * ws_d_rhs_mod_[i]);
                     ws_d_rhs_mod_[i - 1] -= term;
                 }
 
@@ -1970,28 +1960,40 @@ namespace SplineTrajectory
             }
         }
 
-        template <typename DerivedB>
-        static inline Eigen::Matrix<double, 3, DerivedB::ColsAtCompileTime>
-        solve3x3(const Eigen::Matrix3d &A, const Eigen::MatrixBase<DerivedB> &B)
+        static inline void Inverse3x3(const Eigen::Matrix3d &A, Eigen::Matrix3d &A_inv_out)
         {
-            static_assert(DerivedB::RowsAtCompileTime == 3, "B must have 3 rows");
-            const double a = A(0, 0), b = A(0, 1), c = A(0, 2),
-                         d = A(1, 0), e = A(1, 1), f = A(1, 2),
-                         g = A(2, 0), h = A(2, 1), i = A(2, 2);
-            const double det = a * e * i + b * f * g + d * h * c - c * e * g - f * h * a - b * d * i;
 
-            const double cof_a = e * i - f * h, cof_b = -(b * i - c * h), cof_c = b * f - c * e,
-                         cof_d = -(d * i - f * g), cof_e = a * i - c * g, cof_f = -(a * f - c * d),
-                         cof_g = d * h - e * g, cof_h = -(a * h - b * g), cof_i = a * e - b * d;
+            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2),
+                         a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2),
+                         a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
 
+            const double c00 = a11 * a22 - a12 * a21;
+            const double c01 = -(a10 * a22 - a12 * a20); 
+            const double c02 = a10 * a21 - a11 * a20;
+
+            const double c10 = -(a01 * a22 - a02 * a21); 
+            const double c11 = a00 * a22 - a02 * a20;
+            const double c12 = -(a00 * a21 - a01 * a20); 
+
+
+            const double c20 = a01 * a12 - a02 * a11;
+            const double c21 = -(a00 * a12 - a02 * a10);
+            const double c22 = a00 * a11 - a01 * a10;
+
+            const double det = a00 * c00 + a01 * c01 + a02 * c02;
             const double inv_det = 1.0 / det;
+            
+            A_inv_out(0, 0) = c00 * inv_det;
+            A_inv_out(0, 1) = c10 * inv_det;
+            A_inv_out(0, 2) = c20 * inv_det; 
 
-            Eigen::Matrix<double, 3, DerivedB::ColsAtCompileTime> result;
-            result.row(0) = (cof_a * B.row(0) + cof_b * B.row(1) + cof_c * B.row(2)) * inv_det;
-            result.row(1) = (cof_d * B.row(0) + cof_e * B.row(1) + cof_f * B.row(2)) * inv_det;
-            result.row(2) = (cof_g * B.row(0) + cof_h * B.row(1) + cof_i * B.row(2)) * inv_det;
+            A_inv_out(1, 0) = c01 * inv_det; 
+            A_inv_out(1, 1) = c11 * inv_det;
+            A_inv_out(1, 2) = c21 * inv_det; 
 
-            return result;
+            A_inv_out(2, 0) = c02 * inv_det; 
+            A_inv_out(2, 1) = c12 * inv_det; 
+            A_inv_out(2, 2) = c22 * inv_det;
         }
 
     private:
@@ -2028,14 +2030,13 @@ namespace SplineTrajectory
             B_right.row(2) = boundary_.end_jerk.transpose();
 
             U_blocks_cache_.resize(std::max(0, num_blocks - 1));
-            D_mod_cache_.resize(num_blocks);
+            D_inv_cache_.resize(num_blocks); 
             L_blocks_cache_.resize(num_blocks);
             ws_rhs_mod_.resize(num_blocks);
 
             for (int i = 0; i < num_blocks; ++i)
             {
                 const int k = i + 2;
-
                 const auto &tp_L = time_powers_[k - 2];
                 const auto &tp_R = time_powers_[k - 1];
 
@@ -2078,12 +2079,12 @@ namespace SplineTrajectory
                 }
                 else
                 {
-                    const Eigen::Matrix3d &D_prev = D_mod_cache_[i - 1];
+                    const Eigen::Matrix3d &D_prev_inv = D_inv_cache_[i - 1]; 
                     const Eigen::Matrix3d &U_prev = U_blocks_cache_[i - 1];
                     const Eigen::Matrix<double, 3, DIM> &r_prev = ws_rhs_mod_[i - 1];
 
-                    const Eigen::Matrix3d X = solve3x3(D_prev, U_prev);
-                    const Eigen::Matrix<double, 3, DIM> Y = solve3x3(D_prev, r_prev);
+                    const Eigen::Matrix3d X = D_prev_inv * U_prev;
+                    const Eigen::Matrix<double, 3, DIM> Y = D_prev_inv * r_prev;
 
                     D.noalias() -= L * X;
                     r.noalias() -= L * Y;
@@ -2099,17 +2100,18 @@ namespace SplineTrajectory
                     r.noalias() -= U_last * B_right;
                 }
 
-                D_mod_cache_[i] = D;
+                Inverse3x3(D, D_inv_cache_[i]);
                 ws_rhs_mod_[i] = r;
             }
 
             std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> solution(num_blocks);
-            solution[num_blocks - 1] = solve3x3(D_mod_cache_[num_blocks - 1], ws_rhs_mod_[num_blocks - 1]);
+
+            solution[num_blocks - 1] = D_inv_cache_[num_blocks - 1] * ws_rhs_mod_[num_blocks - 1];
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
                 const Eigen::Matrix<double, 3, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * solution[i + 1];
-                solution[i] = solve3x3(D_mod_cache_[i], rhs_temp);
+                solution[i] = D_inv_cache_[i] * rhs_temp;
             }
 
             for (int i = 0; i < num_blocks; ++i)
