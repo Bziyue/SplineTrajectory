@@ -1517,8 +1517,6 @@ namespace SplineTrajectory
             const int n_pts = static_cast<int>(spatial_points_.size());
             const int n = num_segments_;
 
-            Eigen::Map<const Eigen::VectorXd> h(time_segments_.data(), n);
-
             MatrixType P(n_pts, DIM);
             for (int i = 0; i < n_pts; ++i)
             {
@@ -1531,22 +1529,19 @@ namespace SplineTrajectory
 
             for (int i = 0; i < n; ++i)
             {
-                const double hi = h(i);
-                const double h_inv = 1.0 / hi;
-                const double h2_inv = h_inv * h_inv;
-                const double h3_inv = h2_inv * h_inv;
+                const auto &tp = time_powers_[i];
 
                 const RowVectorType c0 = P.row(i);
                 const RowVectorType c1 = internal_vel_.row(i);
                 const RowVectorType c2 = internal_acc_.row(i) * 0.5;
 
-                const RowVectorType rhs1 = P.row(i + 1) - c0 - c1 * hi - c2 * (hi * hi);
-                const RowVectorType rhs2 = internal_vel_.row(i + 1) - c1 - (2.0 * c2) * hi;
+                const RowVectorType rhs1 = P.row(i + 1) - c0 - c1 * tp.h - c2 * (tp.h * tp.h);
+                const RowVectorType rhs2 = internal_vel_.row(i + 1) - c1 - (2.0 * c2) * tp.h;
                 const RowVectorType rhs3 = internal_acc_.row(i + 1) - (2.0 * c2);
 
-                const RowVectorType c3 = (10.0 * h3_inv) * rhs1 - (4.0 * h2_inv) * rhs2 + (0.5 * h_inv) * rhs3;
-                const RowVectorType c4 = (-15.0 * h3_inv * h_inv) * rhs1 + (7.0 * h3_inv) * rhs2 - (h2_inv)*rhs3;
-                const RowVectorType c5 = (6.0 * h3_inv * h2_inv) * rhs1 - (3.0 * h3_inv * h_inv) * rhs2 + (0.5 * h3_inv) * rhs3;
+                const RowVectorType c3 = (10.0 * tp.h3_inv) * rhs1 - (4.0 * tp.h2_inv) * rhs2 + (0.5 * tp.h_inv) * rhs3;
+                const RowVectorType c4 = (-15.0 * tp.h4_inv) * rhs1 + (7.0 * tp.h3_inv) * rhs2 - (tp.   h2_inv)*rhs3;
+                const RowVectorType c5 = (6.0 * tp.h5_inv) * rhs1 - (3.0 * tp.h4_inv) * rhs2 + (0.5 * tp.h3_inv) * rhs3;
 
                 coeffs.row(i * 6 + 0) = c0;
                 coeffs.row(i * 6 + 1) = c1;
