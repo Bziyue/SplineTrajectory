@@ -719,6 +719,20 @@ namespace SplineTrajectory
             return total_energy;
         }
 
+        /**
+         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         *
+         * This function computes gradients for ALL waypoints, including the start and end points.
+         *
+         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
+         * Contains gradients for P_0, P_1, ..., P_N.
+         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
+         *
+         * @note
+         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
+         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
+         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
@@ -791,7 +805,20 @@ namespace SplineTrajectory
                 gradByTimes(k) -= lambda.row(k + 1).dot(term_k1);
             }
         }
-
+        /**
+         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         *
+         * This function computes gradients for ALL waypoints, including the start and end points.
+         *
+         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
+         * Contains gradients for P_0, P_1, ..., P_N.
+         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
+         *
+         * @note
+         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
+         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
+         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
@@ -1137,7 +1164,20 @@ namespace SplineTrajectory
             MatrixType points;
             Eigen::VectorXd times;
         };
-
+        /**
+         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         *
+         * This function computes gradients for ALL waypoints, including the start and end points.
+         *
+         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
+         * Contains gradients for P_0, P_1, ..., P_N.
+         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
+         *
+         * @note
+         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
+         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
+         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
@@ -1200,7 +1240,7 @@ namespace SplineTrajectory
                 gradByTimes(i) += gc3.dot(dc3_dh) + gc4.dot(dc4_dh) + gc5.dot(dc5_dh);
             }
 
-            const int num_blocks = n - 2;
+            const int num_blocks = n - 1;
             if (num_blocks <= 0)
                 return;
 
@@ -1297,7 +1337,20 @@ namespace SplineTrajectory
                 gradByTimes(k - 2) += term_rhs_hL - (term_LHS_L_hL + term_LHS_D_hL);
             }
         }
-
+        /**
+         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         *
+         * This function computes gradients for ALL waypoints, including the start and end points.
+         *
+         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
+         * Contains gradients for P_0, P_1, ..., P_N.
+         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
+         *
+         * @note
+         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
+         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
+         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
@@ -1384,7 +1437,7 @@ namespace SplineTrajectory
             B_right.row(1) = boundary_.end_acceleration.transpose();
 
             U_blocks_cache_.resize(std::max(0, num_blocks - 1));
-            D_inv_cache_.resize(num_blocks); 
+            D_inv_cache_.resize(num_blocks);
             L_blocks_cache_.resize(num_blocks);
             ws_rhs_mod_.resize(num_blocks);
 
@@ -1700,7 +1753,20 @@ namespace SplineTrajectory
             }
             return total_energy;
         }
-
+        /**
+         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         *
+         * This function computes gradients for ALL waypoints, including the start and end points.
+         *
+         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
+         * Contains gradients for P_0, P_1, ..., P_N.
+         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
+         *
+         * @note
+         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
+         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
+         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
@@ -1779,7 +1845,7 @@ namespace SplineTrajectory
                 gradByTimes(i) += gc4.dot(dc4) + gc5.dot(dc5) + gc6.dot(dc6) + gc7.dot(dc7);
             }
 
-            const int num_blocks = n - 2;
+            const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
                 ws_d_rhs_mod_.resize(num_blocks);
@@ -1908,7 +1974,20 @@ namespace SplineTrajectory
             MatrixType points;
             Eigen::VectorXd times;
         };
-
+        /**
+         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         *
+         * This function computes gradients for ALL waypoints, including the start and end points.
+         *
+         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
+         * Contains gradients for P_0, P_1, ..., P_N.
+         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
+         *
+         * @note
+         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
+         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
+         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
@@ -1968,13 +2047,12 @@ namespace SplineTrajectory
                          a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
 
             const double c00 = a11 * a22 - a12 * a21;
-            const double c01 = -(a10 * a22 - a12 * a20); 
+            const double c01 = -(a10 * a22 - a12 * a20);
             const double c02 = a10 * a21 - a11 * a20;
 
-            const double c10 = -(a01 * a22 - a02 * a21); 
+            const double c10 = -(a01 * a22 - a02 * a21);
             const double c11 = a00 * a22 - a02 * a20;
-            const double c12 = -(a00 * a21 - a01 * a20); 
-
+            const double c12 = -(a00 * a21 - a01 * a20);
 
             const double c20 = a01 * a12 - a02 * a11;
             const double c21 = -(a00 * a12 - a02 * a10);
@@ -1982,17 +2060,17 @@ namespace SplineTrajectory
 
             const double det = a00 * c00 + a01 * c01 + a02 * c02;
             const double inv_det = 1.0 / det;
-            
+
             A_inv_out(0, 0) = c00 * inv_det;
             A_inv_out(0, 1) = c10 * inv_det;
-            A_inv_out(0, 2) = c20 * inv_det; 
+            A_inv_out(0, 2) = c20 * inv_det;
 
-            A_inv_out(1, 0) = c01 * inv_det; 
+            A_inv_out(1, 0) = c01 * inv_det;
             A_inv_out(1, 1) = c11 * inv_det;
-            A_inv_out(1, 2) = c21 * inv_det; 
+            A_inv_out(1, 2) = c21 * inv_det;
 
-            A_inv_out(2, 0) = c02 * inv_det; 
-            A_inv_out(2, 1) = c12 * inv_det; 
+            A_inv_out(2, 0) = c02 * inv_det;
+            A_inv_out(2, 1) = c12 * inv_det;
             A_inv_out(2, 2) = c22 * inv_det;
         }
 
@@ -2030,7 +2108,7 @@ namespace SplineTrajectory
             B_right.row(2) = boundary_.end_jerk.transpose();
 
             U_blocks_cache_.resize(std::max(0, num_blocks - 1));
-            D_inv_cache_.resize(num_blocks); 
+            D_inv_cache_.resize(num_blocks);
             L_blocks_cache_.resize(num_blocks);
             ws_rhs_mod_.resize(num_blocks);
 
@@ -2079,7 +2157,7 @@ namespace SplineTrajectory
                 }
                 else
                 {
-                    const Eigen::Matrix3d &D_prev_inv = D_inv_cache_[i - 1]; 
+                    const Eigen::Matrix3d &D_prev_inv = D_inv_cache_[i - 1];
                     const Eigen::Matrix3d &U_prev = U_blocks_cache_[i - 1];
                     const Eigen::Matrix<double, 3, DIM> &r_prev = ws_rhs_mod_[i - 1];
 
