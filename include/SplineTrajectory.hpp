@@ -1230,8 +1230,8 @@ namespace SplineTrajectory
 
                 Eigen::Matrix<double, 2, DIM> term = solve2x2(
                     D_mod_cache_[i - 1].transpose(),
-                    (L.transpose() * ws_rhs_mod_[i]).eval());
-                ws_rhs_mod_[i - 1] -= term;
+                    (L.transpose() * ws_d_rhs_mod_[i]).eval());
+                ws_d_rhs_mod_[i - 1] -= term;
             }
 
             for (int i = 0; i < num_blocks; ++i)
@@ -1544,11 +1544,37 @@ namespace SplineTrajectory
         MatrixType coeffs_;
         PPolyND<DIM> trajectory_;
 
+        struct TimePowers
+        {
+            double h;
+            double h_inv;  // h^-1
+            double h2_inv; // h^-2
+            double h3_inv; // h^-3
+            double h4_inv; // h^-4
+            double h5_inv; // h^-5
+            double h6_inv; // h^-6
+            double h7_inv; // h^-7
+        };
+        std::vector<TimePowers> time_powers_;
+
+        std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_mod_cache_;
+        std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> U_blocks_cache_;
+        std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> L_blocks_cache_;
+        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_rhs_mod_;
+
+        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_d_rhs_mod_;
+        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_current_lambda_;
+
+        MatrixType internal_vel_;
+        MatrixType internal_acc_;
+        MatrixType internal_jerk_;
+
     private:
         void updateSplineInternal()
         {
             num_segments_ = static_cast<int>(time_segments_.size());
             updateCumulativeTimes();
+            precomputeTimePowers();
             coeffs_ = solveSepticSpline();
             is_initialized_ = true;
             initializePPoly();
@@ -1683,6 +1709,224 @@ namespace SplineTrajectory
             return total_energy;
         }
 
+        void propagateGrad(const MatrixType &partialGradByCoeffs,
+                           const Eigen::VectorXd &partialGradByTimes,
+                           MatrixType &gradByPoints,
+                           Eigen::VectorXd &gradByTimes)
+        {
+            const int n = num_segments_;
+            const int n_pts = static_cast<int>(spatial_points_.size());
+
+            gradByPoints = MatrixType::Zero(n_pts, DIM);
+            gradByTimes = partialGradByTimes;
+
+            MatrixType g_x = MatrixType::Zero(n_pts * 3, DIM);
+
+            for (int i = 0; i < n; ++i)
+            {
+                const auto &tp = time_powers_[i];
+
+                const RowVectorType gc0 = partialGradByCoeffs.row(i * 8 + 0);
+                const RowVectorType gc1 = partialGradByCoeffs.row(i * 8 + 1);
+                const RowVectorType gc2 = partialGradByCoeffs.row(i * 8 + 2);
+                const RowVectorType gc3 = partialGradByCoeffs.row(i * 8 + 3);
+                const RowVectorType gc4 = partialGradByCoeffs.row(i * 8 + 4);
+                const RowVectorType gc5 = partialGradByCoeffs.row(i * 8 + 5);
+                const RowVectorType gc6 = partialGradByCoeffs.row(i * 8 + 6);
+                const RowVectorType gc7 = partialGradByCoeffs.row(i * 8 + 7);
+
+                gradByPoints.row(i) += gc0;
+                g_x.row(3 * i + 0) += gc1;
+                g_x.row(3 * i + 1) += 0.5 * gc2;
+                g_x.row(3 * i + 2) += (1.0 / 6.0) * gc3;
+
+                gradByPoints.row(i) += gc4 * (-35.0 * tp.h4_inv) + gc5 * (84.0 * tp.h5_inv) +
+                                       gc6 * (-70.0 * tp.h6_inv) + gc7 * (20.0 * tp.h7_inv);
+
+                gradByPoints.row(i + 1) += gc4 * (35.0 * tp.h4_inv) + gc5 * (-84.0 * tp.h5_inv) +
+                                           gc6 * (70.0 * tp.h6_inv) + gc7 * (-20.0 * tp.h7_inv);
+
+                g_x.row(3 * i) += gc4 * (-20.0 * tp.h3_inv) + gc5 * (45.0 * tp.h4_inv) +
+                                  gc6 * (-36.0 * tp.h5_inv) + gc7 * (10.0 * tp.h6_inv);
+                g_x.row(3 * (i + 1)) += gc4 * (-15.0 * tp.h3_inv) + gc5 * (39.0 * tp.h4_inv) +
+                                        gc6 * (-34.0 * tp.h5_inv) + gc7 * (10.0 * tp.h6_inv);
+
+                g_x.row(3 * i + 1) += gc4 * (-5.0 * tp.h2_inv) + gc5 * (10.0 * tp.h3_inv) +
+                                      gc6 * (-7.5 * tp.h4_inv) + gc7 * (2.0 * tp.h5_inv);
+
+                g_x.row(3 * (i + 1) + 1) += gc4 * (2.5 * tp.h2_inv) + gc5 * (-7.0 * tp.h3_inv) +
+                                            gc6 * (6.5 * tp.h4_inv) + gc7 * (-2.0 * tp.h5_inv);
+
+                g_x.row(3 * i + 2) += gc4 * (-2.0 / 3.0 * tp.h_inv) + gc5 * (tp.h2_inv) +
+                                      gc6 * (-2.0 / 3.0 * tp.h3_inv) + gc7 * (1.0 / 6.0 * tp.h4_inv);
+
+                g_x.row(3 * (i + 1) + 2) += gc4 * (-1.0 / 6.0 * tp.h_inv) + gc5 * (0.5 * tp.h2_inv) +
+                                            gc6 * (-0.5 * tp.h3_inv) + gc7 * (1.0 / 6.0 * tp.h4_inv);
+
+                RowVectorType dc4 = (60.0 * internal_acc_.row(i) * tp.h3_inv - 30.0 * internal_acc_.row(i + 1) * tp.h3_inv +
+                                     4.0 * internal_jerk_.row(i) * tp.h2_inv + internal_jerk_.row(i + 1) * tp.h2_inv +
+                                     840.0 * spatial_points_[i].transpose() * tp.h5_inv - 840.0 * spatial_points_[i + 1].transpose() * tp.h5_inv +
+                                     360.0 * internal_vel_.row(i) * tp.h4_inv + 270.0 * internal_vel_.row(i + 1) * tp.h4_inv) *
+                                    (1.0 / 6.0);
+
+                RowVectorType dc5 = (-30.0 * internal_acc_.row(i) * tp.h3_inv + 21.0 * internal_acc_.row(i + 1) * tp.h3_inv -
+                                     2.0 * internal_jerk_.row(i) * tp.h2_inv - internal_jerk_.row(i + 1) * tp.h2_inv -
+                                     420.0 * spatial_points_[i].transpose() * tp.h5_inv + 420.0 * spatial_points_[i + 1].transpose() * tp.h5_inv -
+                                     180.0 * internal_vel_.row(i) * tp.h4_inv - 156.0 * internal_vel_.row(i + 1) * tp.h4_inv) *
+                                    tp.h_inv;
+
+                RowVectorType dc6 = (60.0 * internal_acc_.row(i) * tp.h3_inv - 52.0 * internal_acc_.row(i + 1) * tp.h3_inv +
+                                     4.0 * internal_jerk_.row(i) * tp.h2_inv + 3.0 * internal_jerk_.row(i + 1) * tp.h2_inv +
+                                     840.0 * spatial_points_[i].transpose() * tp.h5_inv - 840.0 * spatial_points_[i + 1].transpose() * tp.h5_inv +
+                                     360.0 * internal_vel_.row(i) * tp.h4_inv + 340.0 * internal_vel_.row(i + 1) * tp.h4_inv) *
+                                    (0.5 * tp.h_inv * tp.h_inv);
+
+                RowVectorType dc7 = 2.0 * (-15.0 * internal_acc_.row(i) * tp.h3_inv + 15.0 * internal_acc_.row(i + 1) * tp.h3_inv - internal_jerk_.row(i) * tp.h2_inv - internal_jerk_.row(i + 1) * tp.h2_inv - 210.0 * spatial_points_[i].transpose() * tp.h5_inv + 210.0 * spatial_points_[i + 1].transpose() * tp.h5_inv - 90.0 * internal_vel_.row(i) * tp.h4_inv - 90.0 * internal_vel_.row(i + 1) * tp.h4_inv) *
+                                    (1.0 / 3.0 * tp.h3_inv);
+
+                gradByTimes(i) += gc4.dot(dc4) + gc5.dot(dc5) + gc6.dot(dc6) + gc7.dot(dc7);
+            }
+
+            const int num_blocks = n - 2;
+            if (num_blocks > 0)
+            {
+                ws_d_rhs_mod_.resize(num_blocks);
+                ws_current_lambda_.resize(num_blocks);
+
+                for (auto &m : ws_d_rhs_mod_)
+                    m.setZero();
+
+                for (int i = 0; i < num_blocks; ++i)
+                {
+                    ws_current_lambda_[i].row(0) = g_x.row(3 * (i + 1) + 0); 
+                    ws_current_lambda_[i].row(1) = g_x.row(3 * (i + 1) + 1); 
+                    ws_current_lambda_[i].row(2) = g_x.row(3 * (i + 1) + 2); 
+                }
+
+                for (int i = 0; i < num_blocks - 1; ++i)
+                {
+                    Eigen::Matrix<double, 3, DIM> term = solve3x3(D_mod_cache_[i].transpose(), ws_current_lambda_[i]);
+                    ws_d_rhs_mod_[i] += term;
+                    ws_current_lambda_[i + 1] -= U_blocks_cache_[i].transpose() * term;
+                }
+                ws_d_rhs_mod_[num_blocks - 1] += solve3x3(D_mod_cache_.back().transpose(), ws_current_lambda_.back());
+
+                for (int i = num_blocks - 1; i > 0; --i)
+                {
+                    const Eigen::Matrix3d &L = L_blocks_cache_[i];
+                    Eigen::Matrix<double, 3, DIM> term = solve3x3(
+                        D_mod_cache_[i - 1].transpose(),
+                        (L.transpose() * ws_d_rhs_mod_[i]).eval());
+                    ws_d_rhs_mod_[i - 1] -= term;
+                }
+
+                for (int i = 0; i < num_blocks; ++i)
+                {
+                    const int node_curr = i + 1;
+                    const int node_prev = i;
+                    const int node_next = i + 2;
+
+                    const Eigen::Matrix<double, 1, DIM> lam_snap = ws_d_rhs_mod_[i].row(0);
+                    const Eigen::Matrix<double, 1, DIM> lam_crackle = ws_d_rhs_mod_[i].row(1);
+                    const Eigen::Matrix<double, 1, DIM> lam_pop = ws_d_rhs_mod_[i].row(2);
+
+                    const auto &tp_L = time_powers_[i];
+                    const auto &tp_R = time_powers_[i + 1];
+
+                    double dRes0_dP_curr = 840.0 * tp_R.h4_inv - 840.0 * tp_L.h4_inv;
+                    double dRes1_dP_curr = -10080.0 * tp_R.h5_inv - 10080.0 * tp_L.h5_inv;
+                    double dRes2_dP_curr = 50400.0 * tp_R.h6_inv - 50400.0 * tp_L.h6_inv;
+
+                    gradByPoints.row(node_curr) -= lam_snap * dRes0_dP_curr +
+                                                   lam_crackle * dRes1_dP_curr +
+                                                   lam_pop * dRes2_dP_curr;
+
+                    double dRes0_dP_prev = 840.0 * tp_L.h4_inv;
+                    double dRes1_dP_prev = 10080.0 * tp_L.h5_inv;
+                    double dRes2_dP_prev = 50400.0 * tp_L.h6_inv;
+
+                    gradByPoints.row(node_prev) -= lam_snap * dRes0_dP_prev +
+                                                   lam_crackle * dRes1_dP_prev +
+                                                   lam_pop * dRes2_dP_prev;
+
+                    double dRes0_dP_next = -840.0 * tp_R.h4_inv;
+                    double dRes1_dP_next = 10080.0 * tp_R.h5_inv;
+                    double dRes2_dP_next = -50400.0 * tp_R.h6_inv;
+
+                    gradByPoints.row(node_next) -= lam_snap * dRes0_dP_next +
+                                                   lam_crackle * dRes1_dP_next +
+                                                   lam_pop * dRes2_dP_next;
+
+                    RowVectorType P_curr = spatial_points_[node_curr].transpose();
+                    RowVectorType P_prev = spatial_points_[node_prev].transpose();
+                    RowVectorType P_next = spatial_points_[node_next].transpose();
+
+                    RowVectorType V_curr = internal_vel_.row(node_curr);
+                    RowVectorType V_prev = internal_vel_.row(node_prev);
+                    RowVectorType V_next = internal_vel_.row(node_next);
+
+                    RowVectorType A_curr = internal_acc_.row(node_curr);
+                    RowVectorType A_prev = internal_acc_.row(node_prev);
+                    RowVectorType A_next = internal_acc_.row(node_next);
+
+                    RowVectorType J_curr = internal_jerk_.row(node_curr);
+                    RowVectorType J_prev = internal_jerk_.row(node_prev);
+                    RowVectorType J_next = internal_jerk_.row(node_next);
+
+                    RowVectorType term_dRes0_dhL = 4.0 * (60.0 * A_curr * tp_L.h3_inv - 30.0 * A_prev * tp_L.h3_inv -
+                                                          4.0 * J_curr * tp_L.h2_inv - J_prev * tp_L.h2_inv +
+                                                          840.0 * P_curr * tp_L.h5_inv - 840.0 * P_prev * tp_L.h5_inv -
+                                                          360.0 * V_curr * tp_L.h4_inv - 270.0 * V_prev * tp_L.h4_inv);
+
+                    RowVectorType term_dRes1_dhL = 120.0 * (30.0 * A_curr * tp_L.h4_inv - 21.0 * A_prev * tp_L.h4_inv -
+                                                            2.0 * J_curr * tp_L.h3_inv - J_prev * tp_L.h3_inv +
+                                                            420.0 * P_curr * tp_L.h6_inv - 420.0 * P_prev * tp_L.h6_inv -
+                                                            180.0 * V_curr * tp_L.h5_inv - 156.0 * V_prev * tp_L.h5_inv);
+
+                    RowVectorType term_dRes2_dhL = 360.0 * (60.0 * A_curr * tp_L.h5_inv - 52.0 * A_prev * tp_L.h5_inv -
+                                                            4.0 * J_curr * tp_L.h4_inv - 3.0 * J_prev * tp_L.h4_inv +
+                                                            840.0 * P_curr * tp_L.h7_inv - 840.0 * P_prev * tp_L.h7_inv -
+                                                            360.0 * V_curr * tp_L.h6_inv - 340.0 * V_prev * tp_L.h6_inv);
+
+                    gradByTimes(i) -= lam_snap.dot(term_dRes0_dhL) +
+                                      lam_crackle.dot(term_dRes1_dhL) +
+                                      lam_pop.dot(term_dRes2_dhL);
+
+                    RowVectorType term_dRes0_dhR = 4.0 * (-60.0 * A_curr * tp_R.h3_inv + 30.0 * A_next * tp_R.h3_inv -
+                                                          4.0 * J_curr * tp_R.h2_inv - J_next * tp_R.h2_inv -
+                                                          840.0 * P_curr * tp_R.h5_inv + 840.0 * P_next * tp_R.h5_inv -
+                                                          360.0 * V_curr * tp_R.h4_inv - 270.0 * V_next * tp_R.h4_inv);
+
+                    RowVectorType term_dRes1_dhR = 120.0 * (30.0 * A_curr * tp_R.h4_inv - 21.0 * A_next * tp_R.h4_inv +
+                                                            2.0 * J_curr * tp_R.h3_inv + J_next * tp_R.h3_inv +
+                                                            420.0 * P_curr * tp_R.h6_inv - 420.0 * P_next * tp_R.h6_inv +
+                                                            180.0 * V_curr * tp_R.h5_inv + 156.0 * V_next * tp_R.h5_inv);
+
+                    RowVectorType term_dRes2_dhR = 360.0 * (-60.0 * A_curr * tp_R.h5_inv + 52.0 * A_next * tp_R.h5_inv -
+                                                            4.0 * J_curr * tp_R.h4_inv - 3.0 * J_next * tp_R.h4_inv -
+                                                            840.0 * P_curr * tp_R.h7_inv + 840.0 * P_next * tp_R.h7_inv -
+                                                            360.0 * V_curr * tp_R.h6_inv - 340.0 * V_next * tp_R.h6_inv);
+
+                    gradByTimes(i + 1) -= lam_snap.dot(term_dRes0_dhR) +
+                                          lam_crackle.dot(term_dRes1_dhR) +
+                                          lam_pop.dot(term_dRes2_dhR);
+                }
+            }
+        }
+        struct Gradients
+        {
+            MatrixType points;
+            Eigen::VectorXd times;
+        };
+
+        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+                                const Eigen::VectorXd &partialGradByTimes)
+        {
+            Gradients result;
+            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times);
+            return result;
+        }
+
     private:
         void convertTimePointsToSegments(const std::vector<double> &t_points)
         {
@@ -1701,6 +1945,29 @@ namespace SplineTrajectory
             cumulative_times_[0] = start_time_;
             for (int i = 0; i < num_segments_; ++i)
                 cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
+        }
+        void precomputeTimePowers()
+        {
+            int n = static_cast<int>(time_segments_.size());
+            time_powers_.resize(n);
+
+            for (int i = 0; i < n; ++i)
+            {
+                double h = time_segments_[i];
+                double iv = 1.0 / h;
+                double iv2 = iv * iv;
+                double iv3 = iv2 * iv;
+                double iv4 = iv3 * iv;
+
+                time_powers_[i].h = h;
+                time_powers_[i].h_inv = iv;
+                time_powers_[i].h2_inv = iv2;
+                time_powers_[i].h3_inv = iv3;
+                time_powers_[i].h4_inv = iv4;
+                time_powers_[i].h5_inv = iv4 * iv;
+                time_powers_[i].h6_inv = iv4 * iv2;
+                time_powers_[i].h7_inv = iv4 * iv3;
+            }
         }
 
         template <typename DerivedB>
@@ -1727,8 +1994,8 @@ namespace SplineTrajectory
             return result;
         }
 
+    private:
         void solveInternalDerivatives(const MatrixType &P,
-                                      const Eigen::VectorXd &h,
                                       MatrixType &p_out,
                                       MatrixType &q_out,
                                       MatrixType &s_out)
@@ -1738,11 +2005,13 @@ namespace SplineTrajectory
             q_out.resize(n, DIM);
             s_out.resize(n, DIM);
 
+            // Boundary conditions
             p_out.row(0) = boundary_.start_velocity.transpose();
             q_out.row(0) = boundary_.start_acceleration.transpose();
+            s_out.row(0) = boundary_.start_jerk.transpose();
+
             p_out.row(n - 1) = boundary_.end_velocity.transpose();
             q_out.row(n - 1) = boundary_.end_acceleration.transpose();
-            s_out.row(0) = boundary_.start_jerk.transpose();
             s_out.row(n - 1) = boundary_.end_jerk.transpose();
 
             const int num_blocks = n - 2;
@@ -1753,103 +2022,94 @@ namespace SplineTrajectory
             B_left.row(0) = boundary_.start_velocity.transpose();
             B_left.row(1) = boundary_.start_acceleration.transpose();
             B_left.row(2) = boundary_.start_jerk.transpose();
+
             B_right.row(0) = boundary_.end_velocity.transpose();
             B_right.row(1) = boundary_.end_acceleration.transpose();
             B_right.row(2) = boundary_.end_jerk.transpose();
 
-            std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> U_blocks;
-            U_blocks.reserve(std::max(0, num_blocks - 1));
-            std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_mod;
-            D_mod.reserve(num_blocks);
-            std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> rhs_mod;
-            rhs_mod.reserve(num_blocks);
+            U_blocks_cache_.resize(std::max(0, num_blocks - 1));
+            D_mod_cache_.resize(num_blocks);
+            L_blocks_cache_.resize(num_blocks);
+            ws_rhs_mod_.resize(num_blocks);
 
             for (int i = 0; i < num_blocks; ++i)
             {
                 const int k = i + 2;
-                const double hL = h(k - 2);
-                const double hR = h(k - 1);
 
-                const double hL_inv = 1.0 / hL;
-                const double hL2_inv = hL_inv * hL_inv;
-                const double hL3_inv = hL2_inv * hL_inv;
-                const double hL4_inv = hL3_inv * hL_inv;
-                const double hL5_inv = hL4_inv * hL_inv;
-                const double hL6_inv = hL5_inv * hL_inv;
+                const auto &tp_L = time_powers_[k - 2];
+                const auto &tp_R = time_powers_[k - 1];
 
-                const double hR_inv = 1.0 / hR;
-                const double hR2_inv = hR_inv * hR_inv;
-                const double hR3_inv = hR2_inv * hR_inv;
-                const double hR4_inv = hR3_inv * hR_inv;
-                const double hR5_inv = hR4_inv * hR_inv;
-                const double hR6_inv = hR5_inv * hR_inv;
-
-                Eigen::Matrix<double, 1, DIM> r3 = 840.0 * ((P.row(k) - P.row(k - 1)) * hR4_inv +
-                                                            (P.row(k - 1) - P.row(k - 2)) * hL4_inv);
-                Eigen::Matrix<double, 1, DIM> r4 = 10080.0 * ((P.row(k - 1) - P.row(k)) * hR5_inv +
-                                                              (P.row(k - 1) - P.row(k - 2)) * hL5_inv);
-                Eigen::Matrix<double, 1, DIM> r5 = 50400.0 * ((P.row(k) - P.row(k - 1)) * hR6_inv +
-                                                              (P.row(k - 1) - P.row(k - 2)) * hL6_inv);
+                Eigen::Matrix<double, 1, DIM> r3 = 840.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h4_inv +
+                                                            (P.row(k - 1) - P.row(k - 2)) * tp_L.h4_inv);
+                Eigen::Matrix<double, 1, DIM> r4 = 10080.0 * ((P.row(k - 1) - P.row(k)) * tp_R.h5_inv +
+                                                              (P.row(k - 1) - P.row(k - 2)) * tp_L.h5_inv);
+                Eigen::Matrix<double, 1, DIM> r5 = 50400.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h6_inv +
+                                                              (P.row(k - 1) - P.row(k - 2)) * tp_L.h6_inv);
                 Eigen::Matrix<double, 3, DIM> r;
                 r.row(0) = r3;
                 r.row(1) = r4;
                 r.row(2) = r5;
 
                 Eigen::Matrix3d D;
-                D << 480.0 * (hL3_inv + hR3_inv), 120.0 * (hR2_inv - hL2_inv), 16 * (hL_inv + hR_inv),
-                    5400.0 * (hL4_inv - hR4_inv), -1200.0 * (hL3_inv + hR3_inv), 120 * (hL2_inv - hR2_inv),
-                    25920.0 * (hL5_inv + hR5_inv), 5400.0 * (hR4_inv - hL4_inv), 480 * (hL3_inv + hR3_inv);
+                D << 480.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_R.h2_inv - tp_L.h2_inv), 16.0 * (tp_L.h_inv + tp_R.h_inv),
+                    5400.0 * (tp_L.h4_inv - tp_R.h4_inv), -1200.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_L.h2_inv - tp_R.h2_inv),
+                    25920.0 * (tp_L.h5_inv + tp_R.h5_inv), 5400.0 * (tp_R.h4_inv - tp_L.h4_inv), 480.0 * (tp_L.h3_inv + tp_R.h3_inv);
 
-                if (k == 2)
+                Eigen::Matrix3d L;
+                L << 360.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv, 4.0 * tp_L.h_inv,
+                    4680.0 * tp_L.h4_inv, 840.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv,
+                    24480.0 * tp_L.h5_inv, 4680.0 * tp_L.h4_inv, 360.0 * tp_L.h3_inv;
+
+                L_blocks_cache_[i] = L;
+
+                if (i < num_blocks - 1)
                 {
-                    Eigen::Matrix3d L;
-                    L << 360.0 * hL3_inv, 60.0 * hL2_inv, 4 * hL_inv,
-                        4680.0 * hL4_inv, 840.0 * hL3_inv, 60 * hL2_inv,
-                        24480.0 * hL5_inv, 4680.0 * hL4_inv, 360 * hL3_inv;
+                    Eigen::Matrix3d U;
+                    U << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
+                        -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
+                        24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
+
+                    U_blocks_cache_[i] = U;
+                }
+
+                if (i == 0)
+                {
                     r.noalias() -= L * B_left;
                 }
                 else
                 {
-                    Eigen::Matrix3d L;
-                    L << 360.0 * hL3_inv, 60.0 * hL2_inv, 4 * hL_inv,
-                        4680.0 * hL4_inv, 840.0 * hL3_inv, 60 * hL2_inv,
-                        24480.0 * hL5_inv, 4680.0 * hL4_inv, 360 * hL3_inv;
+                    const Eigen::Matrix3d &D_prev = D_mod_cache_[i - 1];
+                    const Eigen::Matrix3d &U_prev = U_blocks_cache_[i - 1];
+                    const Eigen::Matrix<double, 3, DIM> &r_prev = ws_rhs_mod_[i - 1];
 
-                    const Eigen::Matrix3d X = solve3x3(D_mod[i - 1], U_blocks[i - 1]);
-                    const Eigen::Matrix<double, 3, DIM> Y = solve3x3(D_mod[i - 1], rhs_mod[i - 1]);
+                    const Eigen::Matrix3d X = solve3x3(D_prev, U_prev);
+                    const Eigen::Matrix<double, 3, DIM> Y = solve3x3(D_prev, r_prev);
 
                     D.noalias() -= L * X;
                     r.noalias() -= L * Y;
                 }
 
-                if (k == n - 1)
+                if (i == num_blocks - 1)
                 {
-                    Eigen::Matrix3d U;
-                    U << 360.0 * hR3_inv, -60.0 * hR2_inv, 4 * hR_inv,
-                        -4680.0 * hR4_inv, 840.0 * hR3_inv, -60 * hR2_inv,
-                        24480.0 * hR5_inv, -4680.0 * hR4_inv, 360 * hR3_inv;
-                    r.noalias() -= U * B_right;
-                }
-                else
-                {
+                    Eigen::Matrix3d U_last;
+                    U_last << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
+                        -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
+                        24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
 
-                    Eigen::Matrix3d U;
-                    U << 360.0 * hR3_inv, -60.0 * hR2_inv, 4 * hR_inv,
-                        -4680.0 * hR4_inv, 840.0 * hR3_inv, -60 * hR2_inv,
-                        24480.0 * hR5_inv, -4680.0 * hR4_inv, 360 * hR3_inv;
-                    U_blocks.push_back(U);
+                    r.noalias() -= U_last * B_right;
                 }
 
-                D_mod.push_back(D);
-                rhs_mod.push_back(r);
+                D_mod_cache_[i] = D;
+                ws_rhs_mod_[i] = r;
             }
 
             std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> solution(num_blocks);
-            solution[num_blocks - 1] = solve3x3(D_mod.back(), rhs_mod.back());
+            solution[num_blocks - 1] = solve3x3(D_mod_cache_[num_blocks - 1], ws_rhs_mod_[num_blocks - 1]);
+
             for (int i = num_blocks - 2; i >= 0; --i)
             {
-                const Eigen::Matrix<double, 3, DIM> rhs_temp = rhs_mod[i] - U_blocks[i] * solution[i + 1];
-                solution[i] = solve3x3(D_mod[i], rhs_temp);
+                const Eigen::Matrix<double, 3, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * solution[i + 1];
+                solution[i] = solve3x3(D_mod_cache_[i], rhs_temp);
             }
 
             for (int i = 0; i < num_blocks; ++i)
@@ -1866,53 +2126,69 @@ namespace SplineTrajectory
             const int n_pts = static_cast<int>(spatial_points_.size());
             const int n = num_segments_;
 
-            Eigen::Map<const Eigen::VectorXd> h(time_segments_.data(), n);
-
+            // 1. Construct Points Matrix
             MatrixType P(n_pts, DIM);
             for (int i = 0; i < n_pts; ++i)
             {
                 P.row(i) = spatial_points_[i].transpose();
             }
 
-            MatrixType p_nodes, q_nodes, s_nodes;
-            solveInternalDerivatives(P, h, p_nodes, q_nodes, s_nodes);
+            solveInternalDerivatives(P, internal_vel_, internal_acc_, internal_jerk_);
 
             MatrixType coeffs(n * 8, DIM);
 
             for (int i = 0; i < n; ++i)
             {
-                const double hi = h(i);
-                const double h_inv = 1.0 / hi;
-                const double h2_inv = h_inv * h_inv;
-                const double h3_inv = h2_inv * h_inv;
-                const double h4_inv = h3_inv * h_inv;
-                const double h5_inv = h4_inv * h_inv;
-                const double h6_inv = h5_inv * h_inv;
-                const double h7_inv = h6_inv * h_inv;
+                const auto &tp = time_powers_[i];
 
                 const RowVectorType c0 = P.row(i);
-                const RowVectorType c1 = p_nodes.row(i);
-                const RowVectorType c2 = q_nodes.row(i) * 0.5;
-                const RowVectorType c3 = s_nodes.row(i) / 6.0;
-                const RowVectorType c4 = -(210.0 * (P.row(i) - P.row(i + 1)) * h4_inv + 120.0 * p_nodes.row(i) * h3_inv +
-                                           90.0 * p_nodes.row(i + 1) * h3_inv + 30.0 * q_nodes.row(i) * h2_inv -
-                                           15.0 * q_nodes.row(i + 1) * h2_inv + 4.0 * s_nodes.row(i) * h_inv +
-                                           s_nodes.row(i + 1) * h_inv) /
+                const RowVectorType c1 = internal_vel_.row(i);
+                const RowVectorType c2 = internal_acc_.row(i) * 0.5;
+                const RowVectorType c3 = internal_jerk_.row(i) / 6.0;
+
+                const RowVectorType &P_curr = P.row(i);
+                const RowVectorType &P_next = P.row(i + 1);
+                const RowVectorType &V_curr = internal_vel_.row(i);
+                const RowVectorType &V_next = internal_vel_.row(i + 1);
+                const RowVectorType &A_curr = internal_acc_.row(i);
+                const RowVectorType &A_next = internal_acc_.row(i + 1);
+                const RowVectorType &J_curr = internal_jerk_.row(i);
+                const RowVectorType &J_next = internal_jerk_.row(i + 1);
+
+                const RowVectorType c4 = -(210.0 * (P_curr - P_next) * tp.h4_inv +
+                                           120.0 * V_curr * tp.h3_inv +
+                                           90.0 * V_next * tp.h3_inv +
+                                           30.0 * A_curr * tp.h2_inv -
+                                           15.0 * A_next * tp.h2_inv +
+                                           4.0 * J_curr * tp.h_inv +
+                                           J_next * tp.h_inv) /
                                          6.0;
-                const RowVectorType c5 = (168.0 * (P.row(i) - P.row(i + 1)) * h5_inv + 90.0 * p_nodes.row(i) * h4_inv +
-                                          78.0 * p_nodes.row(i + 1) * h4_inv + 20.0 * q_nodes.row(i) * h3_inv -
-                                          14.0 * q_nodes.row(i + 1) * h3_inv + 2.0 * s_nodes.row(i) * h2_inv +
-                                          s_nodes.row(i + 1) * h2_inv) /
+
+                const RowVectorType c5 = (168.0 * (P_curr - P_next) * tp.h5_inv +
+                                          90.0 * V_curr * tp.h4_inv +
+                                          78.0 * V_next * tp.h4_inv +
+                                          20.0 * A_curr * tp.h3_inv -
+                                          14.0 * A_next * tp.h3_inv +
+                                          2.0 * J_curr * tp.h2_inv +
+                                          J_next * tp.h2_inv) /
                                          2.0;
-                const RowVectorType c6 = -(420.0 * (P.row(i) - P.row(i + 1)) * h6_inv + 216.0 * p_nodes.row(i) * h5_inv +
-                                           204.0 * p_nodes.row(i + 1) * h5_inv + 45.0 * q_nodes.row(i) * h4_inv -
-                                           39.0 * q_nodes.row(i + 1) * h4_inv + 4.0 * s_nodes.row(i) * h3_inv +
-                                           3.0 * s_nodes.row(i + 1) * h3_inv) /
+
+                const RowVectorType c6 = -(420.0 * (P_curr - P_next) * tp.h6_inv +
+                                           216.0 * V_curr * tp.h5_inv +
+                                           204.0 * V_next * tp.h5_inv +
+                                           45.0 * A_curr * tp.h4_inv -
+                                           39.0 * A_next * tp.h4_inv +
+                                           4.0 * J_curr * tp.h3_inv +
+                                           3.0 * J_next * tp.h3_inv) /
                                          6.0;
-                const RowVectorType c7 = (120.0 * (P.row(i) - P.row(i + 1)) * h7_inv + 60.0 * p_nodes.row(i) * h6_inv +
-                                          60.0 * p_nodes.row(i + 1) * h6_inv + 12.0 * q_nodes.row(i) * h5_inv -
-                                          12.0 * q_nodes.row(i + 1) * h5_inv + s_nodes.row(i) * h4_inv +
-                                          s_nodes.row(i + 1) * h4_inv) /
+
+                const RowVectorType c7 = (120.0 * (P_curr - P_next) * tp.h7_inv +
+                                          60.0 * V_curr * tp.h6_inv +
+                                          60.0 * V_next * tp.h6_inv +
+                                          12.0 * A_curr * tp.h5_inv -
+                                          12.0 * A_next * tp.h5_inv +
+                                          J_curr * tp.h4_inv +
+                                          J_next * tp.h4_inv) /
                                          6.0;
 
                 coeffs.row(i * 8 + 0) = c0;
