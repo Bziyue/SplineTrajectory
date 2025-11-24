@@ -718,6 +718,56 @@ namespace SplineTrajectory
             }
             return total_energy;
         }
+        /**
+         * @brief Computes the partial gradient of the energy (acceleration cost) w.r.t polynomial coefficients.
+         * @param gdC [Output] Matrix of size (num_segments * 4) x DIM.
+         */
+        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        {
+            gdC.resize(num_segments_ * 4, DIM);
+            gdC.setZero();
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_segments_[i];
+                double T2 = T * T;
+                double T3 = T2 * T;
+
+                // Coefficients c2, c3
+                // Energy = 4*c2^2*T + 12*c2*c3*T^2 + 12*c3^2*T^3
+                const RowVectorType c2 = coeffs_.row(i * 4 + 2);
+                const RowVectorType c3 = coeffs_.row(i * 4 + 3);
+
+                // dE/dc2 = 8*c2*T + 12*c3*T^2
+                gdC.row(i * 4 + 2) = 8.0 * c2 * T + 12.0 * c3 * T2;
+
+                // dE/dc3 = 12*c2*T^2 + 24*c3*T^3
+                gdC.row(i * 4 + 3) = 12.0 * c2 * T2 + 24.0 * c3 * T3;
+            }
+        }
+
+        /**
+         * @brief Computes the partial gradient of the energy (acceleration cost) w.r.t segment durations.
+         * @param gdT [Output] Vector of size num_segments.
+         */
+        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        {
+            gdT.resize(num_segments_);
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_segments_[i];
+                double T2 = T * T;
+
+                const RowVectorType c2 = coeffs_.row(i * 4 + 2);
+                const RowVectorType c3 = coeffs_.row(i * 4 + 3);
+
+                // dE/dT = 4*c2^2 + 24*c2*c3*T + 36*c3^2*T^2
+                gdT(i) = 4.0 * c2.squaredNorm() +
+                         24.0 * c2.dot(c3) * T +
+                         36.0 * c3.squaredNorm() * T2;
+            }
+        }
 
         /**
          * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
@@ -1159,6 +1209,72 @@ namespace SplineTrajectory
             }
             return total_energy;
         }
+        /**
+         * @brief Computes the partial gradient of the energy (jerk cost) w.r.t polynomial coefficients.
+         * @param gdC [Output] Matrix of size (num_segments * 6) x DIM.
+         */
+        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        {
+            gdC.resize(num_segments_ * 6, DIM);
+            gdC.setZero();
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_segments_[i];
+                double T2 = T * T;
+                double T3 = T2 * T;
+                double T4 = T3 * T;
+                double T5 = T4 * T;
+
+                const RowVectorType c3 = coeffs_.row(i * 6 + 3);
+                const RowVectorType c4 = coeffs_.row(i * 6 + 4);
+                const RowVectorType c5 = coeffs_.row(i * 6 + 5);
+
+                // dE/dc3
+                gdC.row(i * 6 + 3) = 72.0 * c3 * T +
+                                     144.0 * c4 * T2 +
+                                     240.0 * c5 * T3;
+
+                // dE/dc4
+                gdC.row(i * 6 + 4) = 144.0 * c3 * T2 +
+                                     384.0 * c4 * T3 +
+                                     720.0 * c5 * T4;
+
+                // dE/dc5
+                gdC.row(i * 6 + 5) = 240.0 * c3 * T3 +
+                                     720.0 * c4 * T4 +
+                                     1440.0 * c5 * T5;
+            }
+        }
+
+        /**
+         * @brief Computes the partial gradient of the energy (jerk cost) w.r.t segment durations.
+         * @param gdT [Output] Vector of size num_segments.
+         */
+        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        {
+            gdT.resize(num_segments_);
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_segments_[i];
+                double T2 = T * T;
+                double T3 = T2 * T;
+                double T4 = T3 * T;
+
+                const RowVectorType c3 = coeffs_.row(i * 6 + 3);
+                const RowVectorType c4 = coeffs_.row(i * 6 + 4);
+                const RowVectorType c5 = coeffs_.row(i * 6 + 5);
+
+                // dE/dT
+                gdT(i) = 36.0 * c3.squaredNorm() +
+                         288.0 * c3.dot(c4) * T +
+                         576.0 * c4.squaredNorm() * T2 +
+                         720.0 * c3.dot(c5) * T2 +
+                         2880.0 * c4.dot(c5) * T3 +
+                         3600.0 * c5.squaredNorm() * T4;
+            }
+        }
 
         struct Gradients
         {
@@ -1541,7 +1657,7 @@ namespace SplineTrajectory
                 const RowVectorType rhs3 = internal_acc_.row(i + 1) - (2.0 * c2);
 
                 const RowVectorType c3 = (10.0 * tp.h3_inv) * rhs1 - (4.0 * tp.h2_inv) * rhs2 + (0.5 * tp.h_inv) * rhs3;
-                const RowVectorType c4 = (-15.0 * tp.h4_inv) * rhs1 + (7.0 * tp.h3_inv) * rhs2 - (tp.   h2_inv)*rhs3;
+                const RowVectorType c4 = (-15.0 * tp.h4_inv) * rhs1 + (7.0 * tp.h3_inv) * rhs2 - (tp.h2_inv) * rhs3;
                 const RowVectorType c5 = (6.0 * tp.h5_inv) * rhs1 - (3.0 * tp.h4_inv) * rhs2 + (0.5 * tp.h3_inv) * rhs3;
 
                 coeffs.row(i * 6 + 0) = c0;
@@ -1749,6 +1865,91 @@ namespace SplineTrajectory
                                 100800.0 * c7.squaredNorm() * T7;
             }
             return total_energy;
+        }
+        /**
+         * @brief Computes the partial gradient of the energy (snap cost) w.r.t polynomial coefficients.
+         * @param gdC [Output] Matrix of size (num_segments * 8) x DIM.
+         */
+        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        {
+            gdC.resize(num_segments_ * 8, DIM);
+            gdC.setZero();
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_segments_[i];
+                double T2 = T * T;
+                double T3 = T2 * T;
+                double T4 = T3 * T;
+                double T5 = T4 * T;
+                double T6 = T5 * T;
+                double T7 = T6 * T;
+
+                const RowVectorType c4 = coeffs_.row(i * 8 + 4);
+                const RowVectorType c5 = coeffs_.row(i * 8 + 5);
+                const RowVectorType c6 = coeffs_.row(i * 8 + 6);
+                const RowVectorType c7 = coeffs_.row(i * 8 + 7);
+
+                // dE/dc4
+                gdC.row(i * 8 + 4) = 1152.0 * c4 * T +
+                                     2880.0 * c5 * T2 +
+                                     5760.0 * c6 * T3 +
+                                     10080.0 * c7 * T4;
+
+                // dE/dc5
+                gdC.row(i * 8 + 5) = 2880.0 * c4 * T2 +
+                                     9600.0 * c5 * T3 +
+                                     21600.0 * c6 * T4 +
+                                     40320.0 * c7 * T5;
+
+                // dE/dc6
+                gdC.row(i * 8 + 6) = 5760.0 * c4 * T3 +
+                                     21600.0 * c5 * T4 +
+                                     51840.0 * c6 * T5 +
+                                     100800.0 * c7 * T6;
+
+                // dE/dc7
+                gdC.row(i * 8 + 7) = 10080.0 * c4 * T4 +
+                                     40320.0 * c5 * T5 +
+                                     100800.0 * c6 * T6 +
+                                     201600.0 * c7 * T7;
+            }
+        }
+
+        /**
+         * @brief Computes the partial gradient of the energy (snap cost) w.r.t segment durations.
+         * @param gdT [Output] Vector of size num_segments.
+         */
+        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        {
+            gdT.resize(num_segments_);
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_segments_[i];
+                double T2 = T * T;
+                double T3 = T2 * T;
+                double T4 = T3 * T;
+                double T5 = T4 * T;
+                double T6 = T5 * T;
+
+                const RowVectorType c4 = coeffs_.row(i * 8 + 4);
+                const RowVectorType c5 = coeffs_.row(i * 8 + 5);
+                const RowVectorType c6 = coeffs_.row(i * 8 + 6);
+                const RowVectorType c7 = coeffs_.row(i * 8 + 7);
+
+                // dE/dT
+                gdT(i) = 576.0 * c4.squaredNorm() +
+                         5760.0 * c4.dot(c5) * T +
+                         14400.0 * c5.squaredNorm() * T2 +
+                         17280.0 * c4.dot(c6) * T2 +
+                         86400.0 * c5.dot(c6) * T3 +
+                         40320.0 * c4.dot(c7) * T3 +
+                         129600.0 * c6.squaredNorm() * T4 +
+                         201600.0 * c5.dot(c7) * T4 +
+                         604800.0 * c6.dot(c7) * T5 +
+                         705600.0 * c7.squaredNorm() * T6;
+            }
         }
         /**
          * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
