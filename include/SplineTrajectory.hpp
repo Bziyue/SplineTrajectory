@@ -581,7 +581,7 @@ namespace SplineTrajectory
         }
     };
 
-    template <int DIM>
+template <int DIM>
     class CubicSplineND
     {
     public:
@@ -610,6 +610,15 @@ namespace SplineTrajectory
         MatrixType internal_derivatives_;
         Eigen::VectorXd cached_c_prime_;
         Eigen::VectorXd cached_inv_denoms_;
+
+        struct TimePowers
+        {
+            double h;
+            double h_inv;  // h^-1
+            double h2_inv; // h^-2
+            double h3_inv; // h^-3
+        };
+        std::vector<TimePowers> time_powers_;
 
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -697,10 +706,12 @@ namespace SplineTrajectory
 
         double getEnergy() const
         {
+            if (!is_initialized_) return 0.0;
+
             double total_energy = 0.0;
             for (int i = 0; i < num_segments_; ++i)
             {
-                const double T = time_segments_[i];
+                const double T = time_powers_[i].h; 
                 if (T <= 0)
                     continue;
 
@@ -718,6 +729,7 @@ namespace SplineTrajectory
             }
             return total_energy;
         }
+
         /**
          * @brief Computes the partial gradient of the energy (acceleration cost) w.r.t polynomial coefficients.
          * @param gdC [Output] Matrix of size (num_segments * 4) x DIM.
@@ -729,7 +741,7 @@ namespace SplineTrajectory
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                double T = time_segments_[i];
+                const double T = time_powers_[i].h; 
                 double T2 = T * T;
                 double T3 = T2 * T;
 
@@ -756,7 +768,7 @@ namespace SplineTrajectory
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                double T = time_segments_[i];
+                const double T = time_powers_[i].h; 
                 double T2 = T * T;
 
                 const RowVectorType c2 = coeffs_.row(i * 4 + 2);
@@ -771,17 +783,6 @@ namespace SplineTrajectory
 
         /**
          * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
-         *
-         * This function computes gradients for ALL waypoints, including the start and end points.
-         *
-         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
-         * Contains gradients for P_0, P_1, ..., P_N.
-         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
-         *
-         * @note
-         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
-         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
-         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
@@ -790,7 +791,7 @@ namespace SplineTrajectory
         {
             const int n = num_segments_;
             const int dim = DIM;
-            const Eigen::VectorXd &h = Eigen::Map<const Eigen::VectorXd>(time_segments_.data(), n);
+            
             const MatrixType &M = internal_derivatives_; // Size (N+1) x DIM
 
             gradByPoints = MatrixType::Zero(n + 1, dim);
@@ -800,9 +801,10 @@ namespace SplineTrajectory
 
             for (int i = 0; i < n; ++i)
             {
-                double h_i = h(i);
-                double h_inv = 1.0 / h_i;
-                double h2_inv = h_inv * h_inv;
+                const auto &tp = time_powers_[i]; 
+                double h_i = tp.h;
+                double h_inv = tp.h_inv;
+                double h2_inv = tp.h2_inv;
 
                 Eigen::Matrix<double, 1, dim> g_c0 = partialGradByCoeffs.row(i * 4 + 0);
                 Eigen::Matrix<double, 1, dim> g_c1 = partialGradByCoeffs.row(i * 4 + 1);
@@ -832,13 +834,14 @@ namespace SplineTrajectory
 
             for (int k = 0; k < n; ++k)
             {
-                double h_k = h(k);
-                double h2_inv = 1.0 / (h_k * h_k);
+                const auto &tp = time_powers_[k]; 
+                double h_k = tp.h;
+                double h2_inv = tp.h2_inv;
                 VectorType dP = spatial_points_[k + 1] - spatial_points_[k];
 
                 VectorType common_term = lambda.row(k) - lambda.row(k + 1);
 
-                VectorType grad_R_P = 6.0 / h_k * common_term;
+                VectorType grad_R_P = 6.0 * tp.h_inv * common_term; 
                 gradByPoints.row(k + 1) += grad_R_P;
                 gradByPoints.row(k) -= grad_R_P;
 
@@ -855,20 +858,7 @@ namespace SplineTrajectory
                 gradByTimes(k) -= lambda.row(k + 1).dot(term_k1);
             }
         }
-        /**
-         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
-         *
-         * This function computes gradients for ALL waypoints, including the start and end points.
-         *
-         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
-         * Contains gradients for P_0, P_1, ..., P_N.
-         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
-         *
-         * @note
-         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
-         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
-         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
-         */
+
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
@@ -882,6 +872,7 @@ namespace SplineTrajectory
         {
             num_segments_ = static_cast<int>(time_segments_.size());
             updateCumulativeTimes();
+            precomputeTimePowers(); 
             coeffs_ = solveSpline();
             is_initialized_ = true;
             initializePPoly();
@@ -908,15 +899,34 @@ namespace SplineTrajectory
             }
         }
 
+        void precomputeTimePowers()
+        {
+            int n = static_cast<int>(time_segments_.size());
+            time_powers_.resize(n);
+
+            for (int i = 0; i < n; ++i)
+            {
+                double h = time_segments_[i];
+                double iv = 1.0 / h;
+                double iv2 = iv * iv;
+                double iv3 = iv2 * iv;
+
+                time_powers_[i].h = h;
+                time_powers_[i].h_inv = iv;
+                time_powers_[i].h2_inv = iv2;
+                time_powers_[i].h3_inv = iv3;
+            }
+        }
+        // -----------------------
+
         MatrixType solveSpline()
         {
             const int n = num_segments_;
-            Eigen::Map<const Eigen::VectorXd> h(time_segments_.data(), n);
 
             MatrixType p_diff_h(n, DIM);
             for (int i = 0; i < n; ++i)
             {
-                p_diff_h.row(i) = (spatial_points_[i + 1] - spatial_points_[i]).transpose() / h(i);
+                p_diff_h.row(i) = (spatial_points_[i + 1] - spatial_points_[i]).transpose() * time_powers_[i].h_inv;
             }
 
             internal_derivatives_.resize(n + 1, DIM);
@@ -929,14 +939,15 @@ namespace SplineTrajectory
             M.row(0) = 6.0 * (p_diff_h.row(0) - boundary_velocities_.start_velocity.transpose());
             M.row(n) = 6.0 * (boundary_velocities_.end_velocity.transpose() - p_diff_h.row(n - 1));
 
-            computeLUAndSolve(h, M);
+            computeLUAndSolve(M);
 
             MatrixType coeffs(n * 4, DIM);
 
             for (int i = 0; i < n; ++i)
             {
-                double h_i = h(i);
-                double h_inv = 1.0 / h_i;
+                const auto &tp = time_powers_[i];
+                double h_i = tp.h;
+                double h_inv = tp.h_inv;
 
                 coeffs.row(i * 4 + 0) = spatial_points_[i].transpose();
 
@@ -951,28 +962,30 @@ namespace SplineTrajectory
         }
 
         template <typename MatType>
-        void computeLUAndSolve(const Eigen::VectorXd &h,
-                               MatType &M /* (n+1 x DIM) */)
+        void computeLUAndSolve(MatType &M /* (n+1 x DIM) */)
         {
-            const int n_seg = static_cast<int>(h.size());
+            const int n_seg = num_segments_;
             const int n_mat = n_seg + 1;
 
             cached_c_prime_.resize(n_mat - 1);
             cached_inv_denoms_.resize(n_mat);
 
-            double main_0 = 2.0 * h(0);
+            double main_0 = 2.0 * time_powers_[0].h; 
             double inv = 1.0 / main_0;
             cached_inv_denoms_(0) = inv;
 
-            double upper_0 = h(0);
+            double upper_0 = time_powers_[0].h;
             cached_c_prime_(0) = upper_0 * inv;
             M.row(0) *= inv;
 
             for (int i = 1; i < n_mat - 1; ++i)
             {
-                double main_i = 2.0 * (h(i - 1) + h(i));
-                double lower_prev = h(i - 1);
-                double upper_i = h(i);
+                double h_prev = time_powers_[i - 1].h;
+                double h_curr = time_powers_[i].h;
+
+                double main_i = 2.0 * (h_prev + h_curr);
+                double lower_prev = h_prev;
+                double upper_i = h_curr;
 
                 double denom = main_i - lower_prev * cached_c_prime_(i - 1);
                 double inv_d = 1.0 / denom;
@@ -987,8 +1000,9 @@ namespace SplineTrajectory
             if (n_mat >= 2)
             {
                 int i = n_mat - 1;
-                double main_last = 2.0 * h(n_seg - 1);
-                double lower_prev = h(n_seg - 1);
+                double h_last = time_powers_[n_seg - 1].h;
+                double main_last = 2.0 * h_last;
+                double lower_prev = h_last;
 
                 double denom = main_last - lower_prev * cached_c_prime_(i - 1);
                 double inv_d = 1.0 / denom;
@@ -1007,14 +1021,13 @@ namespace SplineTrajectory
         template <typename MatType>
         void solveWithCachedLU(MatType &X)
         {
-
             const int n = static_cast<int>(cached_inv_denoms_.size());
 
             X.row(0) *= cached_inv_denoms_(0);
 
             for (int i = 1; i < n; ++i)
             {
-                X.row(i).noalias() -= time_segments_[i - 1] * X.row(i - 1);
+                X.row(i).noalias() -= time_powers_[i - 1].h * X.row(i - 1);
                 X.row(i) *= cached_inv_denoms_(i);
             }
 
@@ -1026,7 +1039,6 @@ namespace SplineTrajectory
 
         void initializePPoly()
         {
-
             trajectory_.update(cumulative_times_, coeffs_, 4);
         }
     };
