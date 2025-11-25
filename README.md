@@ -67,6 +67,17 @@ This library is mathematically equivalent to MINCO but implemented with more eff
 | **Flexibility** | Fully templated for **arbitrary dimensions** | Fixed to 3D |
 | **Evaluation**  | Optimized segmented batch evaluation with coefficient caching        | Standard evaluation        |
 
+## Gradient Propagation
+The library implements a **MINCO-equivalent gradient propagation mechanism**, allowing you to optimize trajectories using custom cost functions.
+
+* **Energy Gradients**: You can obtain partial gradients of the control energy w.r.t coefficients ($C$) and segment times ($T$) using `getEnergyPartialGradByCoeffs` and `getEnergyPartialGradByTimes`.
+* **Propagation**: The `propagateGrad(gdC, gdT)` function propagates *any* gradient defined on coefficients and times back to the waypoints ($P$) and time segments ($T$).
+* **Verification**: The propagated energy gradients match the analytical results from `getEnergyGradInnerP` and `getEnergyGradTimes`, ensuring mathematical accuracy.
+
+You can verify the gradient consistency and performance by reviewing the test code in `test_Grad.cpp` and running:
+```bash
+./test_Grad
+```
 ## Spline Types & Energy Minimization
 The library provides splines that are optimal solutions, minimizing the integral of the squared norm of a derivative, which has a direct physical meaning.
 
@@ -304,7 +315,7 @@ g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o Spli
 ---
 ## Future Plans
 
-- [ ] Add a gradient propagation mechanism equivalent to MINCO
+- [x] Add a gradient propagation mechanism equivalent to MINCO
     
 - [x] Implement support for clamped 7th-order splines (Septic Spline, Minimum Snap)
     

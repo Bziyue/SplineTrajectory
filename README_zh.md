@@ -61,6 +61,17 @@ SplineTrajectory 在轨迹生成和求值方面也优于 [large_scale_traj_optim
 | **灵活性** | 完全模板化，支持**任意维度** | 固定为三维 |
 | **求值**  | 优化的分段批量与系数缓存机制求值         | 标准线性查找求值        |
 
+## 梯度传播 (Gradient Propagation)
+本库实现了 **MINCO 等效的梯度传播机制**，支持基于自定义代价函数的轨迹优化。
+
+* **能量梯度**: 可通过 `getEnergyPartialGradByCoeffs` 和 `getEnergyPartialGradByTimes` 获取控制能量关于系数 ($C$) 和段时间 ($T$) 的偏导数。
+* **反向传播**: `propagateGrad(gdC, gdT)` 函数可以将定义在系数和时间上的 *任意梯度* 反向传播回航点 ($P$) 和时间段 ($T$)。
+* **一致性验证**: 经测试，传播后的能量梯度与解析解 (`getEnergyGradInnerP` 和 `getEnergyGradTimes`) 完全一致。
+
+您可以查看测试代码 `test_Grad.cpp`，并通过运行以下命令来验证梯度的一致性和性能：
+```bash
+./test_Grad
+```
 ## 样条类型与最小能量对应
 该库通过最小化一个具有明确物理意义的目标函数（即某阶导数范数的平方积分），来生成最优的样条轨迹。
 | Spline Type             | MINCO Equivalent     | 
@@ -295,7 +306,7 @@ g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o Spli
 
 ## 未来计划
 
-- [ ] 增加与MINCO等效的梯度传播机制
+- [x] 增加与MINCO等效的梯度传播机制
 - [x] 实现对夹持七次样条的支持 (Septic Spline, Minimum Snap)
 - [ ] 实现对N维非均匀B样条的支持
 - [ ] 实现从夹持样条到非均匀B样条的精确转换

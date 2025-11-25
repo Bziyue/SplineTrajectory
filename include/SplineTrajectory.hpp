@@ -787,7 +787,6 @@ template <int DIM>
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                double T = time_powers_[i].h;
 
                 double T2_inv = time_powers_[i].h2_inv; 
 
@@ -884,7 +883,6 @@ template <int DIM>
             for (int k = 0; k < n; ++k)
             {
                 const auto &tp = time_powers_[k]; 
-                double h_k = tp.h;
                 double h2_inv = tp.h2_inv;
                 VectorType dP = spatial_points_[k + 1] - spatial_points_[k];
 
