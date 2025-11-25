@@ -781,6 +781,55 @@ template <int DIM>
             }
         }
 
+        Eigen::VectorXd getEnergyGradTimes() const
+        {
+            Eigen::VectorXd grad(num_segments_);
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_powers_[i].h;
+
+                double T2_inv = time_powers_[i].h2_inv; 
+
+                const VectorType &Pi = spatial_points_[i];
+                const VectorType &Pf = spatial_points_[i + 1];
+                VectorType dP = Pf - Pi;
+
+                const VectorType &Ai = internal_derivatives_.row(i).transpose();
+                const VectorType &Af = internal_derivatives_.row(i + 1).transpose();
+
+                double term1 = 2.0 * dP.dot(Af - Ai) * T2_inv;
+
+                double term2 = -1.0 / 3.0 * (Ai.squaredNorm() + Ai.dot(Af) + Af.squaredNorm());
+
+                grad(i) = term1 + term2;
+            }
+            return grad;
+        }
+        
+        MatrixType getEnergyGradInnerP() const
+        {
+            if (num_segments_ < 2) return MatrixType::Zero(0, DIM);
+
+            MatrixType grad(num_segments_ - 1, DIM);
+
+            for (int i = 1; i < num_segments_; ++i)
+            {
+                double h_L = time_powers_[i - 1].h; 
+                double h_R = time_powers_[i].h;    
+
+                const VectorType &A_prev = internal_derivatives_.row(i - 1).transpose();
+                const VectorType &A_curr = internal_derivatives_.row(i).transpose();    
+                const VectorType &A_next = internal_derivatives_.row(i + 1).transpose();
+
+                VectorType Jerk_L = (A_curr - A_prev) / h_L;
+                VectorType Jerk_R = (A_next - A_curr) / h_R;
+
+                grad.row(i - 1) = 2.0 * (Jerk_R - Jerk_L).transpose();
+            }
+            return grad;
+        }
+
         /**
          * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
          */
@@ -1286,6 +1335,51 @@ template <int DIM>
                          2880.0 * c4.dot(c5) * T3 +
                          3600.0 * c5.squaredNorm() * T4;
             }
+        }
+
+        Eigen::VectorXd getEnergyGradTimes() const
+        {
+            Eigen::VectorXd grad(num_segments_);
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_segments_[i];
+                double T2 = T * T;
+                double T3 = T2 * T;
+                double T4 = T3 * T;
+                double T6 = T3 * T3; 
+
+                const RowVectorType iP = spatial_points_[i].transpose();
+                const RowVectorType fP = spatial_points_[i+1].transpose();
+                const RowVectorType iV = internal_vel_.row(i);
+                const RowVectorType fV = internal_vel_.row(i+1);
+                const RowVectorType iA = internal_acc_.row(i);
+                const RowVectorType fA = internal_acc_.row(i+1);
+
+                double c0 = -9.0 * iA.squaredNorm() + 6.0 * iA.dot(fA) - 9.0 * fA.squaredNorm();
+                double c1 = -48.0 * ((3.0 * iA - 2.0 * fA).dot(iV) + (2.0 * iA - 3.0 * fA).dot(fV));
+                double c2 = -72.0 * (8.0 * iV.squaredNorm() + 14.0 * iV.dot(fV) + 8.0 * fV.squaredNorm() + 5.0 * (iA - fA).dot(iP - fP));
+                double c3 = -2880.0 * (iV + fV).dot(iP - fP);
+                double c4 = -3600.0 * (iP - fP).squaredNorm();
+
+                grad(i) = (c0 * T4 + c1 * T3 + c2 * T2 + c3 * T + c4) / T6;
+            }
+            return grad;
+        }
+
+        MatrixType getEnergyGradInnerP() const
+        {
+            if (num_segments_ < 2) return MatrixType::Zero(0, DIM);
+            MatrixType grad(num_segments_ - 1, DIM);
+
+            for (int i = 1; i < num_segments_; ++i)
+            {
+                const RowVectorType c5_L = coeffs_.row((i - 1) * 6 + 5);
+                const RowVectorType c5_R = coeffs_.row(i * 6 + 5);
+
+                grad.row(i - 1) = 240.0 * (c5_L - c5_R);
+            }
+            return grad;
         }
 
         struct Gradients
@@ -1962,6 +2056,60 @@ template <int DIM>
                          604800.0 * c6.dot(c7) * T5 +
                          705600.0 * c7.squaredNorm() * T6;
             }
+        }
+
+        Eigen::VectorXd getEnergyGradTimes() const
+        {
+            Eigen::VectorXd grad(num_segments_);
+
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                double T = time_segments_[i];
+                double T2 = T * T;
+                double T3 = T2 * T;
+                double T4 = T3 * T;
+                double T5 = T4 * T;
+                double T6 = T3 * T3;
+                double T8 = T4 * T4; 
+
+                const RowVectorType iP = spatial_points_[i].transpose();
+                const RowVectorType fP = spatial_points_[i+1].transpose();
+                const RowVectorType iV = internal_vel_.row(i);
+                const RowVectorType fV = internal_vel_.row(i+1);
+                const RowVectorType iA = internal_acc_.row(i);
+                const RowVectorType fA = internal_acc_.row(i+1);
+                const RowVectorType iJ = internal_jerk_.row(i);
+                const RowVectorType fJ = internal_jerk_.row(i+1);
+
+                double c0 = -8.0 * (2.0 * iJ.squaredNorm() + iJ.dot(fJ) + 2.0 * fJ.squaredNorm());
+                double c1 = -240.0 * (iA.dot(2.0 * iJ + fJ) - fA.dot(iJ + 2.0 * fJ));
+                double c2 = -720.0 * (5.0 * iA.squaredNorm() - 7.0 * iA.dot(fA) + 5.0 * fA.squaredNorm() +
+                                      4.0 * iJ.dot(iV) + 3.0 * fJ.dot(iV) + 3.0 * iJ.dot(fV) + 4.0 * fJ.dot(fV));
+                double c3 = -960.0 * (45.0 * iA.dot(iV) - 39.0 * fA.dot(iV) + 39.0 * iA.dot(fV) - 45.0 * fA.dot(fV) +
+                                      7.0 * (iJ + fJ).dot(iP - fP));
+                double c4 = -14400.0 * (9.0 * iV.squaredNorm() + 17.0 * iV.dot(fV) + 9.0 * fV.squaredNorm() +
+                                        7.0 * (iA - fA).dot(iP - fP));
+                double c5 = -604800.0 * (iV + fV).dot(iP - fP);
+                double c6 = -705600.0 * (iP - fP).squaredNorm();
+
+                grad(i) = (c0*T6 + c1*T5 + c2*T4 + c3*T3 + c4*T2 + c5*T + c6) / T8;
+            }
+            return grad;
+        }
+
+        MatrixType getEnergyGradInnerP() const
+        {
+            if (num_segments_ < 2) return MatrixType::Zero(0, DIM);
+            MatrixType grad(num_segments_ - 1, DIM);
+
+            for (int i = 1; i < num_segments_; ++i)
+            {
+                const RowVectorType c7_L = coeffs_.row((i - 1) * 8 + 7);
+                const RowVectorType c7_R = coeffs_.row(i * 8 + 7);
+
+                grad.row(i - 1) = 10080.0 * (c7_R - c7_L);
+            }
+            return grad;
         }
         /**
          * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
