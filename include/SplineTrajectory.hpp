@@ -581,7 +581,7 @@ namespace SplineTrajectory
         }
     };
 
-template <int DIM>
+    template <int DIM>
     class CubicSplineND
     {
     public:
@@ -706,12 +706,13 @@ template <int DIM>
 
         double getEnergy() const
         {
-            if (!is_initialized_) return 0.0;
+            if (!is_initialized_)
+                return 0.0;
 
             double total_energy = 0.0;
             for (int i = 0; i < num_segments_; ++i)
             {
-                const double T = time_powers_[i].h; 
+                const double T = time_powers_[i].h;
                 if (T <= 0)
                     continue;
 
@@ -741,7 +742,7 @@ template <int DIM>
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                const double T = time_powers_[i].h; 
+                const double T = time_powers_[i].h;
                 double T2 = T * T;
                 double T3 = T2 * T;
 
@@ -768,7 +769,7 @@ template <int DIM>
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                const double T = time_powers_[i].h; 
+                const double T = time_powers_[i].h;
                 double T2 = T * T;
 
                 const RowVectorType c2 = coeffs_.row(i * 4 + 2);
@@ -787,44 +788,30 @@ template <int DIM>
 
             for (int i = 0; i < num_segments_; ++i)
             {
+                const RowVectorType c1 = coeffs_.row(i * 4 + 1);
+                const RowVectorType c2 = coeffs_.row(i * 4 + 2);
+                const RowVectorType c3 = coeffs_.row(i * 4 + 3);
 
-                double T2_inv = time_powers_[i].h2_inv; 
+                double term_acc = 4.0 * c2.squaredNorm();
+                double term_jv = 12.0 * c1.dot(c3);
 
-                const VectorType &Pi = spatial_points_[i];
-                const VectorType &Pf = spatial_points_[i + 1];
-                VectorType dP = Pf - Pi;
-
-                const VectorType &Ai = internal_derivatives_.row(i).transpose();
-                const VectorType &Af = internal_derivatives_.row(i + 1).transpose();
-
-                double term1 = 2.0 * dP.dot(Af - Ai) * T2_inv;
-
-                double term2 = -1.0 / 3.0 * (Ai.squaredNorm() + Ai.dot(Af) + Af.squaredNorm());
-
-                grad(i) = term1 + term2;
+                grad(i) = -term_acc + term_jv;
             }
             return grad;
         }
-        
+
         MatrixType getEnergyGradInnerP() const
         {
-            if (num_segments_ < 2) return MatrixType::Zero(0, DIM);
-
+            if (num_segments_ < 2)
+                return MatrixType::Zero(0, DIM);
             MatrixType grad(num_segments_ - 1, DIM);
 
             for (int i = 1; i < num_segments_; ++i)
             {
-                double h_L = time_powers_[i - 1].h; 
-                double h_R = time_powers_[i].h;    
+                const RowVectorType c3_L = coeffs_.row((i - 1) * 4 + 3);
+                const RowVectorType c3_R = coeffs_.row(i * 4 + 3);
 
-                const VectorType &A_prev = internal_derivatives_.row(i - 1).transpose();
-                const VectorType &A_curr = internal_derivatives_.row(i).transpose();    
-                const VectorType &A_next = internal_derivatives_.row(i + 1).transpose();
-
-                VectorType Jerk_L = (A_curr - A_prev) / h_L;
-                VectorType Jerk_R = (A_next - A_curr) / h_R;
-
-                grad.row(i - 1) = 2.0 * (Jerk_R - Jerk_L).transpose();
+                grad.row(i - 1) = 12.0 * (c3_R - c3_L);
             }
             return grad;
         }
@@ -839,7 +826,7 @@ template <int DIM>
         {
             const int n = num_segments_;
             const int dim = DIM;
-            
+
             const MatrixType &M = internal_derivatives_; // Size (N+1) x DIM
 
             gradByPoints = MatrixType::Zero(n + 1, dim);
@@ -849,7 +836,7 @@ template <int DIM>
 
             for (int i = 0; i < n; ++i)
             {
-                const auto &tp = time_powers_[i]; 
+                const auto &tp = time_powers_[i];
                 double h_i = tp.h;
                 double h_inv = tp.h_inv;
                 double h2_inv = tp.h2_inv;
@@ -882,13 +869,13 @@ template <int DIM>
 
             for (int k = 0; k < n; ++k)
             {
-                const auto &tp = time_powers_[k]; 
+                const auto &tp = time_powers_[k];
                 double h2_inv = tp.h2_inv;
                 VectorType dP = spatial_points_[k + 1] - spatial_points_[k];
 
                 VectorType common_term = lambda.row(k) - lambda.row(k + 1);
 
-                VectorType grad_R_P = 6.0 * tp.h_inv * common_term; 
+                VectorType grad_R_P = 6.0 * tp.h_inv * common_term;
                 gradByPoints.row(k + 1) += grad_R_P;
                 gradByPoints.row(k) -= grad_R_P;
 
@@ -919,7 +906,7 @@ template <int DIM>
         {
             num_segments_ = static_cast<int>(time_segments_.size());
             updateCumulativeTimes();
-            precomputeTimePowers(); 
+            precomputeTimePowers();
             coeffs_ = solveSpline();
             is_initialized_ = true;
             initializePPoly();
@@ -1017,7 +1004,7 @@ template <int DIM>
             cached_c_prime_.resize(n_mat - 1);
             cached_inv_denoms_.resize(n_mat);
 
-            double main_0 = 2.0 * time_powers_[0].h; 
+            double main_0 = 2.0 * time_powers_[0].h;
             double inv = 1.0 / main_0;
             cached_inv_denoms_(0) = inv;
 
@@ -1341,33 +1328,24 @@ template <int DIM>
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                double T = time_segments_[i];
-                double T2 = T * T;
-                double T3 = T2 * T;
-                double T4 = T3 * T;
-                double T6 = T3 * T3; 
+                const RowVectorType c1 = coeffs_.row(i * 6 + 1);
+                const RowVectorType c2 = coeffs_.row(i * 6 + 2);
+                const RowVectorType c3 = coeffs_.row(i * 6 + 3);
+                const RowVectorType c4 = coeffs_.row(i * 6 + 4);
+                const RowVectorType c5 = coeffs_.row(i * 6 + 5);
 
-                const RowVectorType iP = spatial_points_[i].transpose();
-                const RowVectorType fP = spatial_points_[i+1].transpose();
-                const RowVectorType iV = internal_vel_.row(i);
-                const RowVectorType fV = internal_vel_.row(i+1);
-                const RowVectorType iA = internal_acc_.row(i);
-                const RowVectorType fA = internal_acc_.row(i+1);
+                double term_jerk = 36.0 * c3.squaredNorm();
+                double term_sa = 96.0 * c2.dot(c4);
+                double term_cv = 240.0 * c1.dot(c5);
 
-                double c0 = -9.0 * iA.squaredNorm() + 6.0 * iA.dot(fA) - 9.0 * fA.squaredNorm();
-                double c1 = -48.0 * ((3.0 * iA - 2.0 * fA).dot(iV) + (2.0 * iA - 3.0 * fA).dot(fV));
-                double c2 = -72.0 * (8.0 * iV.squaredNorm() + 14.0 * iV.dot(fV) + 8.0 * fV.squaredNorm() + 5.0 * (iA - fA).dot(iP - fP));
-                double c3 = -2880.0 * (iV + fV).dot(iP - fP);
-                double c4 = -3600.0 * (iP - fP).squaredNorm();
-
-                grad(i) = (c0 * T4 + c1 * T3 + c2 * T2 + c3 * T + c4) / T6;
+                grad(i) = -term_jerk + term_sa - term_cv;
             }
             return grad;
         }
-
         MatrixType getEnergyGradInnerP() const
         {
-            if (num_segments_ < 2) return MatrixType::Zero(0, DIM);
+            if (num_segments_ < 2)
+                return MatrixType::Zero(0, DIM);
             MatrixType grad(num_segments_ - 1, DIM);
 
             for (int i = 1; i < num_segments_; ++i)
@@ -2062,42 +2040,29 @@ template <int DIM>
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                double T = time_segments_[i];
-                double T2 = T * T;
-                double T3 = T2 * T;
-                double T4 = T3 * T;
-                double T5 = T4 * T;
-                double T6 = T3 * T3;
-                double T8 = T4 * T4; 
 
-                const RowVectorType iP = spatial_points_[i].transpose();
-                const RowVectorType fP = spatial_points_[i+1].transpose();
-                const RowVectorType iV = internal_vel_.row(i);
-                const RowVectorType fV = internal_vel_.row(i+1);
-                const RowVectorType iA = internal_acc_.row(i);
-                const RowVectorType fA = internal_acc_.row(i+1);
-                const RowVectorType iJ = internal_jerk_.row(i);
-                const RowVectorType fJ = internal_jerk_.row(i+1);
+                const int offset = i * 8;
+                const RowVectorType c1 = coeffs_.row(offset + 1);
+                const RowVectorType c2 = coeffs_.row(offset + 2);
+                const RowVectorType c3 = coeffs_.row(offset + 3);
+                const RowVectorType c4 = coeffs_.row(offset + 4);
+                const RowVectorType c5 = coeffs_.row(offset + 5);
+                const RowVectorType c6 = coeffs_.row(offset + 6);
+                const RowVectorType c7 = coeffs_.row(offset + 7);
 
-                double c0 = -8.0 * (2.0 * iJ.squaredNorm() + iJ.dot(fJ) + 2.0 * fJ.squaredNorm());
-                double c1 = -240.0 * (iA.dot(2.0 * iJ + fJ) - fA.dot(iJ + 2.0 * fJ));
-                double c2 = -720.0 * (5.0 * iA.squaredNorm() - 7.0 * iA.dot(fA) + 5.0 * fA.squaredNorm() +
-                                      4.0 * iJ.dot(iV) + 3.0 * fJ.dot(iV) + 3.0 * iJ.dot(fV) + 4.0 * fJ.dot(fV));
-                double c3 = -960.0 * (45.0 * iA.dot(iV) - 39.0 * fA.dot(iV) + 39.0 * iA.dot(fV) - 45.0 * fA.dot(fV) +
-                                      7.0 * (iJ + fJ).dot(iP - fP));
-                double c4 = -14400.0 * (9.0 * iV.squaredNorm() + 17.0 * iV.dot(fV) + 9.0 * fV.squaredNorm() +
-                                        7.0 * (iA - fA).dot(iP - fP));
-                double c5 = -604800.0 * (iV + fV).dot(iP - fP);
-                double c6 = -705600.0 * (iP - fP).squaredNorm();
+                double term_snap = 576.0 * c4.squaredNorm();
+                double term_cj = 1440.0 * c3.dot(c5);
+                double term_pa = 2880.0 * c2.dot(c6);
+                double term_dv = 10080.0 * c1.dot(c7);
 
-                grad(i) = (c0*T6 + c1*T5 + c2*T4 + c3*T3 + c4*T2 + c5*T + c6) / T8;
+                grad(i) = -term_snap + term_cj - term_pa + term_dv;
             }
             return grad;
         }
-
         MatrixType getEnergyGradInnerP() const
         {
-            if (num_segments_ < 2) return MatrixType::Zero(0, DIM);
+            if (num_segments_ < 2)
+                return MatrixType::Zero(0, DIM);
             MatrixType grad(num_segments_ - 1, DIM);
 
             for (int i = 1; i < num_segments_; ++i)
