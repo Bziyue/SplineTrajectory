@@ -802,15 +802,11 @@ namespace SplineTrajectory
 
         MatrixType getEnergyGradInnerP() const
         {
-            if (num_segments_ < 2)
-                return MatrixType::Zero(0, DIM);
-            MatrixType grad(num_segments_ - 1, DIM);
-
+            MatrixType grad(std::max(0, num_segments_ - 1), DIM);
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c3_L = coeffs_.row((i - 1) * 4 + 3);
                 const RowVectorType c3_R = coeffs_.row(i * 4 + 3);
-
                 grad.row(i - 1) = 12.0 * (c3_R - c3_L);
             }
             return grad;
@@ -1344,15 +1340,11 @@ namespace SplineTrajectory
         }
         MatrixType getEnergyGradInnerP() const
         {
-            if (num_segments_ < 2)
-                return MatrixType::Zero(0, DIM);
-            MatrixType grad(num_segments_ - 1, DIM);
-
+            MatrixType grad(std::max(0, num_segments_ - 1), DIM);
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c5_L = coeffs_.row((i - 1) * 6 + 5);
                 const RowVectorType c5_R = coeffs_.row(i * 6 + 5);
-
                 grad.row(i - 1) = 240.0 * (c5_L - c5_R);
             }
             return grad;
@@ -2061,15 +2053,11 @@ namespace SplineTrajectory
         }
         MatrixType getEnergyGradInnerP() const
         {
-            if (num_segments_ < 2)
-                return MatrixType::Zero(0, DIM);
-            MatrixType grad(num_segments_ - 1, DIM);
-
+            MatrixType grad(std::max(0, num_segments_ - 1), DIM);
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c7_L = coeffs_.row((i - 1) * 8 + 7);
                 const RowVectorType c7_R = coeffs_.row(i * 8 + 7);
-
                 grad.row(i - 1) = 10080.0 * (c7_R - c7_L);
             }
             return grad;
