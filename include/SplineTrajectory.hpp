@@ -808,11 +808,16 @@ namespace SplineTrajectory
 
         /**
          * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         *
+         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
+         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
+         * If true, returns gradients for ALL waypoints including start and end points.
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes)
+                           Eigen::VectorXd &gradByTimes,
+                           bool includeEndpoints = false)
         {
             const int n = num_segments_;
             const int dim = DIM;
@@ -881,13 +886,19 @@ namespace SplineTrajectory
                 gradByTimes(k) -= lambda.row(k).dot(term_k);
                 gradByTimes(k) -= lambda.row(k + 1).dot(term_k1);
             }
+
+            if (!includeEndpoints && n > 1)
+            {
+                gradByPoints = gradByPoints.middleRows(1, n - 1).eval();
+            }
         }
 
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
+                                const Eigen::VectorXd &partialGradByTimes,
+                                bool includeEndpoints = false)
         {
             Gradients result;
-            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times);
+            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, includeEndpoints);
             return result;
         }
 
@@ -1358,15 +1369,15 @@ namespace SplineTrajectory
          * Contains gradients for P_0, P_1, ..., P_N.
          * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
          *
-         * @note
-         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
-         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
-         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
+         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
+         * If true, returns gradients for ALL waypoints including start and end points.
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes)
+                           Eigen::VectorXd &gradByTimes,
+                           bool includeEndpoints = false)
         {
             const int n = num_segments_;
             const int n_pts = static_cast<int>(spatial_points_.size());
@@ -1521,26 +1532,25 @@ namespace SplineTrajectory
 
                 gradByTimes(k - 2) += term_rhs_hL - (term_LHS_L_hL + term_LHS_D_hL);
             }
+
+            if (!includeEndpoints && n > 1)
+            {
+                gradByPoints = gradByPoints.middleRows(1, n - 1).eval();
+            }
         }
         /**
          * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
          *
-         * This function computes gradients for ALL waypoints, including the start and end points.
-         *
-         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
-         * Contains gradients for P_0, P_1, ..., P_N.
-         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
-         *
-         * @note
-         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
-         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
-         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
+         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
+         * If true, returns gradients for ALL waypoints including start and end points.
          */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
+                                const Eigen::VectorXd &partialGradByTimes,
+                                bool includeEndpoints = false)
         {
             Gradients result;
-            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times);
+            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, includeEndpoints);
             return result;
         }
 
@@ -2064,16 +2074,15 @@ namespace SplineTrajectory
          * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
          * Contains gradients for P_0, P_1, ..., P_N.
          * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
-         *
-         * @note
-         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
-         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
-         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
+         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
+         * If true, returns gradients for ALL waypoints including start and end points.
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes)
+                           Eigen::VectorXd &gradByTimes,
+                           bool includeEndpoints = false)
         {
             const int n = num_segments_;
             const int n_pts = static_cast<int>(spatial_points_.size());
@@ -2271,6 +2280,11 @@ namespace SplineTrajectory
                                           lam_pop.dot(term_dRes2_dhR);
                 }
             }
+
+            if (!includeEndpoints && n > 1)
+            {
+                gradByPoints = gradByPoints.middleRows(1, n - 1).eval();
+            }
         }
         struct Gradients
         {
@@ -2285,17 +2299,16 @@ namespace SplineTrajectory
          * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
          * Contains gradients for P_0, P_1, ..., P_N.
          * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
-         *
-         * @note
-         * If your optimization problem assumes fixed start and end states (e.g., standard MINCO),
-         * the gradients for the start point (row 0) and end point (row N) should be ignored/discarded.
-         * You should only pass the inner gradients (rows 1 to N-1) to your optimizer.
+         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
+         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
+         * If true, returns gradients for ALL waypoints including start and end points.
          */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
+                                const Eigen::VectorXd &partialGradByTimes,
+                                bool includeEndpoints = false)
         {
             Gradients result;
-            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times);
+            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, includeEndpoints);
             return result;
         }
 
