@@ -78,6 +78,66 @@ void testCubic(int N, int BENCH_ITERS)
 {
     printHeader("TEST: Cubic Spline (Order 3) vs MINCO S2");
 
+    // Note: MINCO S2 requires N >= 2 (at least 2 segments)
+    // For N = 1, we only test SplineTrajectory
+    if (N < 2) {
+        cout << "\033[33mWARNING: N=" << N << " is not supported by MINCO S2 (require N>=2).\033[0m" << endl;
+        cout << "Testing SplineTrajectory only for N=1..." << endl;
+        
+        std::vector<double> times(N);
+        SplineTrajectory::SplineVector3D all_points(N + 1);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> dis_t(0.5, 2.0);
+        std::uniform_real_distribution<> dis_p(-10.0, 10.0);
+        for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
+        for (int i = 0; i <= N; ++i) all_points[i] = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen));
+        
+        SplineTrajectory::BoundaryConditions<3> bc;
+        SplineTrajectory::CubicSpline3D cubic_spline;
+        cubic_spline.update(times, all_points, 0.0, bc);
+        
+        cout << "Spline3 Generation: \033[32mOK\033[0m" << endl;
+        cout << "Energy: " << cubic_spline.getEnergy() << endl;
+        cout << "Duration: " << cubic_spline.getDuration() << endl;
+        
+        // Test gradient computation
+        SplineTrajectory::CubicSpline3D::MatrixType gdC;
+        Eigen::VectorXd gdT;
+        cubic_spline.getEnergyPartialGradByCoeffs(gdC);
+        cubic_spline.getEnergyPartialGradByTimes(gdT);
+        cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
+        cout << "Partial Grad (Times) size: " << gdT.size() << endl;
+        
+        // Test propagateGrad
+        SplineTrajectory::CubicSpline3D::MatrixType gradP;
+        Eigen::VectorXd gradT;
+        cubic_spline.propagateGrad(gdC, gdT, gradP, gradT);
+        cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
+        cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
+        
+        // Consistency Check: Direct vs Propagated
+        printSubHeader("Self-Check: Direct vs Propagated");
+        Eigen::VectorXd direct_gradT = cubic_spline.getEnergyGradTimes();
+        Eigen::MatrixXd direct_gradP = cubic_spline.getEnergyGradInnerP(); // (N-1)x3, empty for N=1
+        
+        printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
+        
+        // For N=1, there are no inner points, so direct_gradP is 0x3
+        if (N > 1) {
+            Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
+            printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+        } else {
+            cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
+        }
+        
+        // Print boundary gradients
+        printSubHeader("Start/End Gradients");
+        cout << "Start Point Grad: " << gradP.row(0) << endl;
+        cout << "End   Point Grad: " << gradP.row(N) << endl;
+        return;
+    }
+
     std::vector<double> times;
     SplineTrajectory::SplineVector3D all_points;
     Eigen::Matrix3Xd inner_points;
@@ -216,6 +276,66 @@ void testCubic(int N, int BENCH_ITERS)
 void testQuintic(int N, int BENCH_ITERS)
 {
     printHeader("TEST: Quintic Spline (Order 5) vs MINCO S3 vs Ref(Jerk)");
+
+    // Note: MINCO and min_jerk require N >= 2 (at least 2 segments)
+    // For N = 1, we only test SplineTrajectory
+    if (N < 2) {
+        cout << "\033[33mWARNING: N=" << N << " is not supported by MINCO/min_jerk (require N>=2).\033[0m" << endl;
+        cout << "Testing SplineTrajectory only for N=1..." << endl;
+        
+        std::vector<double> times(N);
+        SplineTrajectory::SplineVector3D all_points(N + 1);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> dis_t(0.5, 2.0);
+        std::uniform_real_distribution<> dis_p(-10.0, 10.0);
+        for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
+        for (int i = 0; i <= N; ++i) all_points[i] = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen));
+        
+        SplineTrajectory::BoundaryConditions<3> bc;
+        SplineTrajectory::QuinticSpline3D quintic_spline;
+        quintic_spline.update(times, all_points, 0.0, bc);
+        
+        cout << "Spline5 Generation: \033[32mOK\033[0m" << endl;
+        cout << "Energy: " << quintic_spline.getEnergy() << endl;
+        cout << "Duration: " << quintic_spline.getDuration() << endl;
+        
+        // Test gradient computation
+        SplineTrajectory::QuinticSpline3D::MatrixType gdC;
+        Eigen::VectorXd gdT;
+        quintic_spline.getEnergyPartialGradByCoeffs(gdC);
+        quintic_spline.getEnergyPartialGradByTimes(gdT);
+        cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
+        cout << "Partial Grad (Times) size: " << gdT.size() << endl;
+        
+        // Test propagateGrad
+        SplineTrajectory::QuinticSpline3D::MatrixType gradP;
+        Eigen::VectorXd gradT;
+        quintic_spline.propagateGrad(gdC, gdT, gradP, gradT);
+        cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
+        cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
+        
+        // Consistency Check: Direct vs Propagated
+        printSubHeader("Self-Check: Direct vs Propagated");
+        Eigen::VectorXd direct_gradT = quintic_spline.getEnergyGradTimes();
+        Eigen::MatrixXd direct_gradP = quintic_spline.getEnergyGradInnerP(); // (N-1)x3, empty for N=1
+        
+        printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
+        
+        // For N=1, there are no inner points, so direct_gradP is 0x3
+        if (N > 1) {
+            Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
+            printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+        } else {
+            cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
+        }
+        
+        // Print boundary gradients
+        printSubHeader("Start/End Gradients");
+        cout << "Start Point Grad: " << gradP.row(0) << endl;
+        cout << "End   Point Grad: " << gradP.row(N) << endl;
+        return;
+    }
 
     std::vector<double> times;
     SplineTrajectory::SplineVector3D all_points;
@@ -370,6 +490,66 @@ void testSeptic(int N, int BENCH_ITERS)
 {
     printHeader("TEST: Septic Spline (Order 7) vs MINCO S4 vs Ref(Snap)");
 
+    // Note: MINCO and min_snap require N >= 2 (at least 2 segments)
+    // For N = 1, we only test SplineTrajectory
+    if (N < 2) {
+        cout << "\033[33mWARNING: N=" << N << " is not supported by MINCO/min_snap (require N>=2).\033[0m" << endl;
+        cout << "Testing SplineTrajectory only for N=1..." << endl;
+        
+        std::vector<double> times(N);
+        SplineTrajectory::SplineVector3D all_points(N + 1);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> dis_t(0.5, 2.0);
+        std::uniform_real_distribution<> dis_p(-10.0, 10.0);
+        for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
+        for (int i = 0; i <= N; ++i) all_points[i] = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen));
+        
+        SplineTrajectory::BoundaryConditions<3> bc;
+        SplineTrajectory::SepticSpline3D septic_spline;
+        septic_spline.update(times, all_points, 0.0, bc);
+        
+        cout << "Spline7 Generation: \033[32mOK\033[0m" << endl;
+        cout << "Energy: " << septic_spline.getEnergy() << endl;
+        cout << "Duration: " << septic_spline.getDuration() << endl;
+        
+        // Test gradient computation
+        SplineTrajectory::SepticSpline3D::MatrixType gdC;
+        Eigen::VectorXd gdT;
+        septic_spline.getEnergyPartialGradByCoeffs(gdC);
+        septic_spline.getEnergyPartialGradByTimes(gdT);
+        cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
+        cout << "Partial Grad (Times) size: " << gdT.size() << endl;
+        
+        // Test propagateGrad
+        SplineTrajectory::SepticSpline3D::MatrixType gradP;
+        Eigen::VectorXd gradT;
+        septic_spline.propagateGrad(gdC, gdT, gradP, gradT);
+        cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
+        cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
+        
+        // Consistency Check: Direct vs Propagated
+        printSubHeader("Self-Check: Direct vs Propagated");
+        Eigen::VectorXd direct_gradT = septic_spline.getEnergyGradTimes();
+        Eigen::MatrixXd direct_gradP = septic_spline.getEnergyGradInnerP(); // (N-1)x3, empty for N=1
+        
+        printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
+        
+        // For N=1, there are no inner points, so direct_gradP is 0x3
+        if (N > 1) {
+            Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
+            printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+        } else {
+            cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
+        }
+        
+        // Print boundary gradients
+        printSubHeader("Start/End Gradients");
+        cout << "Start Point Grad: " << gradP.row(0) << endl;
+        cout << "End   Point Grad: " << gradP.row(N) << endl;
+        return;
+    }
+
     std::vector<double> times;
     SplineTrajectory::SplineVector3D all_points;
     Eigen::Matrix3Xd inner_points;
@@ -523,7 +703,7 @@ void testSeptic(int N, int BENCH_ITERS)
 int main()
 {
     // Test parameters
-    int N = 10;
+    int N = 5;
     int BENCH_ITERS = 10000;
 
     // Seed random
