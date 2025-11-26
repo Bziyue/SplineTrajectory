@@ -203,17 +203,12 @@ namespace SplineTrajectory
 
         SplineVector<VectorType> evaluate(const std::vector<double> &t, int derivative_order = 0) const
         {
-            if (t.empty())
-                return {};
-
             SplineVector<VectorType> results;
             results.reserve(t.size());
-
             for (double time : t)
             {
                 results.push_back(evaluate(time, derivative_order));
             }
-
             return results;
         }
 
@@ -227,106 +222,105 @@ namespace SplineTrajectory
         {
             SegmentedTimeSequence segmented_seq;
 
-            if (start_t > end_t || dt <= 0.0)
-                return segmented_seq;
-
-            double current_t = start_t;
-            int current_segment_idx = findSegment(current_t);
-
-            while (current_t <= end_t)
+            if (start_t <= end_t && dt > 0.0)
             {
-                double segment_start = breakpoints_[current_segment_idx];
-                double segment_end = (current_segment_idx < num_segments_ - 1)
-                                         ? breakpoints_[current_segment_idx + 1]
-                                         : std::numeric_limits<double>::max();
+                double current_t = start_t;
+                int current_segment_idx = findSegment(current_t);
 
-                typename SegmentedTimeSequence::SegmentInfo segment_info;
-                segment_info.segment_idx = current_segment_idx;
-                segment_info.segment_start = segment_start;
-
-                while (current_t <= end_t && current_t < segment_end)
+                while (current_t <= end_t)
                 {
-                    segment_info.times.push_back(current_t);
-                    segment_info.relative_times.push_back(current_t - segment_start);
-                    current_t += dt;
+                    double segment_start = breakpoints_[current_segment_idx];
+                    double segment_end = (current_segment_idx < num_segments_ - 1)
+                                             ? breakpoints_[current_segment_idx + 1]
+                                             : std::numeric_limits<double>::max();
+
+                    typename SegmentedTimeSequence::SegmentInfo segment_info;
+                    segment_info.segment_idx = current_segment_idx;
+                    segment_info.segment_start = segment_start;
+
+                    while (current_t <= end_t && current_t < segment_end)
+                    {
+                        segment_info.times.push_back(current_t);
+                        segment_info.relative_times.push_back(current_t - segment_start);
+                        current_t += dt;
+                    }
+
+                    if (!segment_info.times.empty())
+                    {
+                        segmented_seq.segments.push_back(std::move(segment_info));
+                    }
+
+                    if (current_segment_idx < num_segments_ - 1)
+                    {
+                        current_segment_idx++;
+                    }
+                    else
+                    {
+                        break;
+                    }
                 }
 
-                if (!segment_info.times.empty())
+                if (segmented_seq.segments.empty() || segmented_seq.segments.back().times.back() < end_t)
                 {
-                    segmented_seq.segments.push_back(std::move(segment_info));
-                }
-
-                if (current_segment_idx < num_segments_ - 1)
-                {
-                    current_segment_idx++;
-                }
-                else
-                {
-                    break;
+                    int end_seg_idx = findSegment(end_t);
+                    if (!segmented_seq.segments.empty() && end_seg_idx == segmented_seq.segments.back().segment_idx)
+                    {
+                        auto &last_segment = segmented_seq.segments.back();
+                        last_segment.times.push_back(end_t);
+                        last_segment.relative_times.push_back(end_t - last_segment.segment_start);
+                    }
+                    else
+                    {
+                        typename SegmentedTimeSequence::SegmentInfo end_segment;
+                        end_segment.segment_idx = end_seg_idx;
+                        end_segment.segment_start = breakpoints_[end_seg_idx];
+                        end_segment.times.push_back(end_t);
+                        end_segment.relative_times.push_back(end_t - end_segment.segment_start);
+                        segmented_seq.segments.push_back(std::move(end_segment));
+                    }
                 }
             }
-
-            if (segmented_seq.segments.empty() || segmented_seq.segments.back().times.back() < end_t)
-            {
-                int end_seg_idx = findSegment(end_t);
-                if (!segmented_seq.segments.empty() && end_seg_idx == segmented_seq.segments.back().segment_idx)
-                {
-                    auto &last_segment = segmented_seq.segments.back();
-                    last_segment.times.push_back(end_t);
-                    last_segment.relative_times.push_back(end_t - last_segment.segment_start);
-                }
-                else
-                {
-                    typename SegmentedTimeSequence::SegmentInfo end_segment;
-                    end_segment.segment_idx = end_seg_idx;
-                    end_segment.segment_start = breakpoints_[end_seg_idx];
-                    end_segment.times.push_back(end_t);
-                    end_segment.relative_times.push_back(end_t - end_segment.segment_start);
-                    segmented_seq.segments.push_back(std::move(end_segment));
-                }
-            }
-
             return segmented_seq;
         }
 
         SplineVector<VectorType> evaluateSegmented(const SegmentedTimeSequence &segmented_seq, int derivative_order = 0) const
         {
+            SplineVector<VectorType> results;
+            const size_t total_size = segmented_seq.getTotalSize();
+            results.reserve(total_size);
+
             if (derivative_order >= order_)
             {
-                SplineVector<VectorType> results(segmented_seq.getTotalSize(), VectorType::Zero());
-                return results;
+                results.resize(total_size, VectorType::Zero());
             }
-
-            ensureDerivativeFactorsComputed(derivative_order);
-
-            SplineVector<VectorType> results;
-            results.reserve(segmented_seq.getTotalSize());
-
-            for (const auto &segment_info : segmented_seq.segments)
+            else
             {
+                ensureDerivativeFactorsComputed(derivative_order);
 
-                SplineVector<VectorType> segment_coeffs(order_);
-                for (int k = 0; k < order_; ++k)
+                for (const auto &segment_info : segmented_seq.segments)
                 {
-                    segment_coeffs[k] = coefficients_.row(segment_info.segment_idx * order_ + k);
-                }
-
-                for (double dt : segment_info.relative_times)
-                {
-                    VectorType result = VectorType::Zero();
-                    double dt_power = 1.0;
-
-                    for (int k = derivative_order; k < order_; ++k)
+                    SplineVector<VectorType> segment_coeffs(order_);
+                    for (int k = 0; k < order_; ++k)
                     {
-                        const double coeff_factor = derivative_factors_cache_[derivative_order][k];
-                        result += (coeff_factor * segment_coeffs[k]) * dt_power;
-                        dt_power *= dt;
+                        segment_coeffs[k] = coefficients_.row(segment_info.segment_idx * order_ + k);
                     }
 
-                    results.push_back(result);
+                    for (double dt : segment_info.relative_times)
+                    {
+                        VectorType result = VectorType::Zero();
+                        double dt_power = 1.0;
+
+                        for (int k = derivative_order; k < order_; ++k)
+                        {
+                            const double coeff_factor = derivative_factors_cache_[derivative_order][k];
+                            result += (coeff_factor * segment_coeffs[k]) * dt_power;
+                            dt_power *= dt;
+                        }
+
+                        results.push_back(result);
+                    }
                 }
             }
-
             return results;
         }
 
