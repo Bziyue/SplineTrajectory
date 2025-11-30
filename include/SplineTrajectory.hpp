@@ -1454,17 +1454,26 @@ namespace SplineTrajectory
 
             for (int i = 0; i < num_blocks - 1; ++i)
             {
-                Eigen::Matrix<double, 2, DIM> term = D_inv_cache_[i].transpose() * ws_current_lambda_[i];
+                Eigen::Matrix<double, 2, DIM> term;
+                Multiply2x2T_2xN(D_inv_cache_[i], ws_current_lambda_[i], term);
                 ws_d_rhs_mod_[i] += term;
-                ws_current_lambda_[i + 1] -= U_blocks_cache_[i].transpose() * term;
+                
+                Eigen::Matrix<double, 2, DIM> u_transpose_term;
+                Multiply2x2T_2xN(U_blocks_cache_[i], term, u_transpose_term);
+                ws_current_lambda_[i + 1] -= u_transpose_term;
             }
-            ws_d_rhs_mod_[num_blocks - 1] += D_inv_cache_.back().transpose() * ws_current_lambda_.back();
+            Eigen::Matrix<double, 2, DIM> term_last;
+            Multiply2x2T_2xN(D_inv_cache_.back(), ws_current_lambda_.back(), term_last);
+            ws_d_rhs_mod_[num_blocks - 1] += term_last;
 
             for (int i = num_blocks - 1; i > 0; --i)
             {
                 const Eigen::Matrix2d &L = L_blocks_cache_[i];
 
-                Eigen::Matrix<double, 2, DIM> term = D_inv_cache_[i - 1].transpose() * (L.transpose() * ws_d_rhs_mod_[i]);
+                Eigen::Matrix<double, 2, DIM> temp_product;
+                Multiply2x2T_2xN(L, ws_d_rhs_mod_[i], temp_product);
+                Eigen::Matrix<double, 2, DIM> term;
+                Multiply2x2T_2xN(D_inv_cache_[i - 1], temp_product, term);
                 ws_d_rhs_mod_[i - 1] -= term;
             }
 
@@ -1608,6 +1617,52 @@ namespace SplineTrajectory
             A_inv_out(1, 1) = a * inv_det;
         }
 
+        static inline void Multiply2x2(const Eigen::Matrix2d &A, const Eigen::Matrix2d &B, Eigen::Matrix2d &C_out) noexcept
+        {
+            const double a00 = A(0, 0), a01 = A(0, 1);
+            const double a10 = A(1, 0), a11 = A(1, 1);
+            const double b00 = B(0, 0), b01 = B(0, 1);
+            const double b10 = B(1, 0), b11 = B(1, 1);
+
+            C_out(0, 0) = a00 * b00 + a01 * b10;
+            C_out(0, 1) = a00 * b01 + a01 * b11;
+            C_out(1, 0) = a10 * b00 + a11 * b10;
+            C_out(1, 1) = a10 * b01 + a11 * b11;
+        }
+
+        template<int N>
+        static inline void Multiply2x2_2xN(const Eigen::Matrix2d &A, const Eigen::Matrix<double, 2, N> &B, 
+                                           Eigen::Matrix<double, 2, N> &C_out) noexcept
+        {
+            const double a00 = A(0, 0), a01 = A(0, 1);
+            const double a10 = A(1, 0), a11 = A(1, 1);
+
+            for (int j = 0; j < N; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                C_out(0, j) = a00 * b0j + a01 * b1j;
+                C_out(1, j) = a10 * b0j + a11 * b1j;
+            }
+        }
+
+        template<int N>
+        static inline void Multiply2x2T_2xN(const Eigen::Matrix2d &A, const Eigen::Matrix<double, 2, N> &B,
+                                            Eigen::Matrix<double, 2, N> &C_out) noexcept
+        {
+            const double a00 = A(0, 0), a01 = A(0, 1);
+            const double a10 = A(1, 0), a11 = A(1, 1);
+
+            for (int j = 0; j < N; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+
+                C_out(0, j) = a00 * b0j + a10 * b1j;
+                C_out(1, j) = a01 * b0j + a11 * b1j;
+            }
+        }
+
         void solveInternalDerivatives(const MatrixType &P,
                                       MatrixType &p_out,
                                       MatrixType &q_out)
@@ -1671,8 +1726,10 @@ namespace SplineTrajectory
                 }
                 else
                 {
-                    const Eigen::Matrix2d X = D_inv_cache_[i - 1] * U_blocks_cache_[i - 1];
-                    const Eigen::Matrix<double, 2, DIM> Y = D_inv_cache_[i - 1] * ws_rhs_mod_[i - 1];
+                    Eigen::Matrix2d X;
+                    Multiply2x2(D_inv_cache_[i - 1], U_blocks_cache_[i - 1], X);
+                    Eigen::Matrix<double, 2, DIM> Y;
+                    Multiply2x2_2xN(D_inv_cache_[i - 1], ws_rhs_mod_[i - 1], Y);
 
                     D.noalias() -= L * X;
                     r.noalias() -= L * Y;
@@ -1692,12 +1749,12 @@ namespace SplineTrajectory
 
             ws_solution_.resize(num_blocks);
 
-            ws_solution_[num_blocks - 1] = D_inv_cache_[num_blocks - 1] * ws_rhs_mod_[num_blocks - 1];
+            Multiply2x2_2xN(D_inv_cache_[num_blocks - 1], ws_rhs_mod_[num_blocks - 1], ws_solution_[num_blocks - 1]);
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
                 const Eigen::Matrix<double, 2, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * ws_solution_[i + 1];
-                ws_solution_[i] = D_inv_cache_[i] * rhs_temp;
+                Multiply2x2_2xN(D_inv_cache_[i], rhs_temp, ws_solution_[i]);
             }
 
             for (int i = 0; i < num_blocks; ++i)
@@ -2175,16 +2232,25 @@ namespace SplineTrajectory
 
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    Eigen::Matrix<double, 3, DIM> term = D_inv_cache_[i].transpose() * ws_current_lambda_[i];
+                    Eigen::Matrix<double, 3, DIM> term;
+                    Multiply3x3T_3xN(D_inv_cache_[i], ws_current_lambda_[i], term);
                     ws_d_rhs_mod_[i] += term;
-                    ws_current_lambda_[i + 1] -= U_blocks_cache_[i].transpose() * term;
+                    
+                    Eigen::Matrix<double, 3, DIM> u_transpose_term;
+                    Multiply3x3T_3xN(U_blocks_cache_[i], term, u_transpose_term);
+                    ws_current_lambda_[i + 1] -= u_transpose_term;
                 }
-                ws_d_rhs_mod_[num_blocks - 1] += D_inv_cache_.back().transpose() * ws_current_lambda_.back();
+                Eigen::Matrix<double, 3, DIM> term_last;
+                Multiply3x3T_3xN(D_inv_cache_.back(), ws_current_lambda_.back(), term_last);
+                ws_d_rhs_mod_[num_blocks - 1] += term_last;
 
                 for (int i = num_blocks - 1; i > 0; --i)
                 {
                     const Eigen::Matrix3d &L = L_blocks_cache_[i];
-                    Eigen::Matrix<double, 3, DIM> term = D_inv_cache_[i - 1].transpose() * (L.transpose() * ws_d_rhs_mod_[i]);
+                    Eigen::Matrix<double, 3, DIM> temp_product;
+                    Multiply3x3T_3xN(L, ws_d_rhs_mod_[i], temp_product);
+                    Eigen::Matrix<double, 3, DIM> term;
+                    Multiply3x3T_3xN(D_inv_cache_[i - 1], temp_product, term);
                     ws_d_rhs_mod_[i - 1] -= term;
                 }
 
@@ -2390,6 +2456,69 @@ namespace SplineTrajectory
             A_inv_out(2, 2) = c22 * inv_det;
         }
 
+        static inline void Multiply3x3(const Eigen::Matrix3d &A, const Eigen::Matrix3d &B, Eigen::Matrix3d &C_out) noexcept
+        {
+            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
+            const double a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
+            const double a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
+
+            const double b00 = B(0, 0), b01 = B(0, 1), b02 = B(0, 2);
+            const double b10 = B(1, 0), b11 = B(1, 1), b12 = B(1, 2);
+            const double b20 = B(2, 0), b21 = B(2, 1), b22 = B(2, 2);
+
+            C_out(0, 0) = a00 * b00 + a01 * b10 + a02 * b20;
+            C_out(0, 1) = a00 * b01 + a01 * b11 + a02 * b21;
+            C_out(0, 2) = a00 * b02 + a01 * b12 + a02 * b22;
+
+            C_out(1, 0) = a10 * b00 + a11 * b10 + a12 * b20;
+            C_out(1, 1) = a10 * b01 + a11 * b11 + a12 * b21;
+            C_out(1, 2) = a10 * b02 + a11 * b12 + a12 * b22;
+
+            C_out(2, 0) = a20 * b00 + a21 * b10 + a22 * b20;
+            C_out(2, 1) = a20 * b01 + a21 * b11 + a22 * b21;
+            C_out(2, 2) = a20 * b02 + a21 * b12 + a22 * b22;
+        }
+
+        template<int N>
+        static inline void Multiply3x3_3xN(const Eigen::Matrix3d &A, const Eigen::Matrix<double, 3, N> &B,
+                                           Eigen::Matrix<double, 3, N> &C_out) noexcept
+        {
+            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
+            const double a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
+            const double a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
+
+            for (int j = 0; j < N; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                const double b2j = B(2, j);
+
+                C_out(0, j) = a00 * b0j + a01 * b1j + a02 * b2j;
+                C_out(1, j) = a10 * b0j + a11 * b1j + a12 * b2j;
+                C_out(2, j) = a20 * b0j + a21 * b1j + a22 * b2j;
+            }
+        }
+
+        template<int N>
+        static inline void Multiply3x3T_3xN(const Eigen::Matrix3d &A, const Eigen::Matrix<double, 3, N> &B,
+                                            Eigen::Matrix<double, 3, N> &C_out) noexcept
+        {
+            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
+            const double a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
+            const double a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
+
+            for (int j = 0; j < N; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                const double b2j = B(2, j);
+
+                C_out(0, j) = a00 * b0j + a10 * b1j + a20 * b2j;
+                C_out(1, j) = a01 * b0j + a11 * b1j + a21 * b2j;
+                C_out(2, j) = a02 * b0j + a12 * b1j + a22 * b2j;
+            }
+        }
+
     private:
         void solveInternalDerivatives(const MatrixType &P,
                                       MatrixType &p_out,
@@ -2477,8 +2606,10 @@ namespace SplineTrajectory
                     const Eigen::Matrix3d &U_prev = U_blocks_cache_[i - 1];
                     const Eigen::Matrix<double, 3, DIM> &r_prev = ws_rhs_mod_[i - 1];
 
-                    const Eigen::Matrix3d X = D_prev_inv * U_prev;
-                    const Eigen::Matrix<double, 3, DIM> Y = D_prev_inv * r_prev;
+                    Eigen::Matrix3d X;
+                    Multiply3x3(D_prev_inv, U_prev, X);
+                    Eigen::Matrix<double, 3, DIM> Y;
+                    Multiply3x3_3xN(D_prev_inv, r_prev, Y);
 
                     D.noalias() -= L * X;
                     r.noalias() -= L * Y;
@@ -2500,12 +2631,12 @@ namespace SplineTrajectory
 
             ws_solution_.resize(num_blocks);
 
-            ws_solution_[num_blocks - 1] = D_inv_cache_[num_blocks - 1] * ws_rhs_mod_[num_blocks - 1];
+            Multiply3x3_3xN(D_inv_cache_[num_blocks - 1], ws_rhs_mod_[num_blocks - 1], ws_solution_[num_blocks - 1]);
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
                 const Eigen::Matrix<double, 3, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * ws_solution_[i + 1];
-                ws_solution_[i] = D_inv_cache_[i] * rhs_temp;
+                Multiply3x3_3xN(D_inv_cache_[i], rhs_temp, ws_solution_[i]);
             }
 
             for (int i = 0; i < num_blocks; ++i)
