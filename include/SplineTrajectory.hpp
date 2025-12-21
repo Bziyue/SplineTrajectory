@@ -1480,15 +1480,15 @@ namespace SplineTrajectory
             for (int i = 0; i < num_blocks; ++i)
             {
                 const int k = i + 2;
-                const Eigen::Matrix<double, 1, DIM> lam_v = ws_d_rhs_mod_[i].row(0);
-                const Eigen::Matrix<double, 1, DIM> lam_a = ws_d_rhs_mod_[i].row(1);
+                const Eigen::Matrix<double, 1, DIM> lam_snap = ws_d_rhs_mod_[i].row(0);
+                const Eigen::Matrix<double, 1, DIM> lam_jerk = ws_d_rhs_mod_[i].row(1);
 
                 const auto &tp_L = time_powers_[k - 2];
                 const auto &tp_R = time_powers_[k - 1];
 
-                gradByPoints.row(k) += lam_v * (60.0 * tp_R.h3_inv) + lam_a * (-360.0 * tp_R.h4_inv);
-                gradByPoints.row(k - 1) += lam_v * (-60.0 * (tp_R.h3_inv + tp_L.h3_inv)) + lam_a * (360.0 * (tp_R.h4_inv - tp_L.h4_inv));
-                gradByPoints.row(k - 2) += lam_v * (60.0 * tp_L.h3_inv) + lam_a * (360.0 * tp_L.h4_inv);
+                gradByPoints.row(k) += lam_snap * (-360.0 * tp_R.h4_inv) + lam_jerk * (60.0 * tp_R.h3_inv);
+                gradByPoints.row(k - 1) += lam_snap * (360.0 * (tp_R.h4_inv - tp_L.h4_inv)) + lam_jerk * (-60.0 * (tp_R.h3_inv + tp_L.h3_inv));
+                gradByPoints.row(k - 2) += lam_snap * (360.0 * tp_L.h4_inv) + lam_jerk * (60.0 * tp_L.h3_inv);
 
                 const RowVectorType dP_R = spatial_points_[k].transpose() - spatial_points_[k - 1].transpose();
                 const RowVectorType dP_L = spatial_points_[k - 1].transpose() - spatial_points_[k - 2].transpose();
@@ -1500,44 +1500,44 @@ namespace SplineTrajectory
                 const RowVectorType v_next = internal_vel_.row(k + 1);
                 const RowVectorType a_next = internal_acc_.row(k + 1);
 
-                double term_rhs_hR = lam_v.dot(dP_R * (-180.0 * tp_R.h4_inv)) +
-                                     lam_a.dot(dP_R * (1440.0 * tp_R.h5_inv));
-                double dD_R_row0 = -72.0 * tp_R.h3_inv;
-                double dD_R_row0_a = -9.0 * tp_R.h2_inv;
-                double dD_R_row1 = 576.0 * tp_R.h4_inv;
-                double dD_R_row1_a = 72.0 * tp_R.h3_inv;
+                double term_rhs_hR = lam_snap.dot(dP_R * (1440.0 * tp_R.h5_inv)) + 
+                                     lam_jerk.dot(dP_R * (-180.0 * tp_R.h4_inv));
+                double dD_R_row0 = 576.0 * tp_R.h4_inv;
+                double dD_R_row0_a = 72.0 * tp_R.h3_inv;
+                double dD_R_row1   = -72.0 * tp_R.h3_inv;
+                double dD_R_row1_a = -9.0 * tp_R.h2_inv;
 
-                double term_LHS_D_hR = lam_v.dot(v_curr * dD_R_row0 + a_curr * dD_R_row0_a) +
-                                       lam_a.dot(v_curr * dD_R_row1 + a_curr * dD_R_row1_a);
+                double term_LHS_D_hR = lam_snap.dot(v_curr * dD_R_row0 + a_curr * dD_R_row0_a) +
+                                       lam_jerk.dot(v_curr * dD_R_row1 + a_curr * dD_R_row1_a);
 
-                double dU_row0 = -48.0 * tp_R.h3_inv;
-                double dU_row0_a = 3.0 * tp_R.h2_inv;
-                double dU_row1 = 504.0 * tp_R.h4_inv;
-                double dU_row1_a = -48.0 * tp_R.h3_inv;
+                double dU_row0   = 504.0 * tp_R.h4_inv;
+                double dU_row0_a = -48.0 * tp_R.h3_inv;
+                double dU_row1   = -48.0 * tp_R.h3_inv;
+                double dU_row1_a = 3.0 * tp_R.h2_inv;
 
-                double term_LHS_U_hR = lam_v.dot(v_next * dU_row0 + a_next * dU_row0_a) +
-                                       lam_a.dot(v_next * dU_row1 + a_next * dU_row1_a);
+                double term_LHS_U_hR = lam_snap.dot(v_next * dU_row0 + a_next * dU_row0_a) +
+                                       lam_jerk.dot(v_next * dU_row1 + a_next * dU_row1_a);
 
                 gradByTimes(k - 1) += term_rhs_hR - (term_LHS_D_hR + term_LHS_U_hR);
 
-                double term_rhs_hL = lam_v.dot(dP_L * (180.0 * tp_L.h4_inv)) +
-                                     lam_a.dot(dP_L * (1440.0 * tp_L.h5_inv));
+                double term_rhs_hL = lam_snap.dot(dP_L * (1440.0 * tp_L.h5_inv)) +
+                                     lam_jerk.dot(dP_L * (180.0 * tp_L.h4_inv));
 
-                double dL_row0 = 48.0 * tp_L.h3_inv;
-                double dL_row0_a = 3.0 * tp_L.h2_inv;
-                double dL_row1 = 504.0 * tp_L.h4_inv;
-                double dL_row1_a = 48.0 * tp_L.h3_inv;
+                double dL_row0   = 504.0 * tp_L.h4_inv;
+                double dL_row0_a = 48.0 * tp_L.h3_inv;
+                double dL_row1   = 48.0 * tp_L.h3_inv;
+                double dL_row1_a = 3.0 * tp_L.h2_inv;
 
-                double term_LHS_L_hL = lam_v.dot(v_prev * dL_row0 + a_prev * dL_row0_a) +
-                                       lam_a.dot(v_prev * dL_row1 + a_prev * dL_row1_a);
+                double term_LHS_L_hL = lam_snap.dot(v_prev * dL_row0 + a_prev * dL_row0_a) +
+                                       lam_jerk.dot(v_prev * dL_row1 + a_prev * dL_row1_a);
 
-                double dD_L_row0 = 72.0 * tp_L.h3_inv;
-                double dD_L_row0_a = -9.0 * tp_L.h2_inv;
-                double dD_L_row1 = 576.0 * tp_L.h4_inv;
-                double dD_L_row1_a = -72.0 * tp_L.h3_inv;
+                double dD_L_row0   = 576.0 * tp_L.h4_inv;
+                double dD_L_row0_a = -72.0 * tp_L.h3_inv;
+                double dD_L_row1   = 72.0 * tp_L.h3_inv;
+                double dD_L_row1_a = -9.0 * tp_L.h2_inv;
 
-                double term_LHS_D_hL = lam_v.dot(v_curr * dD_L_row0 + a_curr * dD_L_row0_a) +
-                                       lam_a.dot(v_curr * dD_L_row1 + a_curr * dD_L_row1_a);
+                double term_LHS_D_hL = lam_snap.dot(v_curr * dD_L_row0 + a_curr * dD_L_row0_a) +
+                                       lam_jerk.dot(v_curr * dD_L_row1 + a_curr * dD_L_row1_a);
 
                 gradByTimes(k - 2) += term_rhs_hL - (term_LHS_L_hL + term_LHS_D_hL);
             }
@@ -1663,9 +1663,7 @@ namespace SplineTrajectory
             }
         }
 
-        void solveInternalDerivatives(const MatrixType &P,
-                                      MatrixType &p_out,
-                                      MatrixType &q_out)
+       void solveInternalDerivatives(const MatrixType &P, MatrixType &p_out, MatrixType &q_out)
         {
             const int n = static_cast<int>(P.rows());
             p_out.resize(n, DIM);
@@ -1699,24 +1697,25 @@ namespace SplineTrajectory
 
                 Eigen::Matrix<double, 1, DIM> r3 = 60.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h3_inv - (P.row(k - 1) - P.row(k - 2)) * tp_L.h3_inv);
                 Eigen::Matrix<double, 1, DIM> r4 = 360.0 * ((P.row(k - 1) - P.row(k)) * tp_R.h4_inv + (P.row(k - 2) - P.row(k - 1)) * tp_L.h4_inv);
+                
                 Eigen::Matrix<double, 2, DIM> r;
-                r.row(0) = r3;
-                r.row(1) = r4;
+                r.row(0) = r4; 
+                r.row(1) = r3; 
 
                 Eigen::Matrix2d D;
-                D << -36.0 * tp_L.h2_inv + 36.0 * tp_R.h2_inv, 9.0 * (tp_L.h_inv + tp_R.h_inv),
-                    -192.0 * (tp_L.h3_inv + tp_R.h3_inv), 36.0 * (tp_L.h2_inv - tp_R.h2_inv);
+                D << -192.0 * (tp_L.h3_inv + tp_R.h3_inv), 36.0 * (tp_L.h2_inv - tp_R.h2_inv),
+                     -36.0 * (tp_L.h2_inv - tp_R.h2_inv), 9.0 * (tp_L.h_inv + tp_R.h_inv);
 
                 Eigen::Matrix2d L;
-                L << -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv,
-                    -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv;
+                L << -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv, 
+                     -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv;    
                 L_blocks_cache_[i] = L;
 
-                Eigen::Matrix2d U;
                 if (k < n - 1)
                 {
-                    U << 24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv,
-                        -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv;
+                    Eigen::Matrix2d U;
+                    U << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv, 
+                         24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;    
                     U_blocks_cache_[i] = U;
                 }
 
@@ -1738,8 +1737,8 @@ namespace SplineTrajectory
                 if (k == n - 1)
                 {
                     Eigen::Matrix2d U_last;
-                    U_last << 24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv,
-                        -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv;
+                    U_last << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
+                              24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
                     r.noalias() -= U_last * B_right;
                 }
 
