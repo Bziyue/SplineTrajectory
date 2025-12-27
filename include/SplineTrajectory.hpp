@@ -1360,18 +1360,23 @@ namespace SplineTrajectory
             MatrixType points;
             Eigen::VectorXd times;
         };
+        
         /**
-         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         * @brief Computes gradients w.r.t. waypoints and time segments using the Analytic Adjoint Method.
          *
-         * This function computes gradients for ALL waypoints, including the start and end points.
+         * Efficiently propagates gradients by reusing the cached matrix factorization ($O(N)$ complexity)
+         * instead of differentiating the linear system explicitly.
          *
-         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
-         * Contains gradients for P_0, P_1, ..., P_N.
-         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
+         * **Mathematical Principle:**
+         * 1. **Explicit Chain Rule:** Propagate $\partial E/\partial \mathbf{c}$ to positions ($P$) and internal derivatives ($\mathbf{d} = v, a$).
+         * 2. **Adjoint Correction:** Solve $M^T \boldsymbol{\lambda} = \nabla_{\mathbf{d}} E$ to find Lagrange multipliers $\boldsymbol{\lambda}$ enforcing continuity.
+         * 3. **Implicit Time Gradient:** Account for continuity breakage due to time scaling by accumulating $\boldsymbol{\lambda} \cdot \dot{\mathbf{d}}$ (Jerk, Snap).
          *
-         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
-         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
-         * If true, returns gradients for ALL waypoints including start and end points.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (6N x D).
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param[out] gradByPoints   Output gradients for waypoints (positions).
+         * @param[out] gradByTimes    Output gradients for segment durations.
+         * @param includeEndpoints    If true, includes gradients for start and end points.
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
@@ -1385,161 +1390,156 @@ namespace SplineTrajectory
             gradByPoints = MatrixType::Zero(n_pts, DIM);
             gradByTimes = partialGradByTimes;
 
-            MatrixType g_x = MatrixType::Zero(n_pts * 2, DIM);
+            Eigen::Matrix<double, Eigen::Dynamic, 2 * DIM, Eigen::RowMajor> gd_internal;
+            gd_internal.resize(n_pts, 2 * DIM);
+            gd_internal.setZero();
+
+            auto add_grad_d = [&](int idx, const RowVectorType &d_vel, const RowVectorType &d_acc) {
+                gd_internal.row(idx).segment(0, DIM) += d_vel;
+                gd_internal.row(idx).segment(DIM, DIM) += d_acc;
+            };
 
             for (int i = 0; i < n; ++i)
             {
                 const auto &tp = time_powers_[i];
-                double hi = tp.h;
+                const int coeff_idx = i * 6;
 
-                const RowVectorType gc0 = partialGradByCoeffs.row(i * 6 + 0);
-                const RowVectorType gc1 = partialGradByCoeffs.row(i * 6 + 1);
-                const RowVectorType gc2 = partialGradByCoeffs.row(i * 6 + 2);
-                const RowVectorType gc3 = partialGradByCoeffs.row(i * 6 + 3);
-                const RowVectorType gc4 = partialGradByCoeffs.row(i * 6 + 4);
-                const RowVectorType gc5 = partialGradByCoeffs.row(i * 6 + 5);
-
-                const RowVectorType P_curr = spatial_points_[i].transpose();
-                const RowVectorType P_next = spatial_points_[i + 1].transpose();
-                const RowVectorType v_curr = internal_vel_.row(i);
-                const RowVectorType a_curr = internal_acc_.row(i);
-
-                const RowVectorType R1 = P_next - P_curr - v_curr * hi - 0.5 * a_curr * hi * hi;
-                const RowVectorType R2 = internal_vel_.row(i + 1) - v_curr - a_curr * hi;
-                const RowVectorType R3 = internal_acc_.row(i + 1) - a_curr;
+                const RowVectorType &gc0 = partialGradByCoeffs.row(coeff_idx + 0);
+                const RowVectorType &gc1 = partialGradByCoeffs.row(coeff_idx + 1);
+                const RowVectorType &gc2 = partialGradByCoeffs.row(coeff_idx + 2);
+                const RowVectorType &gc3 = partialGradByCoeffs.row(coeff_idx + 3);
+                const RowVectorType &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
+                const RowVectorType &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
 
                 gradByPoints.row(i) += gc0;
-                RowVectorType dJ_dR1 = gc3 * (10.0 * tp.h3_inv) + gc4 * (-15.0 * tp.h4_inv) + gc5 * (6.0 * tp.h5_inv);
-                gradByPoints.row(i + 1) += dJ_dR1;
-                gradByPoints.row(i) -= dJ_dR1;
 
-                g_x.row(2 * i) += gc1;
-                g_x.row(2 * i + 1) += 0.5 * gc2;
+                double k_P3 = 10.0 * tp.h3_inv;
+                double k_P4 = -15.0 * tp.h4_inv;
+                double k_P5 = 6.0 * tp.h5_inv;
 
-                RowVectorType dJ_dR2 = gc3 * (-4.0 * tp.h2_inv) + gc4 * (7.0 * tp.h3_inv) + gc5 * (-3.0 * tp.h4_inv);
-                RowVectorType dJ_dR3 = gc3 * (0.5 * tp.h_inv) + gc4 * (-1.0 * tp.h2_inv) + gc5 * (0.5 * tp.h3_inv);
+                RowVectorType sum_grad_P = gc3 * k_P3 + gc4 * k_P4 + gc5 * k_P5;
+                gradByPoints.row(i + 1) += sum_grad_P;
+                gradByPoints.row(i) -= sum_grad_P;
 
-                g_x.row(2 * i) += dJ_dR1 * (-hi);
-                g_x.row(2 * i + 1) += dJ_dR1 * (-0.5 * hi * hi);
+                RowVectorType grad_v_curr = gc1; 
+                grad_v_curr += gc3 * (-6.0 * tp.h2_inv);
+                grad_v_curr += gc4 * (8.0 * tp.h3_inv);
+                grad_v_curr += gc5 * (-3.0 * tp.h4_inv);
+                
+                RowVectorType grad_v_next = gc3 * (-4.0 * tp.h2_inv);
+                grad_v_next += gc4 * (7.0 * tp.h3_inv);
+                grad_v_next += gc5 * (-3.0 * tp.h4_inv);
 
-                g_x.row(2 * (i + 1)) += dJ_dR2;
-                g_x.row(2 * i) -= dJ_dR2;
-                g_x.row(2 * i + 1) += dJ_dR2 * (-hi);
+                RowVectorType grad_a_curr = gc2 * 0.5;
+                grad_a_curr += gc3 * (-1.5 * tp.h_inv);
+                grad_a_curr += gc4 * (1.5 * tp.h2_inv);
+                grad_a_curr += gc5 * (-0.5 * tp.h3_inv);
 
-                g_x.row(2 * (i + 1) + 1) += dJ_dR3;
-                g_x.row(2 * i + 1) -= dJ_dR3;
+                RowVectorType grad_a_next = gc3 * (0.5 * tp.h_inv);
+                grad_a_next += gc4 * (-1.0 * tp.h2_inv);
+                grad_a_next += gc5 * (0.5 * tp.h3_inv);
 
-                RowVectorType dc3_dh = -30.0 * tp.h4_inv * R1 + 8.0 * tp.h3_inv * R2 - 0.5 * tp.h2_inv * R3 - 10.0 * tp.h3_inv * v_curr - 6.0 * tp.h2_inv * a_curr;
-                RowVectorType dc4_dh = 60.0 * tp.h5_inv * R1 - 21.0 * tp.h4_inv * R2 + 2.0 * tp.h3_inv * R3 + 15.0 * tp.h4_inv * v_curr + 8.0 * tp.h3_inv * a_curr;
-                RowVectorType dc5_dh = -30.0 * tp.h6_inv * R1 + 12.0 * tp.h5_inv * R2 - 1.5 * tp.h4_inv * R3 - 6.0 * tp.h5_inv * v_curr - 3.0 * tp.h4_inv * a_curr;
+                add_grad_d(i, grad_v_curr, grad_a_curr);
+                add_grad_d(i + 1, grad_v_next, grad_a_next);
+
+                const RowVectorType &P_curr = spatial_points_[i].transpose();
+                const RowVectorType &P_next = spatial_points_[i+1].transpose();
+                const RowVectorType &V_curr = internal_vel_.row(i);
+                const RowVectorType &V_next = internal_vel_.row(i+1);
+                const RowVectorType &A_curr = internal_acc_.row(i);
+                const RowVectorType &A_next = internal_acc_.row(i+1);
+
+                RowVectorType P_diff = P_next - P_curr;
+
+                RowVectorType dc3_dh = -30.0 * tp.h4_inv * P_diff + 
+                                       12.0 * tp.h3_inv * V_curr + 8.0 * tp.h3_inv * V_next +
+                                       1.5 * tp.h2_inv * A_curr - 0.5 * tp.h2_inv * A_next;
+
+                RowVectorType dc4_dh = 60.0 * tp.h5_inv * P_diff - 
+                                       24.0 * tp.h4_inv * V_curr - 21.0 * tp.h4_inv * V_next -
+                                       3.0 * tp.h3_inv * A_curr + 2.0 * tp.h3_inv * A_next;
+
+                RowVectorType dc5_dh = -30.0 * tp.h6_inv * P_diff + 
+                                       12.0 * tp.h5_inv * V_curr + 12.0 * tp.h5_inv * V_next +
+                                       1.5 * tp.h4_inv * A_curr - 1.5 * tp.h4_inv * A_next;
 
                 gradByTimes(i) += gc3.dot(dc3_dh) + gc4.dot(dc4_dh) + gc5.dot(dc5_dh);
             }
 
             const int num_blocks = n - 1;
-            if (num_blocks <= 0)
-                return;
-
-            ws_d_rhs_mod_.resize(num_blocks);
-            ws_current_lambda_.resize(num_blocks);
-
-            for (auto &m : ws_d_rhs_mod_)
-                m.setZero();
-
-            for (int i = 0; i < num_blocks; ++i)
+            if (num_blocks > 0)
             {
-                ws_current_lambda_[i].row(0) = g_x.row(2 * (i + 1));
-                ws_current_lambda_[i].row(1) = g_x.row(2 * (i + 1) + 1);
-            }
+                std::vector<Eigen::Matrix<double, 2, DIM>> lambda(num_blocks);
 
-            for (int i = 0; i < num_blocks - 1; ++i)
-            {
-                Eigen::Matrix<double, 2, DIM> term;
-                Multiply2x2T_2xN(D_inv_cache_[i], ws_current_lambda_[i], term);
-                ws_d_rhs_mod_[i] += term;
-                
-                Eigen::Matrix<double, 2, DIM> u_transpose_term;
-                Multiply2x2T_2xN(U_blocks_cache_[i], term, u_transpose_term);
-                ws_current_lambda_[i + 1] -= u_transpose_term;
-            }
-            Eigen::Matrix<double, 2, DIM> term_last;
-            Multiply2x2T_2xN(D_inv_cache_.back(), ws_current_lambda_.back(), term_last);
-            ws_d_rhs_mod_[num_blocks - 1] += term_last;
+                for (int i = 0; i < num_blocks; ++i)
+                {
+                    lambda[i].row(0) = gd_internal.row(i + 1).segment(0, DIM); 
+                    lambda[i].row(1) = gd_internal.row(i + 1).segment(DIM, DIM); 
+                }
 
-            for (int i = num_blocks - 1; i > 0; --i)
-            {
-                const Eigen::Matrix2d &L = L_blocks_cache_[i];
+                {
+                    Eigen::Matrix<double, 2, DIM> tmp = lambda[0];
+                    Multiply2x2T_2xN(D_inv_cache_[0], tmp, lambda[0]);
+                }
 
-                Eigen::Matrix<double, 2, DIM> temp_product;
-                Multiply2x2T_2xN(L, ws_d_rhs_mod_[i], temp_product);
-                Eigen::Matrix<double, 2, DIM> term;
-                Multiply2x2T_2xN(D_inv_cache_[i - 1], temp_product, term);
-                ws_d_rhs_mod_[i - 1] -= term;
-            }
+                for (int i = 0; i < num_blocks - 1; ++i)
+                {
+                    Eigen::Matrix<double, 2, DIM> update_term;
+                    Multiply2x2T_2xN(U_blocks_cache_[i], lambda[i], update_term);
+                    lambda[i + 1] -= update_term;
 
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                const int k = i + 2;
-                const Eigen::Matrix<double, 1, DIM> lam_snap = ws_d_rhs_mod_[i].row(0);
-                const Eigen::Matrix<double, 1, DIM> lam_jerk = ws_d_rhs_mod_[i].row(1);
+                    Eigen::Matrix<double, 2, DIM> tmp = lambda[i + 1];
+                    Multiply2x2T_2xN(D_inv_cache_[i + 1], tmp, lambda[i + 1]);
+                }
 
-                const auto &tp_L = time_powers_[k - 2];
-                const auto &tp_R = time_powers_[k - 1];
+                for (int i = num_blocks - 2; i >= 0; --i)
+                {
+                    Eigen::Matrix<double, 2, DIM> update_term;
+                    Multiply2x2T_2xN(L_blocks_cache_[i + 1], lambda[i + 1], update_term);
 
-                gradByPoints.row(k) += lam_snap * (-360.0 * tp_R.h4_inv) + lam_jerk * (60.0 * tp_R.h3_inv);
-                gradByPoints.row(k - 1) += lam_snap * (360.0 * (tp_R.h4_inv - tp_L.h4_inv)) + lam_jerk * (-60.0 * (tp_R.h3_inv + tp_L.h3_inv));
-                gradByPoints.row(k - 2) += lam_snap * (360.0 * tp_L.h4_inv) + lam_jerk * (60.0 * tp_L.h3_inv);
+                    Eigen::Matrix<double, 2, DIM> scaled_update;
+                    Multiply2x2T_2xN(D_inv_cache_[i], update_term, scaled_update);
 
-                const RowVectorType dP_R = spatial_points_[k].transpose() - spatial_points_[k - 1].transpose();
-                const RowVectorType dP_L = spatial_points_[k - 1].transpose() - spatial_points_[k - 2].transpose();
+                    lambda[i] -= scaled_update;
+                }
 
-                const RowVectorType v_prev = internal_vel_.row(k - 1);
-                const RowVectorType a_prev = internal_acc_.row(k - 1);
-                const RowVectorType v_curr = internal_vel_.row(k);
-                const RowVectorType a_curr = internal_acc_.row(k);
-                const RowVectorType v_next = internal_vel_.row(k + 1);
-                const RowVectorType a_next = internal_acc_.row(k + 1);
+                for (int i = 0; i < num_blocks; ++i)
+                {
+                    const int seg_idx = i;
+                    const double T = time_segments_[seg_idx];
 
-                double term_rhs_hR = lam_snap.dot(dP_R * (1440.0 * tp_R.h5_inv)) + 
-                                     lam_jerk.dot(dP_R * (-180.0 * tp_R.h4_inv));
-                double dD_R_row0 = 576.0 * tp_R.h4_inv;
-                double dD_R_row0_a = 72.0 * tp_R.h3_inv;
-                double dD_R_row1   = -72.0 * tp_R.h3_inv;
-                double dD_R_row1_a = -9.0 * tp_R.h2_inv;
+                    const int coeff_offset = seg_idx * 6;
+                    const RowVectorType c4 = coeffs_.row(coeff_offset + 4);
+                    const RowVectorType c5 = coeffs_.row(coeff_offset + 5);
 
-                double term_LHS_D_hR = lam_snap.dot(v_curr * dD_R_row0 + a_curr * dD_R_row0_a) +
-                                       lam_jerk.dot(v_curr * dD_R_row1 + a_curr * dD_R_row1_a);
+                    const RowVectorType Snap_at_T    = 24.0 * c4 + 120.0 * c5 * T;
+                    const RowVectorType Crackle_at_T = 120.0 * c5;
 
-                double dU_row0   = 504.0 * tp_R.h4_inv;
-                double dU_row0_a = -48.0 * tp_R.h3_inv;
-                double dU_row1   = -48.0 * tp_R.h3_inv;
-                double dU_row1_a = 3.0 * tp_R.h2_inv;
+                    const RowVectorType &lam_snap = lambda[i].row(0); 
+                    const RowVectorType &lam_jerk = lambda[i].row(1); 
 
-                double term_LHS_U_hR = lam_snap.dot(v_next * dU_row0 + a_next * dU_row0_a) +
-                                       lam_jerk.dot(v_next * dU_row1 + a_next * dU_row1_a);
+                    gradByTimes(seg_idx) += (lam_snap.dot(Crackle_at_T) + lam_jerk.dot(Snap_at_T));
 
-                gradByTimes(k - 1) += term_rhs_hR - (term_LHS_D_hR + term_LHS_U_hR);
+                    const int k = i + 2; 
+                    const auto &tp_L = time_powers_[k - 2];
+                    const auto &tp_R = time_powers_[k - 1];
 
-                double term_rhs_hL = lam_snap.dot(dP_L * (1440.0 * tp_L.h5_inv)) +
-                                     lam_jerk.dot(dP_L * (180.0 * tp_L.h4_inv));
+                    double dr4_dp_next = 360.0 * tp_R.h5_inv;               
+                    double dr4_dp_curr = -360.0 * (tp_R.h5_inv + tp_L.h5_inv); 
+                    double dr4_dp_prev = 360.0 * tp_L.h5_inv;               
 
-                double dL_row0   = 504.0 * tp_L.h4_inv;
-                double dL_row0_a = 48.0 * tp_L.h3_inv;
-                double dL_row1   = 48.0 * tp_L.h3_inv;
-                double dL_row1_a = 3.0 * tp_L.h2_inv;
+                    double dr3_dp_next = 60.0 * tp_R.h4_inv;                
+                    double dr3_dp_curr = -60.0 * (tp_R.h4_inv + tp_L.h4_inv); 
+                    double dr3_dp_prev = 60.0 * tp_L.h4_inv;                
 
-                double term_LHS_L_hL = lam_snap.dot(v_prev * dL_row0 + a_prev * dL_row0_a) +
-                                       lam_jerk.dot(v_prev * dL_row1 + a_prev * dL_row1_a);
+                    RowVectorType grad_P_next = lam_snap * dr4_dp_next + lam_jerk * dr3_dp_next;
+                    RowVectorType grad_P_curr = lam_snap * dr4_dp_curr + lam_jerk * dr3_dp_curr;
+                    RowVectorType grad_P_prev = lam_snap * dr4_dp_prev + lam_jerk * dr3_dp_prev;
 
-                double dD_L_row0   = 576.0 * tp_L.h4_inv;
-                double dD_L_row0_a = -72.0 * tp_L.h3_inv;
-                double dD_L_row1   = 72.0 * tp_L.h3_inv;
-                double dD_L_row1_a = -9.0 * tp_L.h2_inv;
-
-                double term_LHS_D_hL = lam_snap.dot(v_curr * dD_L_row0 + a_curr * dD_L_row0_a) +
-                                       lam_jerk.dot(v_curr * dD_L_row1 + a_curr * dD_L_row1_a);
-
-                gradByTimes(k - 2) += term_rhs_hL - (term_LHS_L_hL + term_LHS_D_hL);
+                    gradByPoints.row(i + 2) += grad_P_next;
+                    gradByPoints.row(i + 1) += grad_P_curr;
+                    gradByPoints.row(i)     += grad_P_prev;
+                }
             }
 
             if (!includeEndpoints && n > 1)
@@ -1547,12 +1547,17 @@ namespace SplineTrajectory
                 gradByPoints = gradByPoints.middleRows(1, n - 1).eval();
             }
         }
+
         /**
-         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+         * @brief Convenience wrapper for the Analytic Adjoint Method returning a Gradients structure.
          *
-         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
-         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
-         * If true, returns gradients for ALL waypoints including start and end points.
+         * Wraps the in-place implementation to return point and time gradients in a single structure.
+         * Uses the same $O(N)$ cached matrix factorization strategy to avoid explicit differentiation.
+         *
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (6N x D).
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param includeEndpoints    If true, includes gradients for start and end points.
+         * @return Gradients Structure containing gradients for waypoints (positions) and times.
          */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes,
@@ -2122,39 +2127,23 @@ namespace SplineTrajectory
             }
             return grad;
         }
-        
+
        /**
-         * @brief Computes gradients w.r.t. waypoints and time segments using the Analytic Hybrid Adjoint Method.
+         * @brief Computes gradients w.r.t. waypoints and time segments using the Analytic Adjoint Method.
          *
-         * This method avoids explicit differentiation of the complex banded matrix $M$ (which involves high-order $h^{-k}$ terms)
-         * by exploiting the physical meaning of continuity constraints.
+         * Efficiently propagates gradients by reusing the cached matrix factorization ($O(N)$ complexity)
+         * instead of differentiating the linear system explicitly.
          *
          * **Mathematical Principle:**
-         * The total time gradient is computed as:
-         * $$ \frac{dJ}{dT} = \left(\frac{\partial J}{\partial T}\right)_{\text{explicit}} + \boldsymbol{\lambda}^T \cdot \frac{d\mathbf{x}}{dT} $$
+         * 1. **Explicit Chain Rule:** Propagate $\partial E/\partial \mathbf{c}$ to positions ($P$) and internal derivatives ($\mathbf{d} = v, a, j$).
+         * 2. **Adjoint Correction:** Solve $M^T \boldsymbol{\lambda} = \nabla_{\mathbf{d}} E$ to find Lagrange multipliers $\boldsymbol{\lambda}$ enforcing continuity.
+         * 3. **Implicit Time Gradient:** Account for continuity breakage due to time scaling by accumulating $\boldsymbol{\lambda} \cdot \dot{\mathbf{d}}$ (Snap, Crackle, Pop).
          *
-         * **Algorithm Steps:**
-         * 1. **Explicit Chain Rule:**
-         * Propagate $\nabla_{\mathbf{c}} J$ to parameters explicitly appearing in polynomial formulas:
-         * - Positions ($P$), Internal Derivatives ($\mathbf{d} = v, a, j$), and Durations ($T$).
-         *
-         * 2. **Adjoint Linear System:**
-         * Solve for Lagrange multipliers ($\boldsymbol{\lambda}$) that enforce continuity constraints:
-         * - Equation: $M^T \boldsymbol{\lambda} = \nabla_{\mathbf{d}} J$
-         * - **Optimization:** Reuses the cached banded solver ($L, U, D^{-1}$) from the forward pass ($O(N)$ complexity).
-         *
-         * 3. **Physical Gradient Assembly:**
-         * Account for implicit constraint violations caused by time scaling.
-         * - **Formula:**
-         * $$ \text{Implicit Cost} = \underbrace{\boldsymbol{\lambda}^T}_{\text{Penalty Coeff}} \cdot \underbrace{\dot{\mathbf{x}}(T)}_{\text{Velocity of Violation}} $$
-         * - **Intuition:** Extending time $T$ pushes the trajectory endpoint forward at the rate of its derivatives
-         * (Crackle, Pop, $D^7$), "breaking" the continuity constraint. $\boldsymbol{\lambda}$ represents the cost penalty for this breakage.
-         *
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (size $8N \times D$).
-         * @param partialGradByTimes  Input gradient w.r.t segment durations (size $N$).
-         * @param[out] gradByPoints   Output gradients for waypoints $P_0, \dots, P_N$ (size $(N+1) \times D$).
-         * @param[out] gradByTimes    Output gradients w.r.t segment durations (size $N$). Accumulates total gradient.
-         * @param includeEndpoints    If true, includes gradients for start ($P_0$) and end ($P_N$) points. Default false.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (8N x D).
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param[out] gradByPoints   Output gradients for waypoints (positions).
+         * @param[out] gradByTimes    Output gradients for segment durations.
+         * @param includeEndpoints    If true, includes gradients for start and end points.
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
@@ -2368,16 +2357,17 @@ namespace SplineTrajectory
             MatrixType points;
             Eigen::VectorXd times;
         };
+        
        /**
-         * @brief Convenience wrapper for propagateGrad returning a Gradients structure.
+         * @brief Convenience wrapper for the Analytic Adjoint Method returning a Gradients structure.
          *
-         * This function wraps the void implementation to return gradients in a structured format.
-         * See the main `propagateGrad` documentation for mathematical details.
+         * Wraps the in-place implementation to return point and time gradients in a single structure.
+         * Uses the same $O(N)$ cached matrix factorization strategy to avoid explicit differentiation.
          *
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (8N x D).
          * @param partialGradByTimes  Input gradient w.r.t segment durations.
          * @param includeEndpoints    If true, includes gradients for start and end points.
-         * @return Gradients Structure containing point and time gradients.
+         * @return Gradients Structure containing gradients for waypoints (positions) and times.
          */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes,
