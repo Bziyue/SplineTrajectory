@@ -2122,17 +2122,39 @@ namespace SplineTrajectory
             }
             return grad;
         }
-        /**
-         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+        
+       /**
+         * @brief Computes gradients w.r.t. waypoints and time segments using the Analytic Hybrid Adjoint Method.
          *
-         * This function computes gradients for ALL waypoints, including the start and end points.
+         * This method avoids explicit differentiation of the complex banded matrix $M$ (which involves high-order $h^{-k}$ terms)
+         * by exploiting the physical meaning of continuity constraints.
          *
-         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
-         * Contains gradients for P_0, P_1, ..., P_N.
-         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
-         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
-         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
-         * If true, returns gradients for ALL waypoints including start and end points.
+         * **Mathematical Principle:**
+         * The total time gradient is computed as:
+         * $$ \frac{dJ}{dT} = \left(\frac{\partial J}{\partial T}\right)_{\text{explicit}} + \boldsymbol{\lambda}^T \cdot \frac{d\mathbf{x}}{dT} $$
+         *
+         * **Algorithm Steps:**
+         * 1. **Explicit Chain Rule:**
+         * Propagate $\nabla_{\mathbf{c}} J$ to parameters explicitly appearing in polynomial formulas:
+         * - Positions ($P$), Internal Derivatives ($\mathbf{d} = v, a, j$), and Durations ($T$).
+         *
+         * 2. **Adjoint Linear System:**
+         * Solve for Lagrange multipliers ($\boldsymbol{\lambda}$) that enforce continuity constraints:
+         * - Equation: $M^T \boldsymbol{\lambda} = \nabla_{\mathbf{d}} J$
+         * - **Optimization:** Reuses the cached banded solver ($L, U, D^{-1}$) from the forward pass ($O(N)$ complexity).
+         *
+         * 3. **Physical Gradient Assembly:**
+         * Account for implicit constraint violations caused by time scaling.
+         * - **Formula:**
+         * $$ \text{Implicit Cost} = \underbrace{\boldsymbol{\lambda}^T}_{\text{Penalty Coeff}} \cdot \underbrace{\dot{\mathbf{x}}(T)}_{\text{Velocity of Violation}} $$
+         * - **Intuition:** Extending time $T$ pushes the trajectory endpoint forward at the rate of its derivatives
+         * (Crackle, Pop, $D^7$), "breaking" the continuity constraint. $\boldsymbol{\lambda}$ represents the cost penalty for this breakage.
+         *
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (size $8N \times D$).
+         * @param partialGradByTimes  Input gradient w.r.t segment durations (size $N$).
+         * @param[out] gradByPoints   Output gradients for waypoints $P_0, \dots, P_N$ (size $(N+1) \times D$).
+         * @param[out] gradByTimes    Output gradients w.r.t segment durations (size $N$). Accumulates total gradient.
+         * @param includeEndpoints    If true, includes gradients for start ($P_0$) and end ($P_N$) points. Default false.
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
@@ -2146,277 +2168,193 @@ namespace SplineTrajectory
             gradByPoints = MatrixType::Zero(n_pts, DIM);
             gradByTimes = partialGradByTimes;
 
-            MatrixType g_x = MatrixType::Zero(n_pts * 3, DIM);
+            Eigen::Matrix<double, Eigen::Dynamic, 3 * DIM, Eigen::RowMajor> gd_internal;
+            gd_internal.resize(n_pts, 3 * DIM);
+            gd_internal.setZero();
+
+            auto add_grad_d = [&](int idx, const RowVectorType &d_vel, const RowVectorType &d_acc, const RowVectorType &d_jerk) {
+                gd_internal.row(idx).segment(0, DIM) += d_vel;
+                gd_internal.row(idx).segment(DIM, DIM) += d_acc;
+                gd_internal.row(idx).segment(2 * DIM, DIM) += d_jerk;
+            };
 
             for (int i = 0; i < n; ++i)
             {
                 const auto &tp = time_powers_[i];
-                const int base_idx = i * 8;
-                const int gx_base = 3 * i;
-                
-                const RowVectorType &gc0 = partialGradByCoeffs.row(base_idx);
-                const RowVectorType &gc1 = partialGradByCoeffs.row(base_idx + 1);
-                const RowVectorType &gc2 = partialGradByCoeffs.row(base_idx + 2);
-                const RowVectorType &gc3 = partialGradByCoeffs.row(base_idx + 3);
-                const RowVectorType &gc4 = partialGradByCoeffs.row(base_idx + 4);
-                const RowVectorType &gc5 = partialGradByCoeffs.row(base_idx + 5);
-                const RowVectorType &gc6 = partialGradByCoeffs.row(base_idx + 6);
-                const RowVectorType &gc7 = partialGradByCoeffs.row(base_idx + 7);
+                const int coeff_idx = i * 8;
 
-                const double h_inv = tp.h_inv;
-                const double h2_inv = tp.h2_inv;
-                const double h3_inv = tp.h3_inv;
-                const double h4_inv = tp.h4_inv;
-                const double h5_inv = tp.h5_inv;
-                const double h6_inv = tp.h6_inv;
-                const double h7_inv = tp.h7_inv;
+                const RowVectorType &gc0 = partialGradByCoeffs.row(coeff_idx + 0);
+                const RowVectorType &gc1 = partialGradByCoeffs.row(coeff_idx + 1);
+                const RowVectorType &gc2 = partialGradByCoeffs.row(coeff_idx + 2);
+                const RowVectorType &gc3 = partialGradByCoeffs.row(coeff_idx + 3);
+                const RowVectorType &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
+                const RowVectorType &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
+                const RowVectorType &gc6 = partialGradByCoeffs.row(coeff_idx + 6);
+                const RowVectorType &gc7 = partialGradByCoeffs.row(coeff_idx + 7);
 
                 gradByPoints.row(i) += gc0;
+
+                double k_P4 = -(210.0 * tp.h4_inv) / 6.0; 
+                double k_P5 = (168.0 * tp.h5_inv) / 2.0;
+                double k_P6 = -(420.0 * tp.h6_inv) / 6.0;
+                double k_P7 = (120.0 * tp.h7_inv) / 6.0;
+
+                RowVectorType sum_grad_P = gc4 * k_P4 + gc5 * k_P5 + gc6 * k_P6 + gc7 * k_P7;
+                gradByPoints.row(i) += sum_grad_P;
+                gradByPoints.row(i + 1) -= sum_grad_P;
+
+                add_grad_d(i, gc1, 0.5 * gc2, (1.0 / 6.0) * gc3);
+
+                RowVectorType grad_v_curr = gc4 * (-20.0 * tp.h3_inv) + 
+                                            gc5 * (45.0 * tp.h4_inv) + 
+                                            gc6 * (-36.0 * tp.h5_inv) + 
+                                            gc7 * (10.0 * tp.h6_inv);
                 
-                g_x.row(gx_base) += gc1;
-                g_x.row(gx_base + 1) += 0.5 * gc2;
-                g_x.row(gx_base + 2) += (1.0 / 6.0) * gc3;
+                RowVectorType grad_v_next = gc4 * (-15.0 * tp.h3_inv) + 
+                                            gc5 * (39.0 * tp.h4_inv) + 
+                                            gc6 * (-34.0 * tp.h5_inv) + 
+                                            gc7 * (10.0 * tp.h6_inv);
 
-                const double c4_i = -35.0 * h4_inv;
-                const double c5_i = 84.0 * h5_inv;
-                const double c6_i = -70.0 * h6_inv;
-                const double c7_i = 20.0 * h7_inv;
-                
-                const double c4_ip1 = 35.0 * h4_inv;
-                const double c5_ip1 = -84.0 * h5_inv;
-                const double c6_ip1 = 70.0 * h6_inv;
-                const double c7_ip1 = -20.0 * h7_inv;
+                RowVectorType grad_a_curr = gc4 * (-5.0 * tp.h2_inv) + 
+                                            gc5 * (10.0 * tp.h3_inv) + 
+                                            gc6 * (-7.5 * tp.h4_inv) + 
+                                            gc7 * (2.0 * tp.h5_inv);
 
-                gradByPoints.row(i) += gc4 * c4_i + gc5 * c5_i + gc6 * c6_i + gc7 * c7_i;
-                gradByPoints.row(i + 1) += gc4 * c4_ip1 + gc5 * c5_ip1 + gc6 * c6_ip1 + gc7 * c7_ip1;
+                RowVectorType grad_a_next = gc4 * (2.5 * tp.h2_inv) + 
+                                            gc5 * (-7.0 * tp.h3_inv) + 
+                                            gc6 * (6.5 * tp.h4_inv) + 
+                                            gc7 * (-2.0 * tp.h5_inv);
 
-                const double gx_v_c4_i = -20.0 * h3_inv;
-                const double gx_v_c5_i = 45.0 * h4_inv;
-                const double gx_v_c6_i = -36.0 * h5_inv;
-                const double gx_v_c7_i = 10.0 * h6_inv;
-                
-                const double gx_v_c4_ip1 = -15.0 * h3_inv;
-                const double gx_v_c5_ip1 = 39.0 * h4_inv;
-                const double gx_v_c6_ip1 = -34.0 * h5_inv;
-                const double gx_v_c7_ip1 = 10.0 * h6_inv;
+                RowVectorType grad_j_curr = gc4 * (-2.0 / 3.0 * tp.h_inv) + 
+                                            gc5 * (tp.h2_inv) + 
+                                            gc6 * (-2.0 / 3.0 * tp.h3_inv) + 
+                                            gc7 * (1.0 / 6.0 * tp.h4_inv);
 
-                g_x.row(gx_base) += gc4 * gx_v_c4_i + gc5 * gx_v_c5_i + gc6 * gx_v_c6_i + gc7 * gx_v_c7_i;
-                g_x.row(gx_base + 3) += gc4 * gx_v_c4_ip1 + gc5 * gx_v_c5_ip1 + gc6 * gx_v_c6_ip1 + gc7 * gx_v_c7_ip1;
+                RowVectorType grad_j_next = gc4 * (-1.0 / 6.0 * tp.h_inv) + 
+                                            gc5 * (0.5 * tp.h2_inv) + 
+                                            gc6 * (-0.5 * tp.h3_inv) + 
+                                            gc7 * (1.0 / 6.0 * tp.h4_inv);
 
-                const double gx_a_c4_i = -5.0 * h2_inv;
-                const double gx_a_c5_i = 10.0 * h3_inv;
-                const double gx_a_c6_i = -7.5 * h4_inv;
-                const double gx_a_c7_i = 2.0 * h5_inv;
-                
-                const double gx_a_c4_ip1 = 2.5 * h2_inv;
-                const double gx_a_c5_ip1 = -7.0 * h3_inv;
-                const double gx_a_c6_ip1 = 6.5 * h4_inv;
-                const double gx_a_c7_ip1 = -2.0 * h5_inv;
+                add_grad_d(i, grad_v_curr, grad_a_curr, grad_j_curr);
+                add_grad_d(i + 1, grad_v_next, grad_a_next, grad_j_next);
 
-                g_x.row(gx_base + 1) += gc4 * gx_a_c4_i + gc5 * gx_a_c5_i + gc6 * gx_a_c6_i + gc7 * gx_a_c7_i;
-                g_x.row(gx_base + 4) += gc4 * gx_a_c4_ip1 + gc5 * gx_a_c5_ip1 + gc6 * gx_a_c6_ip1 + gc7 * gx_a_c7_ip1;
+                {
+                    const RowVectorType &P_curr = spatial_points_[i].transpose();
+                    const RowVectorType &P_next = spatial_points_[i+1].transpose();
+                    const RowVectorType &V_curr = internal_vel_.row(i);
+                    const RowVectorType &V_next = internal_vel_.row(i+1);
+                    const RowVectorType &A_curr = internal_acc_.row(i);
+                    const RowVectorType &A_next = internal_acc_.row(i+1);
+                    const RowVectorType &J_curr = internal_jerk_.row(i);
+                    const RowVectorType &J_next = internal_jerk_.row(i+1);
 
-                const double gx_j_c4_i = -2.0 / 3.0 * h_inv;
-                const double gx_j_c5_i = h2_inv;
-                const double gx_j_c6_i = -2.0 / 3.0 * h3_inv;
-                const double gx_j_c7_i = 1.0 / 6.0 * h4_inv;
-                
-                const double gx_j_c4_ip1 = -1.0 / 6.0 * h_inv;
-                const double gx_j_c5_ip1 = 0.5 * h2_inv;
-                const double gx_j_c6_ip1 = -0.5 * h3_inv;
-                const double gx_j_c7_ip1 = 1.0 / 6.0 * h4_inv;
+                    RowVectorType dP = P_curr - P_next;
+                    
+                    RowVectorType dc4_dh = ( (840.0 * dP * tp.h5_inv) + 
+                                             (360.0 * V_curr * tp.h4_inv) + (270.0 * V_next * tp.h4_inv) +
+                                             (60.0 * A_curr * tp.h3_inv) - (30.0 * A_next * tp.h3_inv) +
+                                             (4.0 * J_curr * tp.h2_inv) + (J_next * tp.h2_inv) ) / 6.0;
 
-                g_x.row(gx_base + 2) += gc4 * gx_j_c4_i + gc5 * gx_j_c5_i + gc6 * gx_j_c6_i + gc7 * gx_j_c7_i;
-                g_x.row(gx_base + 5) += gc4 * gx_j_c4_ip1 + gc5 * gx_j_c5_ip1 + gc6 * gx_j_c6_ip1 + gc7 * gx_j_c7_ip1;
+                    RowVectorType dc5_dh = ( (-840.0 * dP * tp.h6_inv) -
+                                             (360.0 * V_curr * tp.h5_inv) - (312.0 * V_next * tp.h5_inv) -
+                                             (60.0 * A_curr * tp.h4_inv) + (42.0 * A_next * tp.h4_inv) -
+                                             (4.0 * J_curr * tp.h3_inv) - (2.0 * J_next * tp.h3_inv) ) / 2.0;
 
-                const RowVectorType &A_i = internal_acc_.row(i);
-                const RowVectorType &A_ip1 = internal_acc_.row(i + 1);
-                const RowVectorType &J_i = internal_jerk_.row(i);
-                const RowVectorType &J_ip1 = internal_jerk_.row(i + 1);
-                const RowVectorType &V_i = internal_vel_.row(i);
-                const RowVectorType &V_ip1 = internal_vel_.row(i + 1);
-                const RowVectorType P_i = spatial_points_[i].transpose();
-                const RowVectorType P_ip1 = spatial_points_[i + 1].transpose();
+                    RowVectorType dc6_dh = ( (2520.0 * dP * tp.h7_inv) + 
+                                             (1080.0 * V_curr * tp.h6_inv) + (1020.0 * V_next * tp.h6_inv) +
+                                             (180.0 * A_curr * tp.h5_inv) - (156.0 * A_next * tp.h5_inv) +
+                                             (12.0 * J_curr * tp.h4_inv) + (9.0 * J_next * tp.h4_inv) ) / 6.0;
 
-                const RowVectorType dc4_term1 = (60.0 * A_i - 30.0 * A_ip1) * h3_inv;
-                const RowVectorType dc4_term2 = (4.0 * J_i + J_ip1) * h2_inv;
-                const RowVectorType dc4_term3 = (840.0 * P_i - 840.0 * P_ip1) * h5_inv;
-                const RowVectorType dc4_term4 = (360.0 * V_i + 270.0 * V_ip1) * h4_inv;
-                const RowVectorType dc4 = (dc4_term1 + dc4_term2 + dc4_term3 + dc4_term4) * (1.0 / 6.0);
+                    double h8_inv = tp.h7_inv * tp.h_inv;
+                    RowVectorType dc7_dh = ( (-840.0 * dP * h8_inv) - 
+                                             (360.0 * V_curr * tp.h7_inv) - (360.0 * V_next * tp.h7_inv) -
+                                             (60.0 * A_curr * tp.h6_inv) + (60.0 * A_next * tp.h6_inv) -
+                                             (4.0 * J_curr * tp.h5_inv) - (4.0 * J_next * tp.h5_inv) ) / 6.0;
 
-                const RowVectorType dc5_term1 = (-30.0 * A_i + 21.0 * A_ip1) * h3_inv;
-                const RowVectorType dc5_term2 = (-2.0 * J_i - J_ip1) * h2_inv;
-                const RowVectorType dc5_term3 = (-420.0 * P_i + 420.0 * P_ip1) * h5_inv;
-                const RowVectorType dc5_term4 = (-180.0 * V_i - 156.0 * V_ip1) * h4_inv;
-                const RowVectorType dc5 = (dc5_term1 + dc5_term2 + dc5_term3 + dc5_term4) * h_inv;
-
-                const double h2_inv_half = 0.5 * h2_inv;
-                const RowVectorType dc6_term1 = (60.0 * A_i - 52.0 * A_ip1) * h3_inv;
-                const RowVectorType dc6_term2 = (4.0 * J_i + 3.0 * J_ip1) * h2_inv;
-                const RowVectorType dc6_term3 = (840.0 * P_i - 840.0 * P_ip1) * h5_inv;
-                const RowVectorType dc6_term4 = (360.0 * V_i + 340.0 * V_ip1) * h4_inv;
-                const RowVectorType dc6 = (dc6_term1 + dc6_term2 + dc6_term3 + dc6_term4) * h2_inv_half;
-
-                const double h3_inv_2_3 = (2.0 / 3.0) * h3_inv;
-                const RowVectorType dc7_term1 = (-15.0 * A_i + 15.0 * A_ip1) * h3_inv;
-                const RowVectorType dc7_term2 = (-J_i - J_ip1) * h2_inv;
-                const RowVectorType dc7_term3 = (-210.0 * P_i + 210.0 * P_ip1) * h5_inv;
-                const RowVectorType dc7_term4 = (-90.0 * V_i - 90.0 * V_ip1) * h4_inv;
-                const RowVectorType dc7 = (dc7_term1 + dc7_term2 + dc7_term3 + dc7_term4) * h3_inv_2_3;
-
-                gradByTimes(i) += gc4.dot(dc4) + gc5.dot(dc5) + gc6.dot(dc6) + gc7.dot(dc7);
+                    gradByTimes(i) += gc4.dot(dc4_dh) + gc5.dot(dc5_dh) + gc6.dot(dc6_dh) + gc7.dot(dc7_dh);
+                }
             }
-
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
-                ws_d_rhs_mod_.resize(num_blocks);
-                ws_current_lambda_.resize(num_blocks);
+                std::vector<Eigen::Matrix<double, 3, DIM>> lambda(num_blocks);
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    const int gx_idx = 3 * (i + 1);
-                    ws_current_lambda_[i].row(0) = g_x.row(gx_idx);
-                    ws_current_lambda_[i].row(1) = g_x.row(gx_idx + 1);
-                    ws_current_lambda_[i].row(2) = g_x.row(gx_idx + 2);
-                    ws_d_rhs_mod_[i].setZero();
+                    lambda[i].row(0) = gd_internal.row(i + 1).segment(0, DIM);
+                    lambda[i].row(1) = gd_internal.row(i + 1).segment(DIM, DIM);
+                    lambda[i].row(2) = gd_internal.row(i + 1).segment(2 * DIM, DIM);
                 }
 
+                {
+                    Eigen::Matrix<double, 3, DIM> tmp = lambda[0];
+                    Multiply3x3T_3xN(D_inv_cache_[0], tmp, lambda[0]);
+                }
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    Eigen::Matrix<double, 3, DIM> term;
-                    Multiply3x3T_3xN(D_inv_cache_[i], ws_current_lambda_[i], term);
-                    ws_d_rhs_mod_[i] += term;
-                    
-                    Eigen::Matrix<double, 3, DIM> u_transpose_term;
-                    Multiply3x3T_3xN(U_blocks_cache_[i], term, u_transpose_term);
-                    ws_current_lambda_[i + 1] -= u_transpose_term;
-                }
-                Eigen::Matrix<double, 3, DIM> term_last;
-                Multiply3x3T_3xN(D_inv_cache_.back(), ws_current_lambda_.back(), term_last);
-                ws_d_rhs_mod_[num_blocks - 1] += term_last;
+                    Eigen::Matrix<double, 3, DIM> update_term;
+                    Multiply3x3T_3xN(U_blocks_cache_[i], lambda[i], update_term);
+                    lambda[i + 1] -= update_term;
 
-                for (int i = num_blocks - 1; i > 0; --i)
+                    Eigen::Matrix<double, 3, DIM> tmp = lambda[i + 1];
+                    Multiply3x3T_3xN(D_inv_cache_[i + 1], tmp, lambda[i + 1]);
+                }
+
+                for (int i = num_blocks - 2; i >= 0; --i)
                 {
-                    const Eigen::Matrix3d &L = L_blocks_cache_[i];
-                    Eigen::Matrix<double, 3, DIM> temp_product;
-                    Multiply3x3T_3xN(L, ws_d_rhs_mod_[i], temp_product);
-                    Eigen::Matrix<double, 3, DIM> term;
-                    Multiply3x3T_3xN(D_inv_cache_[i - 1], temp_product, term);
-                    ws_d_rhs_mod_[i - 1] -= term;
+                    Eigen::Matrix<double, 3, DIM> update_term;
+                    Multiply3x3T_3xN(L_blocks_cache_[i + 1], lambda[i + 1], update_term);
+
+                    Eigen::Matrix<double, 3, DIM> scaled_update;
+                    Multiply3x3T_3xN(D_inv_cache_[i], update_term, scaled_update);
+
+                    lambda[i] -= scaled_update;
                 }
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    const int node_curr = i + 1;
-                    const int node_prev = i;
-                    const int node_next = i + 2;
+                    const int seg_idx = i;
+                    const double T = time_segments_[seg_idx];
+                    const double T2 = T * T;
 
-                    const Eigen::Matrix<double, 1, DIM> &lam_snap = ws_d_rhs_mod_[i].row(0);
-                    const Eigen::Matrix<double, 1, DIM> &lam_crackle = ws_d_rhs_mod_[i].row(1);
-                    const Eigen::Matrix<double, 1, DIM> &lam_pop = ws_d_rhs_mod_[i].row(2);
+                    const int coeff_offset = seg_idx * 8;
+                    const RowVectorType c5 = coeffs_.row(coeff_offset + 5);
+                    const RowVectorType c6 = coeffs_.row(coeff_offset + 6);
+                    const RowVectorType c7 = coeffs_.row(coeff_offset + 7);
 
-                    const auto &tp_L = time_powers_[i];
-                    const auto &tp_R = time_powers_[i + 1];
+                    RowVectorType dSnap_dT    = 120.0 * c5 + 720.0 * c6 * T + 2520.0 * c7 * T2;
+                    RowVectorType dCrackle_dT = 720.0 * c6 + 5040.0 * c7 * T;
+                    RowVectorType dPop_dT     = 5040.0 * c7;
 
-                    const double hL4_inv = tp_L.h4_inv;
-                    const double hL5_inv = tp_L.h5_inv;
-                    const double hL6_inv = tp_L.h6_inv;
-                    const double hR4_inv = tp_R.h4_inv;
-                    const double hR5_inv = tp_R.h5_inv;
-                    const double hR6_inv = tp_R.h6_inv;
+                    const RowVectorType &lam_snap    = lambda[i].row(0);
+                    const RowVectorType &lam_crackle = lambda[i].row(1);
+                    const RowVectorType &lam_pop     = lambda[i].row(2);
 
-                    const double dRes0_dP_curr = 840.0 * (hR4_inv - hL4_inv);
-                    const double dRes1_dP_curr = -10080.0 * (hR5_inv + hL5_inv);
-                    const double dRes2_dP_curr = 50400.0 * (hR6_inv - hL6_inv);
+                    gradByTimes(seg_idx) += (lam_snap.dot(dSnap_dT) + 
+                                             lam_crackle.dot(dCrackle_dT) + 
+                                             lam_pop.dot(dPop_dT));
 
-                    const double dRes0_dP_prev = 840.0 * hL4_inv;
-                    const double dRes1_dP_prev = 10080.0 * hL5_inv;
-                    const double dRes2_dP_prev = 50400.0 * hL6_inv;
+                    const int k = i + 2; 
+                    const auto &tp_L = time_powers_[k - 2];
+                    const auto &tp_R = time_powers_[k - 1];
 
-                    const double dRes0_dP_next = -840.0 * hR4_inv;
-                    const double dRes1_dP_next = 10080.0 * hR5_inv;
-                    const double dRes2_dP_next = -50400.0 * hR6_inv;
+                    double dr3_dp_next = 840.0 * tp_R.h4_inv;
+                    double dr4_dp_next = -10080.0 * tp_R.h5_inv;
+                    double dr5_dp_next = 50400.0 * tp_R.h6_inv;
+                    RowVectorType grad_P_next = lam_snap * dr3_dp_next + lam_crackle * dr4_dp_next + lam_pop * dr5_dp_next;
+                    gradByPoints.row(i + 2) += grad_P_next;
 
-                    gradByPoints.row(node_curr) -= lam_snap * dRes0_dP_curr +
-                                                   lam_crackle * dRes1_dP_curr +
-                                                   lam_pop * dRes2_dP_curr;
+                    double dr3_dp_curr = -840.0 * (tp_R.h4_inv - tp_L.h4_inv);
+                    double dr4_dp_curr = 10080.0 * (tp_R.h5_inv + tp_L.h5_inv);
+                    double dr5_dp_curr = -50400.0 * (tp_R.h6_inv - tp_L.h6_inv);
+                    RowVectorType grad_P_curr = lam_snap * dr3_dp_curr + lam_crackle * dr4_dp_curr + lam_pop * dr5_dp_curr;
+                    gradByPoints.row(i + 1) += grad_P_curr;
 
-                    gradByPoints.row(node_prev) -= lam_snap * dRes0_dP_prev +
-                                                   lam_crackle * dRes1_dP_prev +
-                                                   lam_pop * dRes2_dP_prev;
-
-                    gradByPoints.row(node_next) -= lam_snap * dRes0_dP_next +
-                                                   lam_crackle * dRes1_dP_next +
-                                                   lam_pop * dRes2_dP_next;
-
-                    const RowVectorType &P_curr = spatial_points_[node_curr].transpose();
-                    const RowVectorType &P_prev = spatial_points_[node_prev].transpose();
-                    const RowVectorType &P_next = spatial_points_[node_next].transpose();
-
-                    const RowVectorType &V_curr = internal_vel_.row(node_curr);
-                    const RowVectorType &V_prev = internal_vel_.row(node_prev);
-                    const RowVectorType &V_next = internal_vel_.row(node_next);
-
-                    const RowVectorType &A_curr = internal_acc_.row(node_curr);
-                    const RowVectorType &A_prev = internal_acc_.row(node_prev);
-                    const RowVectorType &A_next = internal_acc_.row(node_next);
-
-                    const RowVectorType &J_curr = internal_jerk_.row(node_curr);
-                    const RowVectorType &J_prev = internal_jerk_.row(node_prev);
-                    const RowVectorType &J_next = internal_jerk_.row(node_next);
-
-                    const double hL2_inv = tp_L.h2_inv;
-                    const double hL3_inv = tp_L.h3_inv;
-                    const double hL7_inv = tp_L.h7_inv;
-
-                    const RowVectorType dRes0_dhL_acc = (60.0 * A_curr - 30.0 * A_prev) * hL3_inv;
-                    const RowVectorType dRes0_dhL_jerk = (-4.0 * J_curr - J_prev) * hL2_inv;
-                    const RowVectorType dRes0_dhL_pos = (840.0 * P_curr - 840.0 * P_prev) * hL5_inv;
-                    const RowVectorType dRes0_dhL_vel = (-360.0 * V_curr - 270.0 * V_prev) * hL4_inv;
-                    const RowVectorType term_dRes0_dhL = 4.0 * (dRes0_dhL_acc + dRes0_dhL_jerk + dRes0_dhL_pos + dRes0_dhL_vel);
- 
-                    const RowVectorType dRes1_dhL_acc = (30.0 * A_curr - 21.0 * A_prev) * hL4_inv;
-                    const RowVectorType dRes1_dhL_jerk = (-2.0 * J_curr - J_prev) * hL3_inv;
-                    const RowVectorType dRes1_dhL_pos = (420.0 * P_curr - 420.0 * P_prev) * hL6_inv;
-                    const RowVectorType dRes1_dhL_vel = (-180.0 * V_curr - 156.0 * V_prev) * hL5_inv;
-                    const RowVectorType term_dRes1_dhL = 120.0 * (dRes1_dhL_acc + dRes1_dhL_jerk + dRes1_dhL_pos + dRes1_dhL_vel);
-
-                    const RowVectorType dRes2_dhL_acc = (60.0 * A_curr - 52.0 * A_prev) * tp_L.h5_inv;
-                    const RowVectorType dRes2_dhL_jerk = (-4.0 * J_curr - 3.0 * J_prev) * hL4_inv;
-                    const RowVectorType dRes2_dhL_pos = (840.0 * P_curr - 840.0 * P_prev) * hL7_inv;
-                    const RowVectorType dRes2_dhL_vel = (-360.0 * V_curr - 340.0 * V_prev) * hL6_inv;
-                    const RowVectorType term_dRes2_dhL = 360.0 * (dRes2_dhL_acc + dRes2_dhL_jerk + dRes2_dhL_pos + dRes2_dhL_vel);
-
-                    gradByTimes(i) -= lam_snap.dot(term_dRes0_dhL) +
-                                      lam_crackle.dot(term_dRes1_dhL) +
-                                      lam_pop.dot(term_dRes2_dhL);
-
-                    const double hR2_inv = tp_R.h2_inv;
-                    const double hR3_inv = tp_R.h3_inv;
-                    const double hR7_inv = tp_R.h7_inv;
-
-                    const RowVectorType dRes0_dhR_acc = (-60.0 * A_curr + 30.0 * A_next) * hR3_inv;
-                    const RowVectorType dRes0_dhR_jerk = (-4.0 * J_curr - J_next) * hR2_inv;
-                    const RowVectorType dRes0_dhR_pos = (-840.0 * P_curr + 840.0 * P_next) * hR5_inv;
-                    const RowVectorType dRes0_dhR_vel = (-360.0 * V_curr - 270.0 * V_next) * hR4_inv;
-                    const RowVectorType term_dRes0_dhR = 4.0 * (dRes0_dhR_acc + dRes0_dhR_jerk + dRes0_dhR_pos + dRes0_dhR_vel);
-
-                    const RowVectorType dRes1_dhR_acc = (30.0 * A_curr - 21.0 * A_next) * hR4_inv;
-                    const RowVectorType dRes1_dhR_jerk = (2.0 * J_curr + J_next) * hR3_inv;
-                    const RowVectorType dRes1_dhR_pos = (420.0 * P_curr - 420.0 * P_next) * hR6_inv;
-                    const RowVectorType dRes1_dhR_vel = (180.0 * V_curr + 156.0 * V_next) * hR5_inv;
-                    const RowVectorType term_dRes1_dhR = 120.0 * (dRes1_dhR_acc + dRes1_dhR_jerk + dRes1_dhR_pos + dRes1_dhR_vel);
-
-                    const RowVectorType dRes2_dhR_acc = (-60.0 * A_curr + 52.0 * A_next) * tp_R.h5_inv;
-                    const RowVectorType dRes2_dhR_jerk = (-4.0 * J_curr - 3.0 * J_next) * hR4_inv;
-                    const RowVectorType dRes2_dhR_pos = (-840.0 * P_curr + 840.0 * P_next) * hR7_inv;
-                    const RowVectorType dRes2_dhR_vel = (-360.0 * V_curr - 340.0 * V_next) * hR6_inv;
-                    const RowVectorType term_dRes2_dhR = 360.0 * (dRes2_dhR_acc + dRes2_dhR_jerk + dRes2_dhR_pos + dRes2_dhR_vel);
-
-                    gradByTimes(i + 1) -= lam_snap.dot(term_dRes0_dhR) +
-                                          lam_crackle.dot(term_dRes1_dhR) +
-                                          lam_pop.dot(term_dRes2_dhR);
+                    double dr3_dp_prev = -840.0 * tp_L.h4_inv;
+                    double dr4_dp_prev = -10080.0 * tp_L.h5_inv;
+                    double dr5_dp_prev = -50400.0 * tp_L.h6_inv;
+                    RowVectorType grad_P_prev = lam_snap * dr3_dp_prev + lam_crackle * dr4_dp_prev + lam_pop * dr5_dp_prev;
+                    gradByPoints.row(i) += grad_P_prev;
                 }
             }
 
@@ -2430,17 +2368,16 @@ namespace SplineTrajectory
             MatrixType points;
             Eigen::VectorXd times;
         };
-        /**
-         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
+       /**
+         * @brief Convenience wrapper for propagateGrad returning a Gradients structure.
          *
-         * This function computes gradients for ALL waypoints, including the start and end points.
+         * This function wraps the void implementation to return gradients in a structured format.
+         * See the main `propagateGrad` documentation for mathematical details.
          *
-         * @param gradByPoints [Output] Matrix of size (num_segments + 1) x DIM.
-         * Contains gradients for P_0, P_1, ..., P_N.
-         * @param gradByTimes  [Output] Vector of size num_segments. Gradients w.r.t duration of each segment.
-         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
-         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
-         * If true, returns gradients for ALL waypoints including start and end points.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param includeEndpoints    If true, includes gradients for start and end points.
+         * @return Gradients Structure containing point and time gradients.
          */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes,
