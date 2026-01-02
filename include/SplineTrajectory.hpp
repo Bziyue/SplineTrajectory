@@ -795,15 +795,34 @@ namespace SplineTrajectory
             return grad;
         }
 
-        MatrixType getEnergyGradInnerP() const
+        /**
+         * @brief Computes the gradient of energy (acceleration cost) w.r.t waypoints.
+         * @param includeEndpoints If true, returns gradients for [P0, ..., PN] (size N+1).
+         * If false (default), returns gradients for [P1, ..., PN-1] (size N-1).
+         */
+        MatrixType getEnergyGradInnerP(bool includeEndpoints = false) const
         {
-            MatrixType grad(std::max(0, num_segments_ - 1), DIM);
+            if (num_segments_ < 1)
+                return MatrixType::Zero(0, DIM);
+
+            int num_rows = includeEndpoints ? num_segments_ + 1 : std::max(0, num_segments_ - 1);
+            MatrixType grad(num_rows, DIM);
+
+            int write_offset = includeEndpoints ? 1 : 0;
+
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c3_L = coeffs_.row((i - 1) * 4 + 3);
                 const RowVectorType c3_R = coeffs_.row(i * 4 + 3);
-                grad.row(i - 1) = 12.0 * (c3_R - c3_L);
+                grad.row(i - 1 + write_offset) = 12.0 * (c3_R - c3_L);
             }
+
+            if (includeEndpoints)
+            {
+                grad.row(0) = 12.0 * coeffs_.row(3);
+                grad.row(num_segments_) = -12.0 * coeffs_.row((num_segments_ - 1) * 4 + 3);
+            }
+
             return grad;
         }
 
@@ -1340,15 +1359,35 @@ namespace SplineTrajectory
             }
             return grad;
         }
-        MatrixType getEnergyGradInnerP() const
+
+        /**
+         * @brief Computes the gradient of energy (jerk cost) w.r.t waypoints.
+         * @param includeEndpoints If true, returns gradients for [P0, ..., PN] (size N+1).
+         * If false (default), returns gradients for [P1, ..., PN-1] (size N-1).
+         */
+        MatrixType getEnergyGradInnerP(bool includeEndpoints = false) const
         {
-            MatrixType grad(std::max(0, num_segments_ - 1), DIM);
+            if (num_segments_ < 1)
+                return MatrixType::Zero(0, DIM);
+
+            int num_rows = includeEndpoints ? num_segments_ + 1 : std::max(0, num_segments_ - 1);
+            MatrixType grad(num_rows, DIM);
+
+            int write_offset = includeEndpoints ? 1 : 0;
+
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c5_L = coeffs_.row((i - 1) * 6 + 5);
                 const RowVectorType c5_R = coeffs_.row(i * 6 + 5);
-                grad.row(i - 1) = 240.0 * (c5_L - c5_R);
+                grad.row(i - 1 + write_offset) = 240.0 * (c5_L - c5_R);
             }
+
+            if (includeEndpoints)
+            {
+                grad.row(0) = -240.0 * coeffs_.row(5);
+                grad.row(num_segments_) = 240.0 * coeffs_.row((num_segments_ - 1) * 6 + 5);
+            }
+
             return grad;
         }
 
@@ -2104,15 +2143,35 @@ namespace SplineTrajectory
             }
             return grad;
         }
-        MatrixType getEnergyGradInnerP() const
+
+        /**
+         * @brief Computes the gradient of energy (snap cost) w.r.t waypoints.
+         * @param includeEndpoints If true, returns gradients for [P0, ..., PN] (size N+1).
+         * If false (default), returns gradients for [P1, ..., PN-1] (size N-1).
+         */
+        MatrixType getEnergyGradInnerP(bool includeEndpoints = false) const
         {
-            MatrixType grad(std::max(0, num_segments_ - 1), DIM);
+            if (num_segments_ < 1)
+                return MatrixType::Zero(0, DIM);
+
+            int num_rows = includeEndpoints ? num_segments_ + 1 : std::max(0, num_segments_ - 1);
+            MatrixType grad(num_rows, DIM);
+
+            int write_offset = includeEndpoints ? 1 : 0;
+
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c7_L = coeffs_.row((i - 1) * 8 + 7);
                 const RowVectorType c7_R = coeffs_.row(i * 8 + 7);
-                grad.row(i - 1) = 10080.0 * (c7_R - c7_L);
+                grad.row(i - 1 + write_offset) = 10080.0 * (c7_R - c7_L);
             }
+
+            if (includeEndpoints)
+            {
+                grad.row(0) = 10080.0 * coeffs_.row(7);
+                grad.row(num_segments_) = -10080.0 * coeffs_.row((num_segments_ - 1) * 8 + 7);
+            }
+
             return grad;
         }
 

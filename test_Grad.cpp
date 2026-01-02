@@ -119,17 +119,20 @@ void testCubic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         Eigen::VectorXd direct_gradT = cubic_spline.getEnergyGradTimes();
-        Eigen::MatrixXd direct_gradP = cubic_spline.getEnergyGradInnerP(); // (N-1)x3, empty for N=1
+        Eigen::MatrixXd direct_gradP_full = cubic_spline.getEnergyGradInnerP(true);
         
         printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
         
-        // For N=1, there are no inner points, so direct_gradP is 0x3
         if (N > 1) {
+            Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
             Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
-            printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+            printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
+
+        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP.row(0)).norm());
+        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP.row(N)).norm());
         
         // Print boundary gradients
         printSubHeader("Start/End Gradients");
@@ -228,13 +231,16 @@ void testCubic(int N, int BENCH_ITERS)
     // 5. Self-Check (Direct vs Propagated)
     printSubHeader("Self-Check: Direct vs Propagated");
     Eigen::VectorXd direct_gradT = cubic_spline.getEnergyGradTimes();
-    Eigen::MatrixXd direct_gradP = cubic_spline.getEnergyGradInnerP(); // (N-1)x3
-    
+    Eigen::MatrixXd direct_gradP_full = cubic_spline.getEnergyGradInnerP(true);
+    Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
+
     // Spline Propagated Inner (as (N-1)x3)
     Eigen::MatrixXd prop_gradP_inner = gradP_spline_full.block(1, 0, N - 1, 3);
-    
+
     printCheck("Direct vs Prop (Times)", (direct_gradT - gradT_spline_out).norm());
-    printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+    printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
+    printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_spline_full.row(0)).norm());
+    printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_spline_full.row(N)).norm());
 
     // 6. Point-by-Point Gradient Comparison
     printSubHeader("Point-by-Point Gradient Comparison");
@@ -318,17 +324,20 @@ void testQuintic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         Eigen::VectorXd direct_gradT = quintic_spline.getEnergyGradTimes();
-        Eigen::MatrixXd direct_gradP = quintic_spline.getEnergyGradInnerP(); // (N-1)x3, empty for N=1
+        Eigen::MatrixXd direct_gradP_full = quintic_spline.getEnergyGradInnerP(true);
         
         printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
         
-        // For N=1, there are no inner points, so direct_gradP is 0x3
         if (N > 1) {
+            Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
             Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
-            printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+            printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
+
+        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP.row(0)).norm());
+        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP.row(N)).norm());
         
         // Print boundary gradients
         printSubHeader("Start/End Gradients");
@@ -433,19 +442,22 @@ void testQuintic(int N, int BENCH_ITERS)
     // 5. Direct Gradient Consistency Check (vs Ref min_jerk)
     printSubHeader("Consistency: Direct Gradients vs Ref");
     Eigen::VectorXd direct_gradT = quintic_spline.getEnergyGradTimes();
-    Eigen::MatrixXd direct_gradP = quintic_spline.getEnergyGradInnerP(); // (N-1)x3
+    Eigen::MatrixXd direct_gradP_full = quintic_spline.getEnergyGradInnerP(true);
+    Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
 
     // Ref min_jerk returns 3x(N-1), need transpose
     Eigen::MatrixXd ref_gradP = jerk_opt.getGradInnerP().transpose();
     
     printCheck("Direct Grad (Times)", (direct_gradT - jerk_opt.getGradT()).norm());
-    printCheck("Direct Grad (Inner P)", (direct_gradP - ref_gradP).norm());
+    printCheck("Direct Grad (Inner P)", (direct_gradP_inner - ref_gradP).norm());
 
     // 6. Self-Check (Direct vs Propagated)
     printSubHeader("Self-Check: Direct vs Propagated");
     Eigen::MatrixXd prop_gradP_inner = gradP_spline_full.block(1, 0, N - 1, 3);
     printCheck("Direct vs Prop (Times)", (direct_gradT - gradT_spline_out).norm());
-    printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+    printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
+    printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_spline_full.row(0)).norm());
+    printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_spline_full.row(N)).norm());
 
     // 7. Point-by-Point Gradient Comparison
     printSubHeader("Point-by-Point Gradient Comparison");
@@ -531,17 +543,20 @@ void testSeptic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         Eigen::VectorXd direct_gradT = septic_spline.getEnergyGradTimes();
-        Eigen::MatrixXd direct_gradP = septic_spline.getEnergyGradInnerP(); // (N-1)x3, empty for N=1
+        Eigen::MatrixXd direct_gradP_full = septic_spline.getEnergyGradInnerP(true);
         
         printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
         
-        // For N=1, there are no inner points, so direct_gradP is 0x3
         if (N > 1) {
+            Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
             Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
-            printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+            printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
+
+        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP.row(0)).norm());
+        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP.row(N)).norm());
         
         // Print boundary gradients
         printSubHeader("Start/End Gradients");
@@ -646,19 +661,22 @@ void testSeptic(int N, int BENCH_ITERS)
     // 5. Direct Gradient Consistency Check (vs Ref min_snap)
     printSubHeader("Consistency: Direct Gradients vs Ref");
     Eigen::VectorXd direct_gradT = septic_spline.getEnergyGradTimes();
-    Eigen::MatrixXd direct_gradP = septic_spline.getEnergyGradInnerP(); // (N-1)x3
+    Eigen::MatrixXd direct_gradP_full = septic_spline.getEnergyGradInnerP(true);
+    Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
 
     // Ref min_snap returns 3x(N-1), need transpose
     Eigen::MatrixXd ref_gradP = snap_opt.getGradInnerP().transpose();
     
     printCheck("Direct Grad (Times)", (direct_gradT - snap_opt.getGradT()).norm());
-    printCheck("Direct Grad (Inner P)", (direct_gradP - ref_gradP).norm());
+    printCheck("Direct Grad (Inner P)", (direct_gradP_inner - ref_gradP).norm());
 
     // 6. Self-Check (Direct vs Propagated)
     printSubHeader("Self-Check: Direct vs Propagated");
     Eigen::MatrixXd prop_gradP_inner = gradP_spline_full.block(1, 0, N - 1, 3);
     printCheck("Direct vs Prop (Times)", (direct_gradT - gradT_spline_out).norm());
-    printCheck("Direct vs Prop (Inner P)", (direct_gradP - prop_gradP_inner).norm());
+    printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
+    printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_spline_full.row(0)).norm());
+    printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_spline_full.row(N)).norm());
 
     // 7. Point-by-Point Gradient Comparison
     printSubHeader("Point-by-Point Gradient Comparison");
