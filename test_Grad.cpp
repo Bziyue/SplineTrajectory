@@ -112,7 +112,8 @@ void testCubic(int N, int BENCH_ITERS)
         // Test propagateGrad
         SplineTrajectory::CubicSpline3D::MatrixType gradP;
         Eigen::VectorXd gradT;
-        cubic_spline.propagateGrad(gdC, gdT, gradP, gradT, true); // Include endpoints
+        SplineTrajectory::CubicSpline3D::VectorType grad_start_v, grad_end_v;
+        cubic_spline.propagateGrad(gdC, gdT, gradP, gradT, grad_start_v, grad_end_v, true); // Include endpoints
         cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
         cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
         
@@ -206,11 +207,12 @@ void testCubic(int N, int BENCH_ITERS)
     double t_grad_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
 
     // Spline Grad
+    SplineTrajectory::CubicSpline3D::VectorType grad_start_v, grad_end_v;
     t2 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
         cubic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
         cubic_spline.getEnergyPartialGradByTimes(gdT_spline);
-        cubic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, true);
+        cubic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, grad_start_v, grad_end_v, true);
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 
