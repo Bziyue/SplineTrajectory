@@ -56,6 +56,10 @@ target_link_libraries(quintic_spline_comparison Eigen3::Eigen)
 add_executable(robot_trajectory_planning examples/robot_trajectory_planning.cpp)
 target_link_libraries(robot_trajectory_planning Eigen3::Eigen)
 
+# boundary condition grad test
+add_executable(test_bc_grad test_bc_grad.cpp)
+target_link_libraries(test_bc_grad Eigen3::Eigen)
+
 # Compiler flags
 set(COMMON_COMPILE_FLAGS -Wall -Wextra)
 set(DEBUG_FLAGS -g -O0)
@@ -71,6 +75,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(robot_trajectory_planning PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
+    target_compile_options(test_bc_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
 else()
     target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
@@ -81,6 +86,7 @@ else()
     target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(robot_trajectory_planning PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+    target_compile_options(test_bc_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
 endif()
 
 # Add chrono library for performance measurements
@@ -92,11 +98,12 @@ if(NOT WIN32)
     target_link_libraries(test_with_min_snap_3d pthread)
     target_link_libraries(test_Grad pthread)
     target_link_libraries(quintic_spline_comparison pthread)
+    target_link_libraries(test_bc_grad pthread)
 endif()
 
 # Create custom targets for easy building
 add_custom_target(tests
-    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d test_with_min_snap_3d test_septic_spline_vs_minco_nd test_Grad
+    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d test_with_min_snap_3d test_septic_spline_vs_minco_nd test_Grad test_bc_grad
     COMMENT "Building performance tests"
 )
 

@@ -1395,6 +1395,8 @@ namespace SplineTrajectory
         {
             MatrixType points;
             Eigen::VectorXd times;
+            Eigen::Matrix<double, 2, DIM> grad_start_va;
+            Eigen::Matrix<double, 2, DIM> grad_end_va;
         };
 
         /**
@@ -1418,6 +1420,8 @@ namespace SplineTrajectory
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
                            Eigen::VectorXd &gradByTimes,
+                           Eigen::Matrix<double, 2, DIM> &gradStart,
+                           Eigen::Matrix<double, 2, DIM> &gradEnd,
                            bool includeEndpoints = false)
         {
             const int n = num_segments_;
@@ -1425,6 +1429,8 @@ namespace SplineTrajectory
 
             gradByPoints = MatrixType::Zero(n_pts, DIM);
             gradByTimes = partialGradByTimes;
+            gradStart.setZero();
+            gradEnd.setZero();
 
             Eigen::Matrix<double, Eigen::Dynamic, 2 * DIM, Eigen::RowMajor> gd_internal;
             gd_internal.resize(n_pts, 2 * DIM);
@@ -1503,6 +1509,12 @@ namespace SplineTrajectory
                 gradByTimes(i) += gc3.dot(dc3_dh) + gc4.dot(dc4_dh) + gc5.dot(dc5_dh);
             }
 
+            gradStart.row(0) = gd_internal.row(0).segment(0, DIM);
+            gradStart.row(1) = gd_internal.row(0).segment(DIM, DIM);
+
+            gradEnd.row(0) = gd_internal.row(n).segment(0, DIM);
+            gradEnd.row(1) = gd_internal.row(n).segment(DIM, DIM);
+
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
@@ -1577,6 +1589,19 @@ namespace SplineTrajectory
                     gradByPoints.row(i + 1) += grad_P_curr;
                     gradByPoints.row(i) += grad_P_prev;
                 }
+
+                Eigen::Matrix<double, 2, DIM> correction_start;
+                Multiply2x2T_2xN(L_blocks_cache_[0], lambda[0], correction_start);
+                gradStart -= correction_start;
+
+                const auto &tp_R_last = time_powers_[n - 1];
+                Eigen::Matrix2d U_last;
+                U_last << -168.0 * tp_R_last.h3_inv, 24.0 * tp_R_last.h2_inv,
+                            24.0 * tp_R_last.h2_inv, -3.0 * tp_R_last.h_inv;
+
+                Eigen::Matrix<double, 2, DIM> correction_end;
+                Multiply2x2T_2xN(U_last, lambda.back(), correction_end);
+                gradEnd -= correction_end;
             }
 
             if (!includeEndpoints && n > 1)
@@ -1601,7 +1626,7 @@ namespace SplineTrajectory
                                 bool includeEndpoints = false)
         {
             Gradients result;
-            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, includeEndpoints);
+            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, result.grad_start_va, result.grad_end_va, includeEndpoints);
             return result;
         }
 
@@ -2196,6 +2221,8 @@ namespace SplineTrajectory
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
                            Eigen::VectorXd &gradByTimes,
+                           Eigen::Matrix<double, 3, DIM> &gradStart,
+                           Eigen::Matrix<double, 3, DIM> &gradEnd,
                            bool includeEndpoints = false)
         {
             const int n = num_segments_;
@@ -2203,6 +2230,8 @@ namespace SplineTrajectory
 
             gradByPoints = MatrixType::Zero(n_pts, DIM);
             gradByTimes = partialGradByTimes;
+            gradStart.setZero();
+            gradEnd.setZero();
 
             Eigen::Matrix<double, Eigen::Dynamic, 3 * DIM, Eigen::RowMajor> gd_internal;
             gd_internal.resize(n_pts, 3 * DIM);
@@ -2315,6 +2344,15 @@ namespace SplineTrajectory
                     gradByTimes(i) += gc4.dot(dc4_dh) + gc5.dot(dc5_dh) + gc6.dot(dc6_dh) + gc7.dot(dc7_dh);
                 }
             }
+
+            gradStart.row(0) = gd_internal.row(0).segment(0, DIM);      
+            gradStart.row(1) = gd_internal.row(0).segment(DIM, DIM);    
+            gradStart.row(2) = gd_internal.row(0).segment(2 * DIM, DIM); 
+
+            gradEnd.row(0) = gd_internal.row(n).segment(0, DIM);
+            gradEnd.row(1) = gd_internal.row(n).segment(DIM, DIM);
+            gradEnd.row(2) = gd_internal.row(n).segment(2 * DIM, DIM);
+
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
@@ -2397,6 +2435,20 @@ namespace SplineTrajectory
                     RowVectorType grad_P_prev = lam_snap * dr3_dp_prev + lam_crackle * dr4_dp_prev + lam_pop * dr5_dp_prev;
                     gradByPoints.row(i) += grad_P_prev;
                 }
+
+                Eigen::Matrix<double, 3, DIM> correction_start;
+                Multiply3x3T_3xN(L_blocks_cache_[0], lambda[0], correction_start);
+                gradStart -= correction_start;
+
+                const auto &tp_R_last = time_powers_[n - 1];
+                Eigen::Matrix3d U_last;
+                U_last << 360.0 * tp_R_last.h3_inv, -60.0 * tp_R_last.h2_inv, 4.0 * tp_R_last.h_inv,
+                        -4680.0 * tp_R_last.h4_inv, 840.0 * tp_R_last.h3_inv, -60.0 * tp_R_last.h2_inv,
+                       24480.0 * tp_R_last.h5_inv, -4680.0 * tp_R_last.h4_inv, 360.0 * tp_R_last.h3_inv;
+
+                Eigen::Matrix<double, 3, DIM> correction_end;
+                Multiply3x3T_3xN(U_last, lambda.back(), correction_end);
+                gradEnd -= correction_end;
             }
 
             if (!includeEndpoints && n > 1)
@@ -2404,10 +2456,13 @@ namespace SplineTrajectory
                 gradByPoints = gradByPoints.middleRows(1, n - 1).eval();
             }
         }
+        
         struct Gradients
         {
             MatrixType points;
             Eigen::VectorXd times;
+            Eigen::Matrix<double, 3, DIM> grad_start_vaj;
+            Eigen::Matrix<double, 3, DIM> grad_end_vaj;
         };
 
         /**
@@ -2426,7 +2481,7 @@ namespace SplineTrajectory
                                 bool includeEndpoints = false)
         {
             Gradients result;
-            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, includeEndpoints);
+            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, result.grad_start_vaj, result.grad_end_vaj,includeEndpoints);
             return result;
         }
 
