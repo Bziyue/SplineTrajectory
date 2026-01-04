@@ -1606,13 +1606,8 @@ namespace SplineTrajectory
                 Multiply2x2T_2xN(L_blocks_cache_[0], lambda[0], correction_start);
                 gradStart -= correction_start;
 
-                const auto &tp_R_last = time_powers_[n - 1];
-                Eigen::Matrix2d U_last;
-                U_last << -168.0 * tp_R_last.h3_inv, 24.0 * tp_R_last.h2_inv,
-                    24.0 * tp_R_last.h2_inv, -3.0 * tp_R_last.h_inv;
-
                 Eigen::Matrix<double, 2, DIM> correction_end;
-                Multiply2x2T_2xN(U_last, lambda.back(), correction_end);
+                Multiply2x2T_2xN(U_blocks_cache_[num_blocks - 1], lambda.back(), correction_end);
                 gradEnd -= correction_end;
             }
 
@@ -1763,7 +1758,7 @@ namespace SplineTrajectory
             B_right.row(0) = boundary_.end_velocity.transpose();
             B_right.row(1) = boundary_.end_acceleration.transpose();
 
-            U_blocks_cache_.resize(std::max(0, num_blocks - 1));
+            U_blocks_cache_.resize(num_blocks);
             D_inv_cache_.resize(num_blocks);
             L_blocks_cache_.resize(num_blocks);
             ws_rhs_mod_.resize(num_blocks);
@@ -1785,18 +1780,13 @@ namespace SplineTrajectory
                 D << -192.0 * (tp_L.h3_inv + tp_R.h3_inv), 36.0 * (tp_L.h2_inv - tp_R.h2_inv),
                     -36.0 * (tp_L.h2_inv - tp_R.h2_inv), 9.0 * (tp_L.h_inv + tp_R.h_inv);
 
-                Eigen::Matrix2d L;
+                Eigen::Matrix2d &L = L_blocks_cache_[i];
                 L << -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv,
                     -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv;
-                L_blocks_cache_[i] = L;
 
-                if (k < n - 1)
-                {
-                    Eigen::Matrix2d U;
-                    U << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
-                        24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
-                    U_blocks_cache_[i] = U;
-                }
+                Eigen::Matrix2d &U = U_blocks_cache_[i];
+                U << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
+                    24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
 
                 if (i == 0) // k == 2
                 {
@@ -1815,10 +1805,7 @@ namespace SplineTrajectory
 
                 if (k == n - 1)
                 {
-                    Eigen::Matrix2d U_last;
-                    U_last << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
-                        24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
-                    r.noalias() -= U_last * B_right;
+                    r.noalias() -= U * B_right;
                 }
 
                 Inverse2x2(D, D_inv_cache_[i]);
@@ -2452,14 +2439,8 @@ namespace SplineTrajectory
                 Multiply3x3T_3xN(L_blocks_cache_[0], lambda[0], correction_start);
                 gradStart -= correction_start;
 
-                const auto &tp_R_last = time_powers_[n - 1];
-                Eigen::Matrix3d U_last;
-                U_last << 360.0 * tp_R_last.h3_inv, -60.0 * tp_R_last.h2_inv, 4.0 * tp_R_last.h_inv,
-                    -4680.0 * tp_R_last.h4_inv, 840.0 * tp_R_last.h3_inv, -60.0 * tp_R_last.h2_inv,
-                    24480.0 * tp_R_last.h5_inv, -4680.0 * tp_R_last.h4_inv, 360.0 * tp_R_last.h3_inv;
-
                 Eigen::Matrix<double, 3, DIM> correction_end;
-                Multiply3x3T_3xN(U_last, lambda.back(), correction_end);
+                Multiply3x3T_3xN(U_blocks_cache_[num_blocks - 1], lambda.back(), correction_end);
                 gradEnd -= correction_end;
             }
 
@@ -2671,7 +2652,7 @@ namespace SplineTrajectory
             B_right.row(1) = boundary_.end_acceleration.transpose();
             B_right.row(2) = boundary_.end_jerk.transpose();
 
-            U_blocks_cache_.resize(std::max(0, num_blocks - 1));
+            U_blocks_cache_.resize(num_blocks);
             D_inv_cache_.resize(num_blocks);
             L_blocks_cache_.resize(num_blocks);
             ws_rhs_mod_.resize(num_blocks);
@@ -2698,22 +2679,15 @@ namespace SplineTrajectory
                     5400.0 * (tp_L.h4_inv - tp_R.h4_inv), -1200.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_L.h2_inv - tp_R.h2_inv),
                     25920.0 * (tp_L.h5_inv + tp_R.h5_inv), 5400.0 * (tp_R.h4_inv - tp_L.h4_inv), 480.0 * (tp_L.h3_inv + tp_R.h3_inv);
 
-                Eigen::Matrix3d L;
+                Eigen::Matrix3d &L = L_blocks_cache_[i];
                 L << 360.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv, 4.0 * tp_L.h_inv,
                     4680.0 * tp_L.h4_inv, 840.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv,
                     24480.0 * tp_L.h5_inv, 4680.0 * tp_L.h4_inv, 360.0 * tp_L.h3_inv;
 
-                L_blocks_cache_[i] = L;
-
-                if (i < num_blocks - 1)
-                {
-                    Eigen::Matrix3d U;
-                    U << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
-                        -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
-                        24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
-
-                    U_blocks_cache_[i] = U;
-                }
+                Eigen::Matrix3d &U = U_blocks_cache_[i];
+                U << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
+                    -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
+                    24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
 
                 if (i == 0)
                 {
@@ -2736,12 +2710,7 @@ namespace SplineTrajectory
 
                 if (i == num_blocks - 1)
                 {
-                    Eigen::Matrix3d U_last;
-                    U_last << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
-                        -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
-                        24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
-
-                    r.noalias() -= U_last * B_right;
+                    r.noalias() -= U * B_right;
                 }
 
                 Inverse3x3(D, D_inv_cache_[i]);
