@@ -29,10 +29,8 @@ void testCubicGradients() {
 
     SplineType spline(times, points, 0.0, bc);
 
-    typename SplineType::MatrixType gdC;
-    spline.getEnergyPartialGradByCoeffs(gdC); 
-    Eigen::VectorXd gdT;
-    spline.getEnergyPartialGradByTimes(gdT); 
+    auto gdC = spline.getEnergyPartialGradByCoeffs();
+    auto gdT = spline.getEnergyPartialGradByTimes();
 
     auto grads = spline.propagateGrad(gdC, gdT);
 
@@ -96,10 +94,8 @@ void testQuinticGradients() {
 
     SplineType spline(times, points, 0.0, bc);
 
-    typename SplineType::MatrixType gdC;
-    spline.getEnergyPartialGradByCoeffs(gdC); 
-    Eigen::VectorXd gdT;
-    spline.getEnergyPartialGradByTimes(gdT); 
+    auto gdC = spline.getEnergyPartialGradByCoeffs();
+    auto gdT = spline.getEnergyPartialGradByTimes();
 
     auto grads = spline.propagateGrad(gdC, gdT);
 
@@ -167,10 +163,8 @@ void testSepticGradients() {
 
     SplineType spline(times, points, 0.0, bc);
 
-    typename SplineType::MatrixType gdC;
-    spline.getEnergyPartialGradByCoeffs(gdC);
-    Eigen::VectorXd gdT;
-    spline.getEnergyPartialGradByTimes(gdT);
+    auto gdC = spline.getEnergyPartialGradByCoeffs();
+    auto gdT = spline.getEnergyPartialGradByTimes();
 
     auto grads = spline.propagateGrad(gdC, gdT);
 

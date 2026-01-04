@@ -723,8 +723,6 @@ namespace SplineTrajectory
                 const double T2 = T * T;
                 const double T3 = T2 * T;
 
-                // c2, c3
-                // p(t) = c0 + c1t + c2t^2 + c3t^3
                 RowVectorType c = coeffs_.row(i * 4 + 2);
                 RowVectorType d = coeffs_.row(i * 4 + 3);
 
@@ -736,11 +734,15 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Computes the partial gradient of the energy (acceleration cost) w.r.t polynomial coefficients.
-         * @param gdC [Output] Matrix of size (num_segments * 4) x DIM.
+         * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
+         * 
+         * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 4) × DIM.
+         *         Each row corresponds to one coefficient dimension.
+         * @note This computes only the direct partial derivative, not the full gradient.
          */
-        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        MatrixType getEnergyPartialGradByCoeffs() const
         {
+            MatrixType gdC;
             gdC.resize(num_segments_ * 4, DIM);
             gdC.setZero();
 
@@ -750,28 +752,26 @@ namespace SplineTrajectory
                 double T2 = T * T;
                 double T3 = T2 * T;
 
-                // Coefficients c2, c3
-                // Energy = 4*c2^2*T + 12*c2*c3*T^2 + 12*c3^2*T^3
                 const RowVectorType c2 = coeffs_.row(i * 4 + 2);
                 const RowVectorType c3 = coeffs_.row(i * 4 + 3);
 
-                // dE/dc2 = 8*c2*T + 12*c3*T^2
                 gdC.row(i * 4 + 2) = 8.0 * c2 * T + 12.0 * c3 * T2;
 
-                // dE/dc3 = 12*c2*T^2 + 24*c3*T^3
                 gdC.row(i * 4 + 3) = 12.0 * c2 * T2 + 24.0 * c3 * T3;
             }
+            return gdC;
         }
 
         /**
-         * @brief Computes the partial gradient of the energy (acceleration cost) with respect to the segment duration T.
-         * By applying the Fundamental Theorem of Calculus, the derivative of the energy integral with respect to its
-         * upper limit T is simply the squared norm of the acceleration vector at the end of the segment.
-         * This avoids complex polynomial expansion.
-         * @param gdT [Output] Gradient vector of size num_segments_.
+         * @brief Compute partial gradient of energy w.r.t. segment durations.
+         * 
+         * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
+         *         Element i is the direct partial derivative w.r.t. T[i].
+         * @note This computes only the explicit time dependency, not the full gradient.
          */
-        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        Eigen::VectorXd getEnergyPartialGradByTimes() const
         {
+            Eigen::VectorXd gdT;
             gdT.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
@@ -785,8 +785,15 @@ namespace SplineTrajectory
 
                 gdT(i) = acc_end.squaredNorm();
             }
+            return gdT;
         }
 
+        /**
+         * @brief Compute full gradient of energy w.r.t. segment durations.
+         * 
+         * @return VectorXd Full gradient dE/dT, size num_segments.
+         *         Includes both direct and indirect dependencies via chain rule.
+         */
         Eigen::VectorXd getEnergyGradTimes() const
         {
             Eigen::VectorXd grad(num_segments_);
@@ -806,11 +813,14 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Computes the gradient of energy (acceleration cost) w.r.t waypoints.
-         * @param includeEndpoints If true, returns gradients for [P0, ..., PN] (size N+1).
-         * If false (default), returns gradients for [P1, ..., PN-1] (size N-1).
+         * @brief Compute full gradient of energy w.r.t. waypoints.
+         * 
+         * @param includeEndpoints If true, include boundary points P0 and PN in output.
+         * @return MatrixType Full gradient dE/dP.
+         *         Size (N+1) × DIM if includeEndpoints=true (all points).
+         *         Size (N-1) × DIM if includeEndpoints=false (inner points only).
          */
-        MatrixType getEnergyGradInnerP(bool includeEndpoints = false) const
+        MatrixType getEnergyGradPoints(bool includeEndpoints = false) const
         {
             if (num_segments_ < 1)
                 return MatrixType::Zero(0, DIM);
@@ -837,10 +847,14 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Propagates gradients and returns a Gradients structure.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (4N x D).
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @return Gradients Structure containing inner waypoint gradients, time gradients, and boundary gradients.
+         * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
+         * 
+         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
+         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
+         * @return Gradients Structure containing:
+         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
+         *       - times: gradient w.r.t. time segments, size N
+         *       - start/end: gradients w.r.t. boundary states (position, velocity)
          */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
@@ -861,69 +875,6 @@ namespace SplineTrajectory
             }
 
             return res;
-        }
-
-        /**
-         * @brief Propagates gradients with flexible output format.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param[out] gradByPoints   Output gradients for waypoints.
-         * @param[out] gradByTimes    Output gradients for segment durations.
-         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
-         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
-         */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes,
-                           bool includeEndpoints = false)
-        {
-            BoundaryStateGrads dummy_start, dummy_end;
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  gradByPoints, gradByTimes, dummy_start, dummy_end);
-
-            if (!includeEndpoints && num_segments_ > 1)
-            {
-                gradByPoints = gradByPoints.middleRows(1, num_segments_ - 1).eval();
-            }
-        }
-
-        /**
-         * @brief Propagates gradients including boundary velocity gradients.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param[out] gradByPoints   Output gradients for waypoints.
-         * @param[out] gradByTimes    Output gradients for segment durations.
-         * @param[out] gradStartVel   Output gradient for start velocity.
-         * @param[out] gradEndVel     Output gradient for end velocity.
-         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
-         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
-         */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes,
-                           VectorType &gradStartVel,
-                           VectorType &gradEndVel,
-                           bool includeEndpoints = false)
-        {
-            MatrixType all_points_grad;
-            BoundaryStateGrads start_g, end_g;
-
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  all_points_grad, gradByTimes, start_g, end_g);
-
-            gradStartVel = start_g.v;
-            gradEndVel = end_g.v;
-
-            if (!includeEndpoints && num_segments_ > 1)
-            {
-                gradByPoints = all_points_grad.middleRows(1, num_segments_ - 1).eval();
-            }
-            else
-            {
-                gradByPoints = all_points_grad;
-            }
         }
 
     private:
@@ -1060,7 +1011,6 @@ namespace SplineTrajectory
                 time_powers_[i].h3_inv = iv3;
             }
         }
-        // -----------------------
 
         MatrixType solveSpline()
         {
@@ -1105,7 +1055,7 @@ namespace SplineTrajectory
         }
 
         template <typename MatType>
-        void computeLUAndSolve(MatType &M /* (n+1 x DIM) */)
+        void computeLUAndSolve(MatType &M)
         {
             const int n_seg = num_segments_;
             const int n_mat = n_seg + 1;
@@ -1236,13 +1186,14 @@ namespace SplineTrajectory
         struct TimePowers
         {
             double h;
-            double h_inv;  // h^-1
-            double h2_inv; // h^-2
-            double h3_inv; // h^-3
-            double h4_inv; // h^-4
-            double h5_inv; // h^-5
-            double h6_inv; // h^-6
+            double h_inv;  
+            double h2_inv; 
+            double h3_inv; 
+            double h4_inv; 
+            double h5_inv; 
+            double h6_inv;
         };
+
         std::vector<TimePowers> time_powers_;
         std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_d_rhs_mod_;
         std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_current_lambda_;
@@ -1366,8 +1317,6 @@ namespace SplineTrajectory
                 const double T4 = T3 * T;
                 const double T5 = T4 * T;
 
-                // c3, c4, c5
-                // p(t) = c0 + c1*t + c2*t^2 + c3*t^3 + c4*t^4 + c5*t^5
                 RowVectorType c3 = coeffs_.row(i * 6 + 3);
                 RowVectorType c4 = coeffs_.row(i * 6 + 4);
                 RowVectorType c5 = coeffs_.row(i * 6 + 5);
@@ -1381,12 +1330,17 @@ namespace SplineTrajectory
             }
             return total_energy;
         }
+
         /**
-         * @brief Computes the partial gradient of the energy (jerk cost) w.r.t polynomial coefficients.
-         * @param gdC [Output] Matrix of size (num_segments * 6) x DIM.
+         * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
+         * 
+         * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 6) × DIM.
+         *         Each row corresponds to one coefficient dimension.
+         * @note This computes only the direct partial derivative, not the full gradient.
          */
-        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        MatrixType getEnergyPartialGradByCoeffs() const
         {
+            MatrixType gdC;
             gdC.resize(num_segments_ * 6, DIM);
             gdC.setZero();
 
@@ -1402,33 +1356,32 @@ namespace SplineTrajectory
                 const RowVectorType c4 = coeffs_.row(i * 6 + 4);
                 const RowVectorType c5 = coeffs_.row(i * 6 + 5);
 
-                // dE/dc3
                 gdC.row(i * 6 + 3) = 72.0 * c3 * T +
                                      144.0 * c4 * T2 +
                                      240.0 * c5 * T3;
 
-                // dE/dc4
                 gdC.row(i * 6 + 4) = 144.0 * c3 * T2 +
                                      384.0 * c4 * T3 +
                                      720.0 * c5 * T4;
 
-                // dE/dc5
                 gdC.row(i * 6 + 5) = 240.0 * c3 * T3 +
                                      720.0 * c4 * T4 +
                                      1440.0 * c5 * T5;
             }
+            return gdC;
         }
 
         /**
-         * @brief Computes the partial gradient of the energy (jerk cost) with respect to the segment duration T.
-         * By applying the Fundamental Theorem of Calculus, the derivative of the energy integral with respect to
-         * its upper limit T is simply the squared norm of the jerk vector at the end of the segment. This avoids
-         * complex polynomial expansion.
-         * @param gdT [Output] Gradient vector to store the explicit time gradients.
+         * @brief Compute partial gradient of energy w.r.t. segment durations.
+         * 
+         * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
+         *         Element i is the direct partial derivative w.r.t. T[i].
+         * @note This computes only the explicit time dependency, not the full gradient.
          */
-        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        Eigen::VectorXd getEnergyPartialGradByTimes() const
         {
-            gdT.resize(num_segments_);
+            Eigen::VectorXd gdT(num_segments_);
+            gdT.setZero();
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -1442,8 +1395,16 @@ namespace SplineTrajectory
 
                 gdT(i) = jerk_end.squaredNorm();
             }
+
+            return gdT;
         }
 
+        /**
+         * @brief Compute full gradient of energy w.r.t. segment durations.
+         * 
+         * @return VectorXd Full gradient dE/dT, size num_segments.
+         *         Includes both direct and indirect dependencies via chain rule.
+         */
         Eigen::VectorXd getEnergyGradTimes() const
         {
             Eigen::VectorXd grad(num_segments_);
@@ -1466,11 +1427,14 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Computes the gradient of energy (jerk cost) w.r.t waypoints.
-         * @param includeEndpoints If true, returns gradients for [P0, ..., PN] (size N+1).
-         * If false (default), returns gradients for [P1, ..., PN-1] (size N-1).
+         * @brief Compute full gradient of energy w.r.t. waypoints.
+         * 
+         * @param includeEndpoints If true, include boundary points P0 and PN in output.
+         * @return MatrixType Full gradient dE/dP.
+         *         Size (N+1) × DIM if includeEndpoints=true (all points).
+         *         Size (N-1) × DIM if includeEndpoints=false (inner points only).
          */
-        MatrixType getEnergyGradInnerP(bool includeEndpoints = false) const
+        MatrixType getEnergyGradPoints(bool includeEndpoints = false) const
         {
             if (num_segments_ < 1)
                 return MatrixType::Zero(0, DIM);
@@ -1497,10 +1461,14 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Propagates gradients and returns a Gradients structure.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (6N x D).
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @return Gradients Structure containing inner waypoint gradients, time gradients, and boundary gradients.
+         * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
+         * 
+         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
+         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
+         * @return Gradients Structure containing:
+         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
+         *       - times: gradient w.r.t. time segments, size N
+         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
          */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
@@ -1521,75 +1489,6 @@ namespace SplineTrajectory
             }
 
             return res;
-        }
-
-        /**
-         * @brief Propagates gradients with flexible output format.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param[out] gradByPoints   Output gradients for waypoints.
-         * @param[out] gradByTimes    Output gradients for segment durations.
-         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
-         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
-         */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes,
-                           bool includeEndpoints = false)
-        {
-            BoundaryStateGrads dummy_start, dummy_end;
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  gradByPoints, gradByTimes, dummy_start, dummy_end);
-
-            if (!includeEndpoints && num_segments_ > 1)
-            {
-                gradByPoints = gradByPoints.middleRows(1, num_segments_ - 1).eval();
-            }
-        }
-
-        /**
-         * @brief Propagates gradients including boundary velocity and acceleration gradients.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param[out] gradByPoints   Output gradients for waypoints.
-         * @param[out] gradByTimes    Output gradients for segment durations.
-         * @param[out] gradStartVel   Output gradient for start velocity.
-         * @param[out] gradStartAcc   Output gradient for start acceleration.
-         * @param[out] gradEndVel     Output gradient for end velocity.
-         * @param[out] gradEndAcc     Output gradient for end acceleration.
-         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
-         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
-         */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes,
-                           VectorType &gradStartVel,
-                           VectorType &gradStartAcc,
-                           VectorType &gradEndVel,
-                           VectorType &gradEndAcc,
-                           bool includeEndpoints = false)
-        {
-            MatrixType all_points_grad;
-            BoundaryStateGrads start_g, end_g;
-
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  all_points_grad, gradByTimes, start_g, end_g);
-
-            gradStartVel = start_g.v;
-            gradStartAcc = start_g.a;
-            gradEndVel = end_g.v;
-            gradEndAcc = end_g.a;
-
-            if (!includeEndpoints && num_segments_ > 1)
-            {
-                gradByPoints = all_points_grad.middleRows(1, num_segments_ - 1).eval();
-            }
-            else
-            {
-                gradByPoints = all_points_grad;
-            }
         }
 
     private:
@@ -2212,8 +2111,6 @@ namespace SplineTrajectory
                 const double T6 = T4 * T2;
                 const double T7 = T4 * T3;
 
-                // c4, c5, c6, c7
-                // p(t) = c0 + c1*t + c2*t^2 + c3*t^3 + c4*t^4 + c5*t^5 + c6*t^6 + c7*t^7
                 RowVectorType c4 = coeffs_.row(i * 8 + 4);
                 RowVectorType c5 = coeffs_.row(i * 8 + 5);
                 RowVectorType c6 = coeffs_.row(i * 8 + 6);
@@ -2232,12 +2129,17 @@ namespace SplineTrajectory
             }
             return total_energy;
         }
+
         /**
-         * @brief Computes the partial gradient of the energy (snap cost) w.r.t polynomial coefficients.
-         * @param gdC [Output] Matrix of size (num_segments * 8) x DIM.
+         * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
+         * 
+         * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 8) × DIM.
+         *         Each row corresponds to one coefficient dimension.
+         * @note This computes only the direct partial derivative, not the full gradient.
          */
-        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        MatrixType getEnergyPartialGradByCoeffs() const
         {
+            MatrixType gdC;
             gdC.resize(num_segments_ * 8, DIM);
             gdC.setZero();
 
@@ -2256,42 +2158,41 @@ namespace SplineTrajectory
                 const RowVectorType c6 = coeffs_.row(i * 8 + 6);
                 const RowVectorType c7 = coeffs_.row(i * 8 + 7);
 
-                // dE/dc4
                 gdC.row(i * 8 + 4) = 1152.0 * c4 * T +
                                      2880.0 * c5 * T2 +
                                      5760.0 * c6 * T3 +
                                      10080.0 * c7 * T4;
 
-                // dE/dc5
                 gdC.row(i * 8 + 5) = 2880.0 * c4 * T2 +
                                      9600.0 * c5 * T3 +
                                      21600.0 * c6 * T4 +
                                      40320.0 * c7 * T5;
 
-                // dE/dc6
                 gdC.row(i * 8 + 6) = 5760.0 * c4 * T3 +
                                      21600.0 * c5 * T4 +
                                      51840.0 * c6 * T5 +
                                      100800.0 * c7 * T6;
 
-                // dE/dc7
                 gdC.row(i * 8 + 7) = 10080.0 * c4 * T4 +
                                      40320.0 * c5 * T5 +
                                      100800.0 * c6 * T6 +
                                      201600.0 * c7 * T7;
             }
+
+            return gdC;
         }
 
         /**
-         * @brief Computes the partial gradient of the energy (snap cost) with respect to the segment duration T.
-         * By applying the Fundamental Theorem of Calculus, the derivative of the energy integral with respect to
-         * its upper limit T is simply the squared norm of the snap vector at the end of the segment.
-         * This avoids complex polynomial expansion.
-         * @param gdT [Output] Gradient vector to store the explicit time gradients.
+         * @brief Compute partial gradient of energy w.r.t. segment durations.
+         * 
+         * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
+         *         Element i is the direct partial derivative w.r.t. T[i].
+         * @note This computes only the explicit time dependency, not the full gradient.
          */
-        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        Eigen::VectorXd getEnergyPartialGradByTimes() const
         {
-            gdT.resize(num_segments_);
+            Eigen::VectorXd gdT(num_segments_);
+            gdT.setZero();
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -2306,8 +2207,15 @@ namespace SplineTrajectory
 
                 gdT(i) = snap_end.squaredNorm();
             }
+            return gdT;
         }
 
+        /**
+         * @brief Compute full gradient of energy w.r.t. segment durations.
+         * 
+         * @return VectorXd Full gradient dE/dT, size num_segments.
+         *         Includes both direct and indirect dependencies via chain rule.
+         */
         Eigen::VectorXd getEnergyGradTimes() const
         {
             Eigen::VectorXd grad(num_segments_);
@@ -2335,11 +2243,14 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Computes the gradient of energy (snap cost) w.r.t waypoints.
-         * @param includeEndpoints If true, returns gradients for [P0, ..., PN] (size N+1).
-         * If false (default), returns gradients for [P1, ..., PN-1] (size N-1).
+         * @brief Compute full gradient of energy w.r.t. waypoints.
+         * 
+         * @param includeEndpoints If true, include boundary points P0 and PN in output.
+         * @return MatrixType Full gradient dE/dP.
+         *         Size (N+1) × DIM if includeEndpoints=true (all points).
+         *         Size (N-1) × DIM if includeEndpoints=false (inner points only).
          */
-        MatrixType getEnergyGradInnerP(bool includeEndpoints = false) const
+        MatrixType getEnergyGradPoints(bool includeEndpoints = false) const
         {
             if (num_segments_ < 1)
                 return MatrixType::Zero(0, DIM);
@@ -2366,10 +2277,14 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Propagates gradients and returns a Gradients structure.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (8N x D).
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @return Gradients Structure containing inner waypoint gradients, time gradients, and boundary gradients.
+         * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
+         * 
+         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
+         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
+         * @return Gradients Structure containing:
+         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
+         *       - times: gradient w.r.t. time segments, size N
+         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
          */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
@@ -2390,81 +2305,6 @@ namespace SplineTrajectory
             }
 
             return res;
-        }
-
-        /**
-         * @brief Propagates gradients with flexible output format.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param[out] gradByPoints   Output gradients for waypoints.
-         * @param[out] gradByTimes    Output gradients for segment durations.
-         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
-         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
-         */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes,
-                           bool includeEndpoints = false)
-        {
-            BoundaryStateGrads dummy_start, dummy_end;
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  gradByPoints, gradByTimes, dummy_start, dummy_end);
-
-            if (!includeEndpoints && num_segments_ > 1)
-            {
-                gradByPoints = gradByPoints.middleRows(1, num_segments_ - 1).eval();
-            }
-        }
-
-        /**
-         * @brief Propagates gradients including boundary velocity, acceleration, and jerk gradients.
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param[out] gradByPoints   Output gradients for waypoints.
-         * @param[out] gradByTimes    Output gradients for segment durations.
-         * @param[out] gradStartVel   Output gradient for start velocity.
-         * @param[out] gradStartAcc   Output gradient for start acceleration.
-         * @param[out] gradStartJerk  Output gradient for start jerk.
-         * @param[out] gradEndVel     Output gradient for end velocity.
-         * @param[out] gradEndAcc     Output gradient for end acceleration.
-         * @param[out] gradEndJerk    Output gradient for end jerk.
-         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
-         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
-         */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           MatrixType &gradByPoints,
-                           Eigen::VectorXd &gradByTimes,
-                           VectorType &gradStartVel,
-                           VectorType &gradStartAcc,
-                           VectorType &gradStartJerk,
-                           VectorType &gradEndVel,
-                           VectorType &gradEndAcc,
-                           VectorType &gradEndJerk,
-                           bool includeEndpoints = false)
-        {
-            MatrixType all_points_grad;
-            BoundaryStateGrads start_g, end_g;
-
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  all_points_grad, gradByTimes, start_g, end_g);
-
-            gradStartVel = start_g.v;
-            gradStartAcc = start_g.a;
-            gradStartJerk = start_g.j;
-            gradEndVel = end_g.v;
-            gradEndAcc = end_g.a;
-            gradEndJerk = end_g.j;
-
-            if (!includeEndpoints && num_segments_ > 1)
-            {
-                gradByPoints = all_points_grad.middleRows(1, num_segments_ - 1).eval();
-            }
-            else
-            {
-                gradByPoints = all_points_grad;
-            }
         }
 
     private:

@@ -102,42 +102,45 @@ void testCubic(int N, int BENCH_ITERS)
         cout << "Duration: " << cubic_spline.getDuration() << endl;
         
         // Test gradient computation
-        SplineTrajectory::CubicSpline3D::MatrixType gdC;
-        Eigen::VectorXd gdT;
-        cubic_spline.getEnergyPartialGradByCoeffs(gdC);
-        cubic_spline.getEnergyPartialGradByTimes(gdT);
+        auto gdC = cubic_spline.getEnergyPartialGradByCoeffs();
+        auto gdT = cubic_spline.getEnergyPartialGradByTimes();
         cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
         cout << "Partial Grad (Times) size: " << gdT.size() << endl;
         
         // Test propagateGrad
-        SplineTrajectory::CubicSpline3D::MatrixType gradP;
-        Eigen::VectorXd gradT;
-        cubic_spline.propagateGrad(gdC, gdT, gradP, gradT, true); // Include endpoints
-        cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
-        cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
+        auto grads = cubic_spline.propagateGrad(gdC, gdT);
+        // Reconstruct full point gradients from propagated results
+        SplineTrajectory::CubicSpline3D::MatrixType gradP_full(N + 1, 3);
+        gradP_full.row(0) = grads.start.p.transpose();
+        if (N > 1) {
+            gradP_full.block(1, 0, N - 1, 3) = grads.inner_points;
+        }
+        gradP_full.row(N) = grads.end.p.transpose();
+        cout << "Propagated Grad (Points) shape: " << gradP_full.rows() << "x" << gradP_full.cols() << endl;
+        cout << "Propagated Grad (Times) size: " << grads.times.size() << endl;
         
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
-        Eigen::VectorXd direct_gradT = cubic_spline.getEnergyGradTimes();
-        Eigen::MatrixXd direct_gradP_full = cubic_spline.getEnergyGradInnerP(true);
+        auto direct_gradT = cubic_spline.getEnergyGradTimes();
+        auto direct_gradP_full = cubic_spline.getEnergyGradPoints(true);
         
-        printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
+        printCheck("Direct vs Prop (Times)", (direct_gradT - grads.times).norm());
         
         if (N > 1) {
             Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
-            Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
+            Eigen::MatrixXd prop_gradP_inner = gradP_full.block(1, 0, N - 1, 3);
             printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
 
-        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP.row(0)).norm());
-        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP.row(N)).norm());
+        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_full.row(0)).norm());
+        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_full.row(N)).norm());
         
         // Print boundary gradients
         printSubHeader("Start/End Gradients");
-        cout << "Start Point Grad: " << gradP.row(0) << endl;
-        cout << "End   Point Grad: " << gradP.row(N) << endl;
+        cout << "Start Point Grad: " << gradP_full.row(0) << endl;
+        cout << "End   Point Grad: " << gradP_full.row(N) << endl;
         return;
     }
 
@@ -208,9 +211,17 @@ void testCubic(int N, int BENCH_ITERS)
     // Spline Grad
     t2 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
-        cubic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
-        cubic_spline.getEnergyPartialGradByTimes(gdT_spline);
-        cubic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, true);
+        gdC_spline = cubic_spline.getEnergyPartialGradByCoeffs();
+        gdT_spline = cubic_spline.getEnergyPartialGradByTimes();
+        auto grads = cubic_spline.propagateGrad(gdC_spline, gdT_spline);
+        gradT_spline_out = grads.times;
+        // Reconstruct full point gradients from propagated results
+        gradP_spline_full.resize(N + 1, 3);
+        gradP_spline_full.row(0) = grads.start.p.transpose();
+        if (N > 1) {
+            gradP_spline_full.block(1, 0, N - 1, 3) = grads.inner_points;
+        }
+        gradP_spline_full.row(N) = grads.end.p.transpose();
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 
@@ -230,8 +241,8 @@ void testCubic(int N, int BENCH_ITERS)
 
     // 5. Self-Check (Direct vs Propagated)
     printSubHeader("Self-Check: Direct vs Propagated");
-    Eigen::VectorXd direct_gradT = cubic_spline.getEnergyGradTimes();
-    Eigen::MatrixXd direct_gradP_full = cubic_spline.getEnergyGradInnerP(true);
+    auto direct_gradT = cubic_spline.getEnergyGradTimes();
+    auto direct_gradP_full = cubic_spline.getEnergyGradPoints(true);
     Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
 
     // Spline Propagated Inner (as (N-1)x3)
@@ -307,42 +318,45 @@ void testQuintic(int N, int BENCH_ITERS)
         cout << "Duration: " << quintic_spline.getDuration() << endl;
         
         // Test gradient computation
-        SplineTrajectory::QuinticSpline3D::MatrixType gdC;
-        Eigen::VectorXd gdT;
-        quintic_spline.getEnergyPartialGradByCoeffs(gdC);
-        quintic_spline.getEnergyPartialGradByTimes(gdT);
+        auto gdC = quintic_spline.getEnergyPartialGradByCoeffs();
+        auto gdT = quintic_spline.getEnergyPartialGradByTimes();
         cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
         cout << "Partial Grad (Times) size: " << gdT.size() << endl;
         
         // Test propagateGrad
-        SplineTrajectory::QuinticSpline3D::MatrixType gradP;
-        Eigen::VectorXd gradT;
-        quintic_spline.propagateGrad(gdC, gdT, gradP, gradT, true); // Include endpoints
-        cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
-        cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
+        auto grads = quintic_spline.propagateGrad(gdC, gdT);
+        // Reconstruct full point gradients from propagated results
+        SplineTrajectory::QuinticSpline3D::MatrixType gradP_full(N + 1, 3);
+        gradP_full.row(0) = grads.start.p.transpose();
+        if (N > 1) {
+            gradP_full.block(1, 0, N - 1, 3) = grads.inner_points;
+        }
+        gradP_full.row(N) = grads.end.p.transpose();
+        cout << "Propagated Grad (Points) shape: " << gradP_full.rows() << "x" << gradP_full.cols() << endl;
+        cout << "Propagated Grad (Times) size: " << grads.times.size() << endl;
         
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
-        Eigen::VectorXd direct_gradT = quintic_spline.getEnergyGradTimes();
-        Eigen::MatrixXd direct_gradP_full = quintic_spline.getEnergyGradInnerP(true);
+        auto direct_gradT = quintic_spline.getEnergyGradTimes();
+        auto direct_gradP_full = quintic_spline.getEnergyGradPoints(true);
         
-        printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
+        printCheck("Direct vs Prop (Times)", (direct_gradT - grads.times).norm());
         
         if (N > 1) {
             Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
-            Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
+            Eigen::MatrixXd prop_gradP_inner = gradP_full.block(1, 0, N - 1, 3);
             printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
 
-        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP.row(0)).norm());
-        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP.row(N)).norm());
+        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_full.row(0)).norm());
+        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_full.row(N)).norm());
         
         // Print boundary gradients
         printSubHeader("Start/End Gradients");
-        cout << "Start Point Grad: " << gradP.row(0) << endl;
-        cout << "End   Point Grad: " << gradP.row(N) << endl;
+        cout << "Start Point Grad: " << gradP_full.row(0) << endl;
+        cout << "End   Point Grad: " << gradP_full.row(N) << endl;
         return;
     }
 
@@ -421,9 +435,17 @@ void testQuintic(int N, int BENCH_ITERS)
 
     t2 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
-        quintic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
-        quintic_spline.getEnergyPartialGradByTimes(gdT_spline);
-        quintic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, true);
+        gdC_spline = quintic_spline.getEnergyPartialGradByCoeffs();
+        gdT_spline = quintic_spline.getEnergyPartialGradByTimes();
+        auto grads = quintic_spline.propagateGrad(gdC_spline, gdT_spline);
+        gradT_spline_out = grads.times;
+        // Reconstruct full point gradients from propagated results
+        gradP_spline_full.resize(N + 1, 3);
+        gradP_spline_full.row(0) = grads.start.p.transpose();
+        if (N > 1) {
+            gradP_spline_full.block(1, 0, N - 1, 3) = grads.inner_points;
+        }
+        gradP_spline_full.row(N) = grads.end.p.transpose();
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 
@@ -441,8 +463,8 @@ void testQuintic(int N, int BENCH_ITERS)
 
     // 5. Direct Gradient Consistency Check (vs Ref min_jerk)
     printSubHeader("Consistency: Direct Gradients vs Ref");
-    Eigen::VectorXd direct_gradT = quintic_spline.getEnergyGradTimes();
-    Eigen::MatrixXd direct_gradP_full = quintic_spline.getEnergyGradInnerP(true);
+    auto direct_gradT = quintic_spline.getEnergyGradTimes();
+    auto direct_gradP_full = quintic_spline.getEnergyGradPoints(true);
     Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
 
     // Ref min_jerk returns 3x(N-1), need transpose
@@ -526,42 +548,45 @@ void testSeptic(int N, int BENCH_ITERS)
         cout << "Duration: " << septic_spline.getDuration() << endl;
         
         // Test gradient computation
-        SplineTrajectory::SepticSpline3D::MatrixType gdC;
-        Eigen::VectorXd gdT;
-        septic_spline.getEnergyPartialGradByCoeffs(gdC);
-        septic_spline.getEnergyPartialGradByTimes(gdT);
+        auto gdC = septic_spline.getEnergyPartialGradByCoeffs();
+        auto gdT = septic_spline.getEnergyPartialGradByTimes();
         cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
         cout << "Partial Grad (Times) size: " << gdT.size() << endl;
         
         // Test propagateGrad
-        SplineTrajectory::SepticSpline3D::MatrixType gradP;
-        Eigen::VectorXd gradT;
-        septic_spline.propagateGrad(gdC, gdT, gradP, gradT, true); // Include endpoints
-        cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
-        cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
+        auto grads = septic_spline.propagateGrad(gdC, gdT);
+        // Reconstruct full point gradients from propagated results
+        SplineTrajectory::SepticSpline3D::MatrixType gradP_full(N + 1, 3);
+        gradP_full.row(0) = grads.start.p.transpose();
+        if (N > 1) {
+            gradP_full.block(1, 0, N - 1, 3) = grads.inner_points;
+        }
+        gradP_full.row(N) = grads.end.p.transpose();
+        cout << "Propagated Grad (Points) shape: " << gradP_full.rows() << "x" << gradP_full.cols() << endl;
+        cout << "Propagated Grad (Times) size: " << grads.times.size() << endl;
         
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
-        Eigen::VectorXd direct_gradT = septic_spline.getEnergyGradTimes();
-        Eigen::MatrixXd direct_gradP_full = septic_spline.getEnergyGradInnerP(true);
+        auto direct_gradT = septic_spline.getEnergyGradTimes();
+        auto direct_gradP_full = septic_spline.getEnergyGradPoints(true);
         
-        printCheck("Direct vs Prop (Times)", (direct_gradT - gradT).norm());
+        printCheck("Direct vs Prop (Times)", (direct_gradT - grads.times).norm());
         
         if (N > 1) {
             Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
-            Eigen::MatrixXd prop_gradP_inner = gradP.block(1, 0, N - 1, 3);
+            Eigen::MatrixXd prop_gradP_inner = gradP_full.block(1, 0, N - 1, 3);
             printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
 
-        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP.row(0)).norm());
-        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP.row(N)).norm());
+        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_full.row(0)).norm());
+        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_full.row(N)).norm());
         
         // Print boundary gradients
         printSubHeader("Start/End Gradients");
-        cout << "Start Point Grad: " << gradP.row(0) << endl;
-        cout << "End   Point Grad: " << gradP.row(N) << endl;
+        cout << "Start Point Grad: " << gradP_full.row(0) << endl;
+        cout << "End   Point Grad: " << gradP_full.row(N) << endl;
         return;
     }
 
@@ -640,9 +665,17 @@ void testSeptic(int N, int BENCH_ITERS)
 
     t2 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
-        septic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
-        septic_spline.getEnergyPartialGradByTimes(gdT_spline);
-        septic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, true);
+        gdC_spline = septic_spline.getEnergyPartialGradByCoeffs();
+        gdT_spline = septic_spline.getEnergyPartialGradByTimes();
+        auto grads = septic_spline.propagateGrad(gdC_spline, gdT_spline);
+        gradT_spline_out = grads.times;
+        // Reconstruct full point gradients from propagated results
+        gradP_spline_full.resize(N + 1, 3);
+        gradP_spline_full.row(0) = grads.start.p.transpose();
+        if (N > 1) {
+            gradP_spline_full.block(1, 0, N - 1, 3) = grads.inner_points;
+        }
+        gradP_spline_full.row(N) = grads.end.p.transpose();
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 
@@ -660,8 +693,8 @@ void testSeptic(int N, int BENCH_ITERS)
 
     // 5. Direct Gradient Consistency Check (vs Ref min_snap)
     printSubHeader("Consistency: Direct Gradients vs Ref");
-    Eigen::VectorXd direct_gradT = septic_spline.getEnergyGradTimes();
-    Eigen::MatrixXd direct_gradP_full = septic_spline.getEnergyGradInnerP(true);
+    auto direct_gradT = septic_spline.getEnergyGradTimes();
+    auto direct_gradP_full = septic_spline.getEnergyGradPoints(true);
     Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
 
     // Ref min_snap returns 3x(N-1), need transpose
