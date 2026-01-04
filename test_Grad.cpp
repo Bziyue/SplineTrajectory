@@ -112,8 +112,7 @@ void testCubic(int N, int BENCH_ITERS)
         // Test propagateGrad
         SplineTrajectory::CubicSpline3D::MatrixType gradP;
         Eigen::VectorXd gradT;
-        SplineTrajectory::CubicSpline3D::VectorType grad_start_v, grad_end_v;
-        cubic_spline.propagateGrad(gdC, gdT, gradP, gradT, grad_start_v, grad_end_v, true); // Include endpoints
+        cubic_spline.propagateGrad(gdC, gdT, gradP, gradT, true); // Include endpoints
         cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
         cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
         
@@ -207,12 +206,11 @@ void testCubic(int N, int BENCH_ITERS)
     double t_grad_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
 
     // Spline Grad
-    SplineTrajectory::CubicSpline3D::VectorType grad_start_v, grad_end_v;
     t2 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
         cubic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
         cubic_spline.getEnergyPartialGradByTimes(gdT_spline);
-        cubic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, grad_start_v, grad_end_v, true);
+        cubic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, true);
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 
@@ -319,8 +317,7 @@ void testQuintic(int N, int BENCH_ITERS)
         // Test propagateGrad
         SplineTrajectory::QuinticSpline3D::MatrixType gradP;
         Eigen::VectorXd gradT;
-        Eigen::Matrix<double, 2, 3> gradStart, gradEnd;
-        quintic_spline.propagateGrad(gdC, gdT, gradP, gradT, gradStart, gradEnd, true); // Include endpoints
+        quintic_spline.propagateGrad(gdC, gdT, gradP, gradT, true); // Include endpoints
         cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
         cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
         
@@ -422,12 +419,11 @@ void testQuintic(int N, int BENCH_ITERS)
     }
     double t_grad_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
 
-    Eigen::Matrix<double, 2, 3> gradStart, gradEnd;
     t2 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
         quintic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
         quintic_spline.getEnergyPartialGradByTimes(gdT_spline);
-        quintic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, gradStart, gradEnd, true);
+        quintic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, true);
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 
@@ -540,8 +536,7 @@ void testSeptic(int N, int BENCH_ITERS)
         // Test propagateGrad
         SplineTrajectory::SepticSpline3D::MatrixType gradP;
         Eigen::VectorXd gradT;
-        Eigen::Matrix<double, 3, 3> gradStart, gradEnd;
-        septic_spline.propagateGrad(gdC, gdT, gradP, gradT, gradStart, gradEnd, true); // Include endpoints
+        septic_spline.propagateGrad(gdC, gdT, gradP, gradT, true); // Include endpoints
         cout << "Propagated Grad (Points) shape: " << gradP.rows() << "x" << gradP.cols() << endl;
         cout << "Propagated Grad (Times) size: " << gradT.size() << endl;
         
@@ -643,12 +638,11 @@ void testSeptic(int N, int BENCH_ITERS)
     }
     double t_grad_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
 
-    Eigen::Matrix<double, 3, 3> gradStart, gradEnd;
     t2 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
         septic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
         septic_spline.getEnergyPartialGradByTimes(gdT_spline);
-        septic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, gradStart, gradEnd, true);
+        septic_spline.propagateGrad(gdC_spline, gdT_spline, gradP_spline_full, gradT_spline_out, true);
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 

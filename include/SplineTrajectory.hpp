@@ -584,12 +584,20 @@ namespace SplineTrajectory
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
+        struct BoundaryStateGrads
+        {
+            VectorType p;
+            VectorType v;
+
+            BoundaryStateGrads() : p(VectorType::Zero()), v(VectorType::Zero()) {}
+        };
+
         struct Gradients
         {
-            MatrixType points;
+            MatrixType inner_points;
             Eigen::VectorXd times;
-            VectorType grad_start_v;
-            VectorType grad_end_v;
+            BoundaryStateGrads start;
+            BoundaryStateGrads end;
         };
 
     private:
@@ -829,11 +837,67 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Propagates gradients from polynomial coefficients to waypoints and time segments.
-         *
-         * @param includeEndpoints If false (default), only returns gradients for inner waypoints (rows 1 to N-1),
-         * excluding the start and end points, which is consistent with MINCO and other trajectory optimization libraries.
-         * If true, returns gradients for ALL waypoints including start and end points.
+         * @brief Propagates gradients and returns a Gradients structure.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (4N x D).
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @return Gradients Structure containing inner waypoint gradients, time gradients, and boundary gradients.
+         */
+        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+                                const Eigen::VectorXd &partialGradByTimes)
+        {
+            MatrixType all_points_grad;
+            Gradients res;
+
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  all_points_grad, res.times, res.start, res.end);
+
+            if (num_segments_ > 1)
+            {
+                res.inner_points = all_points_grad.middleRows(1, num_segments_ - 1).eval();
+            }
+            else
+            {
+                res.inner_points.resize(0, DIM);
+            }
+
+            return res;
+        }
+
+        /**
+         * @brief Propagates gradients with flexible output format.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param[out] gradByPoints   Output gradients for waypoints.
+         * @param[out] gradByTimes    Output gradients for segment durations.
+         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
+         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
+         */
+        void propagateGrad(const MatrixType &partialGradByCoeffs,
+                           const Eigen::VectorXd &partialGradByTimes,
+                           MatrixType &gradByPoints,
+                           Eigen::VectorXd &gradByTimes,
+                           bool includeEndpoints = false)
+        {
+            BoundaryStateGrads dummy_start, dummy_end;
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  gradByPoints, gradByTimes, dummy_start, dummy_end);
+
+            if (!includeEndpoints && num_segments_ > 1)
+            {
+                gradByPoints = gradByPoints.middleRows(1, num_segments_ - 1).eval();
+            }
+        }
+
+        /**
+         * @brief Propagates gradients including boundary velocity gradients.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param[out] gradByPoints   Output gradients for waypoints.
+         * @param[out] gradByTimes    Output gradients for segment durations.
+         * @param[out] gradStartVel   Output gradient for start velocity.
+         * @param[out] gradEndVel     Output gradient for end velocity.
+         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
+         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
@@ -843,15 +907,42 @@ namespace SplineTrajectory
                            VectorType &gradEndVel,
                            bool includeEndpoints = false)
         {
+            MatrixType all_points_grad;
+            BoundaryStateGrads start_g, end_g;
+
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  all_points_grad, gradByTimes, start_g, end_g);
+
+            gradStartVel = start_g.v;
+            gradEndVel = end_g.v;
+
+            if (!includeEndpoints && num_segments_ > 1)
+            {
+                gradByPoints = all_points_grad.middleRows(1, num_segments_ - 1).eval();
+            }
+            else
+            {
+                gradByPoints = all_points_grad;
+            }
+        }
+
+    private:
+        void propagateGradInternal(const MatrixType &partialGradByCoeffs,
+                                   const Eigen::VectorXd &partialGradByTimes,
+                                   MatrixType &fullPointsGrad,
+                                   Eigen::VectorXd &gradByTimes,
+                                   BoundaryStateGrads &startGrads,
+                                   BoundaryStateGrads &endGrads)
+        {
             const int n = num_segments_;
             const int dim = DIM;
 
             const MatrixType &M = internal_derivatives_;
 
-            gradByPoints = MatrixType::Zero(n + 1, dim);
+            fullPointsGrad = MatrixType::Zero(n + 1, dim);
             gradByTimes = partialGradByTimes;
-            gradStartVel = VectorType::Zero();
-            gradEndVel = VectorType::Zero();
+            startGrads = BoundaryStateGrads();
+            endGrads = BoundaryStateGrads();
 
             MatrixType gradM = MatrixType::Zero(n + 1, dim);
 
@@ -867,9 +958,9 @@ namespace SplineTrajectory
                 Eigen::Matrix<double, 1, dim> g_c2 = partialGradByCoeffs.row(i * 4 + 2);
                 Eigen::Matrix<double, 1, dim> g_c3 = partialGradByCoeffs.row(i * 4 + 3);
 
-                gradByPoints.row(i) += g_c0;
-                gradByPoints.row(i) -= g_c1 * h_inv;
-                gradByPoints.row(i + 1) += g_c1 * h_inv;
+                fullPointsGrad.row(i) += g_c0;
+                fullPointsGrad.row(i) -= g_c1 * h_inv;
+                fullPointsGrad.row(i + 1) += g_c1 * h_inv;
 
                 gradM.row(i) -= g_c1 * (h_i / 3.0);
                 gradM.row(i + 1) -= g_c1 * (h_i / 6.0);
@@ -897,8 +988,8 @@ namespace SplineTrajectory
                 VectorType common_term = lambda.row(k) - lambda.row(k + 1);
 
                 VectorType grad_R_P = 6.0 * tp.h_inv * common_term;
-                gradByPoints.row(k + 1) += grad_R_P;
-                gradByPoints.row(k) -= grad_R_P;
+                fullPointsGrad.row(k + 1) += grad_R_P;
+                fullPointsGrad.row(k) -= grad_R_P;
 
                 VectorType grad_R_h = -6.0 * dP * h2_inv;
                 gradByTimes(k) += common_term.dot(grad_R_h);
@@ -913,28 +1004,13 @@ namespace SplineTrajectory
                 gradByTimes(k) -= lambda.row(k + 1).dot(term_k1);
             }
 
-            gradStartVel = -6.0 * lambda.row(0).transpose();
-            gradEndVel = 6.0 * lambda.row(n).transpose();
+            startGrads.p = fullPointsGrad.row(0);
+            startGrads.v = -6.0 * lambda.row(0).transpose();
 
-            if (!includeEndpoints && n > 1)
-            {
-                gradByPoints = gradByPoints.middleRows(1, n - 1).eval();
-            }
+            endGrads.p = fullPointsGrad.row(n);
+            endGrads.v = 6.0 * lambda.row(n).transpose();
         }
 
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes,
-                                bool includeEndpoints = false)
-        {
-            Gradients result;
-            propagateGrad(partialGradByCoeffs, partialGradByTimes,
-                          result.points, result.times,
-                          result.grad_start_v, result.grad_end_v,
-                          includeEndpoints);
-            return result;
-        }
-
-    private:
         inline void updateSplineInternal()
         {
             num_segments_ = static_cast<int>(time_segments_.size());
@@ -1118,6 +1194,23 @@ namespace SplineTrajectory
         using RowVectorType = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+
+        struct BoundaryStateGrads
+        {
+            VectorType p;
+            VectorType v;
+            VectorType a;
+
+            BoundaryStateGrads() : p(VectorType::Zero()), v(VectorType::Zero()), a(VectorType::Zero()) {}
+        };
+
+        struct Gradients
+        {
+            MatrixType inner_points;
+            Eigen::VectorXd times;
+            BoundaryStateGrads start;
+            BoundaryStateGrads end;
+        };
 
     private:
         std::vector<double> time_segments_;
@@ -1403,46 +1496,117 @@ namespace SplineTrajectory
             return grad;
         }
 
-        struct Gradients
-        {
-            MatrixType points;
-            Eigen::VectorXd times;
-            Eigen::Matrix<double, 2, DIM> grad_start_va;
-            Eigen::Matrix<double, 2, DIM> grad_end_va;
-        };
-
         /**
-         * @brief Computes gradients w.r.t. waypoints and time segments using the Analytic Adjoint Method.
-         *
-         * Efficiently propagates gradients by reusing the cached matrix factorization ($O(N)$ complexity)
-         * instead of differentiating the linear system explicitly.
-         *
-         * **Mathematical Principle:**
-         * 1. **Explicit Chain Rule:** Propagate $\partial E/\partial \mathbf{c}$ to positions ($P$) and internal derivatives ($\mathbf{d} = v, a$).
-         * 2. **Adjoint Correction:** Solve $M^T \boldsymbol{\lambda} = \nabla_{\mathbf{d}} E$ to find Lagrange multipliers $\boldsymbol{\lambda}$ enforcing continuity.
-         * 3. **Implicit Time Gradient:** Account for continuity breakage due to time scaling by accumulating $\boldsymbol{\lambda} \cdot \dot{\mathbf{d}}$ (Jerk, Snap).
-         *
+         * @brief Propagates gradients and returns a Gradients structure.
          * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (6N x D).
          * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param[out] gradByPoints   Output gradients for waypoints (positions).
+         * @return Gradients Structure containing inner waypoint gradients, time gradients, and boundary gradients.
+         */
+        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+                                const Eigen::VectorXd &partialGradByTimes)
+        {
+            MatrixType all_points_grad;
+            Gradients res;
+
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  all_points_grad, res.times, res.start, res.end);
+
+            if (num_segments_ > 1)
+            {
+                res.inner_points = all_points_grad.middleRows(1, num_segments_ - 1).eval();
+            }
+            else
+            {
+                res.inner_points.resize(0, DIM);
+            }
+
+            return res;
+        }
+
+        /**
+         * @brief Propagates gradients with flexible output format.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param[out] gradByPoints   Output gradients for waypoints.
          * @param[out] gradByTimes    Output gradients for segment durations.
-         * @param includeEndpoints    If true, includes gradients for start and end points.
+         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
+         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
                            Eigen::VectorXd &gradByTimes,
-                           Eigen::Matrix<double, 2, DIM> &gradStart,
-                           Eigen::Matrix<double, 2, DIM> &gradEnd,
                            bool includeEndpoints = false)
+        {
+            BoundaryStateGrads dummy_start, dummy_end;
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  gradByPoints, gradByTimes, dummy_start, dummy_end);
+
+            if (!includeEndpoints && num_segments_ > 1)
+            {
+                gradByPoints = gradByPoints.middleRows(1, num_segments_ - 1).eval();
+            }
+        }
+
+        /**
+         * @brief Propagates gradients including boundary velocity and acceleration gradients.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param[out] gradByPoints   Output gradients for waypoints.
+         * @param[out] gradByTimes    Output gradients for segment durations.
+         * @param[out] gradStartVel   Output gradient for start velocity.
+         * @param[out] gradStartAcc   Output gradient for start acceleration.
+         * @param[out] gradEndVel     Output gradient for end velocity.
+         * @param[out] gradEndAcc     Output gradient for end acceleration.
+         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
+         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
+         */
+        void propagateGrad(const MatrixType &partialGradByCoeffs,
+                           const Eigen::VectorXd &partialGradByTimes,
+                           MatrixType &gradByPoints,
+                           Eigen::VectorXd &gradByTimes,
+                           VectorType &gradStartVel,
+                           VectorType &gradStartAcc,
+                           VectorType &gradEndVel,
+                           VectorType &gradEndAcc,
+                           bool includeEndpoints = false)
+        {
+            MatrixType all_points_grad;
+            BoundaryStateGrads start_g, end_g;
+
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  all_points_grad, gradByTimes, start_g, end_g);
+
+            gradStartVel = start_g.v;
+            gradStartAcc = start_g.a;
+            gradEndVel = end_g.v;
+            gradEndAcc = end_g.a;
+
+            if (!includeEndpoints && num_segments_ > 1)
+            {
+                gradByPoints = all_points_grad.middleRows(1, num_segments_ - 1).eval();
+            }
+            else
+            {
+                gradByPoints = all_points_grad;
+            }
+        }
+
+    private:
+        void propagateGradInternal(const MatrixType &partialGradByCoeffs,
+                                   const Eigen::VectorXd &partialGradByTimes,
+                                   MatrixType &fullPointsGrad,
+                                   Eigen::VectorXd &gradByTimes,
+                                   BoundaryStateGrads &startGrads,
+                                   BoundaryStateGrads &endGrads)
         {
             const int n = num_segments_;
             const int n_pts = static_cast<int>(spatial_points_.size());
 
-            gradByPoints = MatrixType::Zero(n_pts, DIM);
+            fullPointsGrad = MatrixType::Zero(n_pts, DIM);
             gradByTimes = partialGradByTimes;
-            gradStart.setZero();
-            gradEnd.setZero();
+            startGrads = BoundaryStateGrads();
+            endGrads = BoundaryStateGrads();
 
             Eigen::Matrix<double, Eigen::Dynamic, 2 * DIM, Eigen::RowMajor> gd_internal;
             gd_internal.resize(n_pts, 2 * DIM);
@@ -1466,15 +1630,15 @@ namespace SplineTrajectory
                 const RowVectorType &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
                 const RowVectorType &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
 
-                gradByPoints.row(i) += gc0;
+                fullPointsGrad.row(i) += gc0;
 
                 double k_P3 = 10.0 * tp.h3_inv;
                 double k_P4 = -15.0 * tp.h4_inv;
                 double k_P5 = 6.0 * tp.h5_inv;
 
                 RowVectorType sum_grad_P = gc3 * k_P3 + gc4 * k_P4 + gc5 * k_P5;
-                gradByPoints.row(i + 1) += sum_grad_P;
-                gradByPoints.row(i) -= sum_grad_P;
+                fullPointsGrad.row(i + 1) += sum_grad_P;
+                fullPointsGrad.row(i) -= sum_grad_P;
 
                 RowVectorType grad_v_curr = gc1;
                 grad_v_curr += gc3 * (-6.0 * tp.h2_inv);
@@ -1521,11 +1685,13 @@ namespace SplineTrajectory
                 gradByTimes(i) += gc3.dot(dc3_dh) + gc4.dot(dc4_dh) + gc5.dot(dc5_dh);
             }
 
-            gradStart.row(0) = gd_internal.row(0).segment(0, DIM);
-            gradStart.row(1) = gd_internal.row(0).segment(DIM, DIM);
+            Eigen::Matrix<double, 2, DIM> raw_start_grad;
+            raw_start_grad.row(0) = gd_internal.row(0).segment(0, DIM);
+            raw_start_grad.row(1) = gd_internal.row(0).segment(DIM, DIM);
 
-            gradEnd.row(0) = gd_internal.row(n).segment(0, DIM);
-            gradEnd.row(1) = gd_internal.row(n).segment(DIM, DIM);
+            Eigen::Matrix<double, 2, DIM> raw_end_grad;
+            raw_end_grad.row(0) = gd_internal.row(n).segment(0, DIM);
+            raw_end_grad.row(1) = gd_internal.row(n).segment(DIM, DIM);
 
             const int num_blocks = n - 1;
             if (num_blocks > 0)
@@ -1597,47 +1763,28 @@ namespace SplineTrajectory
                     RowVectorType grad_P_curr = lam_snap * dr4_dp_curr + lam_jerk * dr3_dp_curr;
                     RowVectorType grad_P_prev = lam_snap * dr4_dp_prev + lam_jerk * dr3_dp_prev;
 
-                    gradByPoints.row(i + 2) += grad_P_next;
-                    gradByPoints.row(i + 1) += grad_P_curr;
-                    gradByPoints.row(i) += grad_P_prev;
+                    fullPointsGrad.row(i + 2) += grad_P_next;
+                    fullPointsGrad.row(i + 1) += grad_P_curr;
+                    fullPointsGrad.row(i) += grad_P_prev;
                 }
 
                 Eigen::Matrix<double, 2, DIM> correction_start;
                 Multiply2x2T_2xN(L_blocks_cache_[0], lambda[0], correction_start);
-                gradStart -= correction_start;
+                raw_start_grad -= correction_start;
 
                 Eigen::Matrix<double, 2, DIM> correction_end;
                 Multiply2x2T_2xN(U_blocks_cache_[num_blocks - 1], lambda.back(), correction_end);
-                gradEnd -= correction_end;
+                raw_end_grad -= correction_end;
             }
 
-            if (!includeEndpoints && n > 1)
-            {
-                gradByPoints = gradByPoints.middleRows(1, n - 1).eval();
-            }
-        }
+            startGrads.p = fullPointsGrad.row(0);
+            startGrads.v = raw_start_grad.row(0);
+            startGrads.a = raw_start_grad.row(1);
 
-        /**
-         * @brief Convenience wrapper for the Analytic Adjoint Method returning a Gradients structure.
-         *
-         * Wraps the in-place implementation to return point and time gradients in a single structure.
-         * Uses the same $O(N)$ cached matrix factorization strategy to avoid explicit differentiation.
-         *
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (6N x D).
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param includeEndpoints    If true, includes gradients for start and end points.
-         * @return Gradients Structure containing gradients for waypoints (positions) and times.
-         */
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes,
-                                bool includeEndpoints = false)
-        {
-            Gradients result;
-            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, result.grad_start_va, result.grad_end_va, includeEndpoints);
-            return result;
+            endGrads.p = fullPointsGrad.row(n);
+            endGrads.v = raw_end_grad.row(0);
+            endGrads.a = raw_end_grad.row(1);
         }
-
-    private:
         void convertTimePointsToSegments(const std::vector<double> &t_points)
         {
             start_time_ = t_points.front();
@@ -1885,6 +2032,25 @@ namespace SplineTrajectory
         using RowVectorType = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+
+        struct BoundaryStateGrads
+        {
+            VectorType p;
+            VectorType v;
+            VectorType a;
+            VectorType j;
+
+            BoundaryStateGrads() : p(VectorType::Zero()), v(VectorType::Zero()),
+                                   a(VectorType::Zero()), j(VectorType::Zero()) {}
+        };
+
+        struct Gradients
+        {
+            MatrixType inner_points;
+            Eigen::VectorXd times;
+            BoundaryStateGrads start;
+            BoundaryStateGrads end;
+        };
 
     private:
         std::vector<double> time_segments_;
@@ -2200,37 +2366,122 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Computes gradients w.r.t. waypoints and time segments using the Analytic Adjoint Method.
-         *
-         * Efficiently propagates gradients by reusing the cached matrix factorization ($O(N)$ complexity)
-         * instead of differentiating the linear system explicitly.
-         *
-         * **Mathematical Principle:**
-         * 1. **Explicit Chain Rule:** Propagate $\partial E/\partial \mathbf{c}$ to positions ($P$) and internal derivatives ($\mathbf{d} = v, a, j$).
-         * 2. **Adjoint Correction:** Solve $M^T \boldsymbol{\lambda} = \nabla_{\mathbf{d}} E$ to find Lagrange multipliers $\boldsymbol{\lambda}$ enforcing continuity.
-         * 3. **Implicit Time Gradient:** Account for continuity breakage due to time scaling by accumulating $\boldsymbol{\lambda} \cdot \dot{\mathbf{d}}$ (Snap, Crackle, Pop).
-         *
+         * @brief Propagates gradients and returns a Gradients structure.
          * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (8N x D).
          * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param[out] gradByPoints   Output gradients for waypoints (positions).
+         * @return Gradients Structure containing inner waypoint gradients, time gradients, and boundary gradients.
+         */
+        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+                                const Eigen::VectorXd &partialGradByTimes)
+        {
+            MatrixType all_points_grad;
+            Gradients res;
+
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  all_points_grad, res.times, res.start, res.end);
+
+            if (num_segments_ > 1)
+            {
+                res.inner_points = all_points_grad.middleRows(1, num_segments_ - 1).eval();
+            }
+            else
+            {
+                res.inner_points.resize(0, DIM);
+            }
+
+            return res;
+        }
+
+        /**
+         * @brief Propagates gradients with flexible output format.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param[out] gradByPoints   Output gradients for waypoints.
          * @param[out] gradByTimes    Output gradients for segment durations.
-         * @param includeEndpoints    If true, includes gradients for start and end points.
+         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
+         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
          */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            MatrixType &gradByPoints,
                            Eigen::VectorXd &gradByTimes,
-                           Eigen::Matrix<double, 3, DIM> &gradStart,
-                           Eigen::Matrix<double, 3, DIM> &gradEnd,
                            bool includeEndpoints = false)
+        {
+            BoundaryStateGrads dummy_start, dummy_end;
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  gradByPoints, gradByTimes, dummy_start, dummy_end);
+
+            if (!includeEndpoints && num_segments_ > 1)
+            {
+                gradByPoints = gradByPoints.middleRows(1, num_segments_ - 1).eval();
+            }
+        }
+
+        /**
+         * @brief Propagates gradients including boundary velocity, acceleration, and jerk gradients.
+         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients.
+         * @param partialGradByTimes  Input gradient w.r.t segment durations.
+         * @param[out] gradByPoints   Output gradients for waypoints.
+         * @param[out] gradByTimes    Output gradients for segment durations.
+         * @param[out] gradStartVel   Output gradient for start velocity.
+         * @param[out] gradStartAcc   Output gradient for start acceleration.
+         * @param[out] gradStartJerk  Output gradient for start jerk.
+         * @param[out] gradEndVel     Output gradient for end velocity.
+         * @param[out] gradEndAcc     Output gradient for end acceleration.
+         * @param[out] gradEndJerk    Output gradient for end jerk.
+         * @param includeEndpoints    If true, gradByPoints includes all points [P0, ..., PN].
+         *                            If false, gradByPoints only includes inner points [P1, ..., P_{N-1}].
+         */
+        void propagateGrad(const MatrixType &partialGradByCoeffs,
+                           const Eigen::VectorXd &partialGradByTimes,
+                           MatrixType &gradByPoints,
+                           Eigen::VectorXd &gradByTimes,
+                           VectorType &gradStartVel,
+                           VectorType &gradStartAcc,
+                           VectorType &gradStartJerk,
+                           VectorType &gradEndVel,
+                           VectorType &gradEndAcc,
+                           VectorType &gradEndJerk,
+                           bool includeEndpoints = false)
+        {
+            MatrixType all_points_grad;
+            BoundaryStateGrads start_g, end_g;
+
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  all_points_grad, gradByTimes, start_g, end_g);
+
+            gradStartVel = start_g.v;
+            gradStartAcc = start_g.a;
+            gradStartJerk = start_g.j;
+            gradEndVel = end_g.v;
+            gradEndAcc = end_g.a;
+            gradEndJerk = end_g.j;
+
+            if (!includeEndpoints && num_segments_ > 1)
+            {
+                gradByPoints = all_points_grad.middleRows(1, num_segments_ - 1).eval();
+            }
+            else
+            {
+                gradByPoints = all_points_grad;
+            }
+        }
+
+    private:
+        void propagateGradInternal(const MatrixType &partialGradByCoeffs,
+                                   const Eigen::VectorXd &partialGradByTimes,
+                                   MatrixType &fullPointsGrad,
+                                   Eigen::VectorXd &gradByTimes,
+                                   BoundaryStateGrads &startGrads,
+                                   BoundaryStateGrads &endGrads)
         {
             const int n = num_segments_;
             const int n_pts = static_cast<int>(spatial_points_.size());
 
-            gradByPoints = MatrixType::Zero(n_pts, DIM);
+            fullPointsGrad = MatrixType::Zero(n_pts, DIM);
             gradByTimes = partialGradByTimes;
-            gradStart.setZero();
-            gradEnd.setZero();
+            startGrads = BoundaryStateGrads();
+            endGrads = BoundaryStateGrads();
 
             Eigen::Matrix<double, Eigen::Dynamic, 3 * DIM, Eigen::RowMajor> gd_internal;
             gd_internal.resize(n_pts, 3 * DIM);
@@ -2257,7 +2508,7 @@ namespace SplineTrajectory
                 const RowVectorType &gc6 = partialGradByCoeffs.row(coeff_idx + 6);
                 const RowVectorType &gc7 = partialGradByCoeffs.row(coeff_idx + 7);
 
-                gradByPoints.row(i) += gc0;
+                fullPointsGrad.row(i) += gc0;
 
                 double k_P4 = -(210.0 * tp.h4_inv) / 6.0;
                 double k_P5 = (168.0 * tp.h5_inv) / 2.0;
@@ -2265,8 +2516,8 @@ namespace SplineTrajectory
                 double k_P7 = (120.0 * tp.h7_inv) / 6.0;
 
                 RowVectorType sum_grad_P = gc4 * k_P4 + gc5 * k_P5 + gc6 * k_P6 + gc7 * k_P7;
-                gradByPoints.row(i) += sum_grad_P;
-                gradByPoints.row(i + 1) -= sum_grad_P;
+                fullPointsGrad.row(i) += sum_grad_P;
+                fullPointsGrad.row(i + 1) -= sum_grad_P;
 
                 add_grad_d(i, gc1, 0.5 * gc2, (1.0 / 6.0) * gc3);
 
@@ -2344,13 +2595,15 @@ namespace SplineTrajectory
                 }
             }
 
-            gradStart.row(0) = gd_internal.row(0).segment(0, DIM);
-            gradStart.row(1) = gd_internal.row(0).segment(DIM, DIM);
-            gradStart.row(2) = gd_internal.row(0).segment(2 * DIM, DIM);
+            Eigen::Matrix<double, 3, DIM> raw_start_grad;
+            raw_start_grad.row(0) = gd_internal.row(0).segment(0, DIM);
+            raw_start_grad.row(1) = gd_internal.row(0).segment(DIM, DIM);
+            raw_start_grad.row(2) = gd_internal.row(0).segment(2 * DIM, DIM);
 
-            gradEnd.row(0) = gd_internal.row(n).segment(0, DIM);
-            gradEnd.row(1) = gd_internal.row(n).segment(DIM, DIM);
-            gradEnd.row(2) = gd_internal.row(n).segment(2 * DIM, DIM);
+            Eigen::Matrix<double, 3, DIM> raw_end_grad;
+            raw_end_grad.row(0) = gd_internal.row(n).segment(0, DIM);
+            raw_end_grad.row(1) = gd_internal.row(n).segment(DIM, DIM);
+            raw_end_grad.row(2) = gd_internal.row(n).segment(2 * DIM, DIM);
 
             const int num_blocks = n - 1;
             if (num_blocks > 0)
@@ -2420,65 +2673,40 @@ namespace SplineTrajectory
                     double dr4_dp_next = -10080.0 * tp_R.h5_inv;
                     double dr5_dp_next = 50400.0 * tp_R.h6_inv;
                     RowVectorType grad_P_next = lam_snap * dr3_dp_next + lam_crackle * dr4_dp_next + lam_pop * dr5_dp_next;
-                    gradByPoints.row(i + 2) += grad_P_next;
+                    fullPointsGrad.row(i + 2) += grad_P_next;
 
                     double dr3_dp_curr = -840.0 * (tp_R.h4_inv - tp_L.h4_inv);
                     double dr4_dp_curr = 10080.0 * (tp_R.h5_inv + tp_L.h5_inv);
                     double dr5_dp_curr = -50400.0 * (tp_R.h6_inv - tp_L.h6_inv);
                     RowVectorType grad_P_curr = lam_snap * dr3_dp_curr + lam_crackle * dr4_dp_curr + lam_pop * dr5_dp_curr;
-                    gradByPoints.row(i + 1) += grad_P_curr;
+                    fullPointsGrad.row(i + 1) += grad_P_curr;
 
                     double dr3_dp_prev = -840.0 * tp_L.h4_inv;
                     double dr4_dp_prev = -10080.0 * tp_L.h5_inv;
                     double dr5_dp_prev = -50400.0 * tp_L.h6_inv;
                     RowVectorType grad_P_prev = lam_snap * dr3_dp_prev + lam_crackle * dr4_dp_prev + lam_pop * dr5_dp_prev;
-                    gradByPoints.row(i) += grad_P_prev;
+                    fullPointsGrad.row(i) += grad_P_prev;
                 }
 
                 Eigen::Matrix<double, 3, DIM> correction_start;
                 Multiply3x3T_3xN(L_blocks_cache_[0], lambda[0], correction_start);
-                gradStart -= correction_start;
+                raw_start_grad -= correction_start;
 
                 Eigen::Matrix<double, 3, DIM> correction_end;
                 Multiply3x3T_3xN(U_blocks_cache_[num_blocks - 1], lambda.back(), correction_end);
-                gradEnd -= correction_end;
+                raw_end_grad -= correction_end;
             }
 
-            if (!includeEndpoints && n > 1)
-            {
-                gradByPoints = gradByPoints.middleRows(1, n - 1).eval();
-            }
+            startGrads.p = fullPointsGrad.row(0);
+            startGrads.v = raw_start_grad.row(0);
+            startGrads.a = raw_start_grad.row(1);
+            startGrads.j = raw_start_grad.row(2);
+
+            endGrads.p = fullPointsGrad.row(n);
+            endGrads.v = raw_end_grad.row(0);
+            endGrads.a = raw_end_grad.row(1);
+            endGrads.j = raw_end_grad.row(2);
         }
-
-        struct Gradients
-        {
-            MatrixType points;
-            Eigen::VectorXd times;
-            Eigen::Matrix<double, 3, DIM> grad_start_vaj;
-            Eigen::Matrix<double, 3, DIM> grad_end_vaj;
-        };
-
-        /**
-         * @brief Convenience wrapper for the Analytic Adjoint Method returning a Gradients structure.
-         *
-         * Wraps the in-place implementation to return point and time gradients in a single structure.
-         * Uses the same $O(N)$ cached matrix factorization strategy to avoid explicit differentiation.
-         *
-         * @param partialGradByCoeffs Input gradient w.r.t polynomial coefficients (8N x D).
-         * @param partialGradByTimes  Input gradient w.r.t segment durations.
-         * @param includeEndpoints    If true, includes gradients for start and end points.
-         * @return Gradients Structure containing gradients for waypoints (positions) and times.
-         */
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes,
-                                bool includeEndpoints = false)
-        {
-            Gradients result;
-            propagateGrad(partialGradByCoeffs, partialGradByTimes, result.points, result.times, result.grad_start_vaj, result.grad_end_vaj, includeEndpoints);
-            return result;
-        }
-
-    private:
         void convertTimePointsToSegments(const std::vector<double> &t_points)
         {
             start_time_ = t_points.front();

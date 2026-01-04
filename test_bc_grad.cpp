@@ -34,7 +34,7 @@ void testCubicGradients() {
     Eigen::VectorXd gdT;
     spline.getEnergyPartialGradByTimes(gdT); 
 
-    auto grads = spline.propagateGrad(gdC, gdT, true); 
+    auto grads = spline.propagateGrad(gdC, gdT);
 
     double eps = 1e-6;
 
@@ -68,11 +68,11 @@ void testCubicGradients() {
     };
 
     for (int d = 0; d < DIM; ++d) {
-        verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.grad_start_v(d), bc.start_velocity(d));
+        verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc.start_velocity(d));
     }
 
     for (int d = 0; d < DIM; ++d) {
-        verify_boundary("End Vel [" + std::to_string(d) + "]", grads.grad_end_v(d), bc.end_velocity(d));
+        verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc.end_velocity(d));
     }
 }
 
@@ -101,7 +101,7 @@ void testQuinticGradients() {
     Eigen::VectorXd gdT;
     spline.getEnergyPartialGradByTimes(gdT); 
 
-    auto grads = spline.propagateGrad(gdC, gdT, true); 
+    auto grads = spline.propagateGrad(gdC, gdT);
 
     double eps = 1e-6;
 
@@ -134,13 +134,13 @@ void testQuinticGradients() {
     };
 
     for (int d = 0; d < DIM; ++d) {
-        verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.grad_start_va(0, d), bc.start_velocity(d));
-        verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.grad_start_va(1, d), bc.start_acceleration(d));
+        verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc.start_velocity(d));
+        verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.start.a(d), bc.start_acceleration(d));
     }
 
     for (int d = 0; d < DIM; ++d) {
-        verify_boundary("End Vel [" + std::to_string(d) + "]", grads.grad_end_va(0, d), bc.end_velocity(d));
-        verify_boundary("End Acc [" + std::to_string(d) + "]", grads.grad_end_va(1, d), bc.end_acceleration(d));
+        verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc.end_velocity(d));
+        verify_boundary("End Acc [" + std::to_string(d) + "]", grads.end.a(d), bc.end_acceleration(d));
     }
 }
 
@@ -172,7 +172,7 @@ void testSepticGradients() {
     Eigen::VectorXd gdT;
     spline.getEnergyPartialGradByTimes(gdT);
 
-    auto grads = spline.propagateGrad(gdC, gdT, true); 
+    auto grads = spline.propagateGrad(gdC, gdT);
 
     double eps = 1e-6;
 
@@ -189,7 +189,7 @@ void testSepticGradients() {
         double num_grad = (cost_p - cost_m) / (2.0 * eps);
 
         target_val_ref = original;
-        spline.update(times, points,0.0, bc);
+        spline.update(times, points, 0.0, bc);
 
         double err = relativeError(analytical_val, num_grad);
         std::cout << std::left << std::setw(25) << name 
@@ -200,13 +200,13 @@ void testSepticGradients() {
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
 
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.grad_start_vaj(0, d), bc.start_velocity(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.grad_start_vaj(1, d), bc.start_acceleration(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Jerk [" + std::to_string(d) + "]", grads.grad_start_vaj(2, d), bc.start_jerk(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc.start_velocity(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.start.a(d), bc.start_acceleration(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Jerk [" + std::to_string(d) + "]", grads.start.j(d), bc.start_jerk(d));
 
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Vel [" + std::to_string(d) + "]", grads.grad_end_vaj(0, d), bc.end_velocity(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Acc [" + std::to_string(d) + "]", grads.grad_end_vaj(1, d), bc.end_acceleration(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Jerk [" + std::to_string(d) + "]", grads.grad_end_vaj(2, d), bc.end_jerk(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc.end_velocity(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Acc [" + std::to_string(d) + "]", grads.end.a(d), bc.end_acceleration(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Jerk [" + std::to_string(d) + "]", grads.end.j(d), bc.end_jerk(d));
 }
 
 int main() {
