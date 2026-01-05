@@ -614,6 +614,7 @@ namespace SplineTrajectory
         MatrixType internal_derivatives_;
         Eigen::VectorXd cached_c_prime_;
         Eigen::VectorXd cached_inv_denoms_;
+        MatrixType ws_lambda_;
 
         struct TimePowers
         {
@@ -895,7 +896,8 @@ namespace SplineTrajectory
             startGrads = BoundaryStateGrads();
             endGrads = BoundaryStateGrads();
 
-            MatrixType gradM = MatrixType::Zero(n + 1, dim);
+            ws_lambda_.resize(n + 1, dim);
+            ws_lambda_.setZero();
 
             for (int i = 0; i < n; ++i)
             {
@@ -913,11 +915,11 @@ namespace SplineTrajectory
                 fullPointsGrad.row(i) -= g_c1 * h_inv;
                 fullPointsGrad.row(i + 1) += g_c1 * h_inv;
 
-                gradM.row(i) -= g_c1 * (h_i / 3.0);
-                gradM.row(i + 1) -= g_c1 * (h_i / 6.0);
-                gradM.row(i) += g_c2 * 0.5;
-                gradM.row(i) -= g_c3 * (h_inv / 6.0);
-                gradM.row(i + 1) += g_c3 * (h_inv / 6.0);
+                ws_lambda_.row(i) -= g_c1 * (h_i / 3.0);
+                ws_lambda_.row(i + 1) -= g_c1 * (h_i / 6.0);
+                ws_lambda_.row(i) += g_c2 * 0.5;
+                ws_lambda_.row(i) -= g_c3 * (h_inv / 6.0);
+                ws_lambda_.row(i + 1) += g_c3 * (h_inv / 6.0);
 
                 VectorType dP = spatial_points_[i + 1] - spatial_points_[i];
                 VectorType term_dC1_dh = -dP * h2_inv - (2.0 * M.row(i) + M.row(i + 1)).transpose() / 6.0;
@@ -926,9 +928,7 @@ namespace SplineTrajectory
                 gradByTimes(i) += g_c1.dot(term_dC1_dh) + g_c3.dot(term_dC3_dh);
             }
 
-            MatrixType lambda(n + 1, dim);
-            lambda = gradM;
-            solveWithCachedLU(lambda);
+            solveWithCachedLU(ws_lambda_);
 
             for (int k = 0; k < n; ++k)
             {
@@ -936,7 +936,7 @@ namespace SplineTrajectory
                 double h2_inv = tp.h2_inv;
                 VectorType dP = spatial_points_[k + 1] - spatial_points_[k];
 
-                VectorType common_term = lambda.row(k) - lambda.row(k + 1);
+                VectorType common_term = ws_lambda_.row(k) - ws_lambda_.row(k + 1);
 
                 VectorType grad_R_P = 6.0 * tp.h_inv * common_term;
                 fullPointsGrad.row(k + 1) += grad_R_P;
@@ -951,15 +951,15 @@ namespace SplineTrajectory
                 VectorType term_k = 2.0 * M_k + M_k1;
                 VectorType term_k1 = M_k + 2.0 * M_k1;
 
-                gradByTimes(k) -= lambda.row(k).dot(term_k);
-                gradByTimes(k) -= lambda.row(k + 1).dot(term_k1);
+                gradByTimes(k) -= ws_lambda_.row(k).dot(term_k);
+                gradByTimes(k) -= ws_lambda_.row(k + 1).dot(term_k1);
             }
 
             startGrads.p = fullPointsGrad.row(0);
-            startGrads.v = -6.0 * lambda.row(0).transpose();
+            startGrads.v = -6.0 * ws_lambda_.row(0).transpose();
 
             endGrads.p = fullPointsGrad.row(n);
-            endGrads.v = 6.0 * lambda.row(n).transpose();
+            endGrads.v = 6.0 * ws_lambda_.row(n).transpose();
         }
 
         inline void updateSplineInternal()
@@ -1195,10 +1195,9 @@ namespace SplineTrajectory
         };
 
         std::vector<TimePowers> time_powers_;
-        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_d_rhs_mod_;
-        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_current_lambda_;
         std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_rhs_mod_;
         std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_solution_;
+        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_lambda_;
 
     private:
         void updateSplineInternal()
@@ -1595,38 +1594,38 @@ namespace SplineTrajectory
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
-                std::vector<Eigen::Matrix<double, 2, DIM>> lambda(num_blocks);
+                ws_lambda_.resize(num_blocks);
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    lambda[i].row(0) = gd_internal.row(i + 1).segment(0, DIM);
-                    lambda[i].row(1) = gd_internal.row(i + 1).segment(DIM, DIM);
+                    ws_lambda_[i].row(0) = gd_internal.row(i + 1).segment(0, DIM);
+                    ws_lambda_[i].row(1) = gd_internal.row(i + 1).segment(DIM, DIM);
                 }
 
                 {
-                    Eigen::Matrix<double, 2, DIM> tmp = lambda[0];
-                    Multiply2x2T_2xN(D_inv_cache_[0], tmp, lambda[0]);
+                    Eigen::Matrix<double, 2, DIM> tmp = ws_lambda_[0];
+                    Multiply2x2T_2xN(D_inv_cache_[0], tmp, ws_lambda_[0]);
                 }
 
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
                     Eigen::Matrix<double, 2, DIM> update_term;
-                    Multiply2x2T_2xN(U_blocks_cache_[i], lambda[i], update_term);
-                    lambda[i + 1] -= update_term;
+                    Multiply2x2T_2xN(U_blocks_cache_[i], ws_lambda_[i], update_term);
+                    ws_lambda_[i + 1] -= update_term;
 
-                    Eigen::Matrix<double, 2, DIM> tmp = lambda[i + 1];
-                    Multiply2x2T_2xN(D_inv_cache_[i + 1], tmp, lambda[i + 1]);
+                    Eigen::Matrix<double, 2, DIM> tmp = ws_lambda_[i + 1];
+                    Multiply2x2T_2xN(D_inv_cache_[i + 1], tmp, ws_lambda_[i + 1]);
                 }
 
                 for (int i = num_blocks - 2; i >= 0; --i)
                 {
                     Eigen::Matrix<double, 2, DIM> update_term;
-                    Multiply2x2T_2xN(L_blocks_cache_[i + 1], lambda[i + 1], update_term);
+                    Multiply2x2T_2xN(L_blocks_cache_[i + 1], ws_lambda_[i + 1], update_term);
 
                     Eigen::Matrix<double, 2, DIM> scaled_update;
                     Multiply2x2T_2xN(D_inv_cache_[i], update_term, scaled_update);
 
-                    lambda[i] -= scaled_update;
+                    ws_lambda_[i] -= scaled_update;
                 }
 
                 for (int i = 0; i < num_blocks; ++i)
@@ -1641,8 +1640,8 @@ namespace SplineTrajectory
                     const RowVectorType Snap_at_T = 24.0 * c4 + 120.0 * c5 * T;
                     const RowVectorType Crackle_at_T = 120.0 * c5;
 
-                    const RowVectorType &lam_snap = lambda[i].row(0);
-                    const RowVectorType &lam_jerk = lambda[i].row(1);
+                    const RowVectorType &lam_snap = ws_lambda_[i].row(0);
+                    const RowVectorType &lam_jerk = ws_lambda_[i].row(1);
 
                     gradByTimes(seg_idx) += (lam_snap.dot(Crackle_at_T) + lam_jerk.dot(Snap_at_T));
 
@@ -1668,11 +1667,11 @@ namespace SplineTrajectory
                 }
 
                 Eigen::Matrix<double, 2, DIM> correction_start;
-                Multiply2x2T_2xN(L_blocks_cache_[0], lambda[0], correction_start);
+                Multiply2x2T_2xN(L_blocks_cache_[0], ws_lambda_[0], correction_start);
                 raw_start_grad -= correction_start;
 
                 Eigen::Matrix<double, 2, DIM> correction_end;
-                Multiply2x2T_2xN(U_blocks_cache_[num_blocks - 1], lambda.back(), correction_end);
+                Multiply2x2T_2xN(U_blocks_cache_[num_blocks - 1], ws_lambda_.back(), correction_end);
                 raw_end_grad -= correction_end;
             }
 
@@ -1984,9 +1983,8 @@ namespace SplineTrajectory
         std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> L_blocks_cache_;
 
         std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_rhs_mod_;
-        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_d_rhs_mod_;
-        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_current_lambda_;
         std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_solution_;
+        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_lambda_;
 
         MatrixType internal_vel_;
         MatrixType internal_acc_;
@@ -2448,38 +2446,38 @@ namespace SplineTrajectory
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
-                std::vector<Eigen::Matrix<double, 3, DIM>> lambda(num_blocks);
+                ws_lambda_.resize(num_blocks);
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    lambda[i].row(0) = gd_internal.row(i + 1).segment(0, DIM);
-                    lambda[i].row(1) = gd_internal.row(i + 1).segment(DIM, DIM);
-                    lambda[i].row(2) = gd_internal.row(i + 1).segment(2 * DIM, DIM);
+                    ws_lambda_[i].row(0) = gd_internal.row(i + 1).segment(0, DIM);
+                    ws_lambda_[i].row(1) = gd_internal.row(i + 1).segment(DIM, DIM);
+                    ws_lambda_[i].row(2) = gd_internal.row(i + 1).segment(2 * DIM, DIM);
                 }
 
                 {
-                    Eigen::Matrix<double, 3, DIM> tmp = lambda[0];
-                    Multiply3x3T_3xN(D_inv_cache_[0], tmp, lambda[0]);
+                    Eigen::Matrix<double, 3, DIM> tmp = ws_lambda_[0];
+                    Multiply3x3T_3xN(D_inv_cache_[0], tmp, ws_lambda_[0]);
                 }
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
                     Eigen::Matrix<double, 3, DIM> update_term;
-                    Multiply3x3T_3xN(U_blocks_cache_[i], lambda[i], update_term);
-                    lambda[i + 1] -= update_term;
+                    Multiply3x3T_3xN(U_blocks_cache_[i], ws_lambda_[i], update_term);
+                    ws_lambda_[i + 1] -= update_term;
 
-                    Eigen::Matrix<double, 3, DIM> tmp = lambda[i + 1];
-                    Multiply3x3T_3xN(D_inv_cache_[i + 1], tmp, lambda[i + 1]);
+                    Eigen::Matrix<double, 3, DIM> tmp = ws_lambda_[i + 1];
+                    Multiply3x3T_3xN(D_inv_cache_[i + 1], tmp, ws_lambda_[i + 1]);
                 }
 
                 for (int i = num_blocks - 2; i >= 0; --i)
                 {
                     Eigen::Matrix<double, 3, DIM> update_term;
-                    Multiply3x3T_3xN(L_blocks_cache_[i + 1], lambda[i + 1], update_term);
+                    Multiply3x3T_3xN(L_blocks_cache_[i + 1], ws_lambda_[i + 1], update_term);
 
                     Eigen::Matrix<double, 3, DIM> scaled_update;
                     Multiply3x3T_3xN(D_inv_cache_[i], update_term, scaled_update);
 
-                    lambda[i] -= scaled_update;
+                    ws_lambda_[i] -= scaled_update;
                 }
 
                 for (int i = 0; i < num_blocks; ++i)
@@ -2497,9 +2495,9 @@ namespace SplineTrajectory
                     RowVectorType dCrackle_dT = 720.0 * c6 + 5040.0 * c7 * T;
                     RowVectorType dPop_dT = 5040.0 * c7;
 
-                    const RowVectorType &lam_snap = lambda[i].row(0);
-                    const RowVectorType &lam_crackle = lambda[i].row(1);
-                    const RowVectorType &lam_pop = lambda[i].row(2);
+                    const RowVectorType &lam_snap = ws_lambda_[i].row(0);
+                    const RowVectorType &lam_crackle = ws_lambda_[i].row(1);
+                    const RowVectorType &lam_pop = ws_lambda_[i].row(2);
 
                     gradByTimes(seg_idx) += (lam_snap.dot(dSnap_dT) +
                                              lam_crackle.dot(dCrackle_dT) +
@@ -2529,11 +2527,11 @@ namespace SplineTrajectory
                 }
 
                 Eigen::Matrix<double, 3, DIM> correction_start;
-                Multiply3x3T_3xN(L_blocks_cache_[0], lambda[0], correction_start);
+                Multiply3x3T_3xN(L_blocks_cache_[0], ws_lambda_[0], correction_start);
                 raw_start_grad -= correction_start;
 
                 Eigen::Matrix<double, 3, DIM> correction_end;
-                Multiply3x3T_3xN(U_blocks_cache_[num_blocks - 1], lambda.back(), correction_end);
+                Multiply3x3T_3xN(U_blocks_cache_[num_blocks - 1], ws_lambda_.back(), correction_end);
                 raw_end_grad -= correction_end;
             }
 
