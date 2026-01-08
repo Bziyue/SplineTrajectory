@@ -1167,7 +1167,7 @@ namespace SplineTrajectory
         std::vector<double> cumulative_times_;
         double start_time_{0.0};
 
-        SplineVector<VectorType> spatial_points_;
+        MatrixType spatial_points_;  
 
         BoundaryConditions<DIM> boundary_;
 
@@ -1219,9 +1219,12 @@ namespace SplineTrajectory
         QuinticSplineND(const std::vector<double> &t_points,
                         const SplineVector<VectorType> &spatial_points,
                         const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points),
-              boundary_(boundary)
+            : boundary_(boundary)
         {
+            const int n_pts = static_cast<int>(spatial_points.size());
+            spatial_points_.resize(n_pts, DIM);
+            for (int i = 0; i < n_pts; ++i)
+                spatial_points_.row(i) = spatial_points[i].transpose();
             convertTimePointsToSegments(t_points);
             updateSplineInternal();
         }
@@ -1232,9 +1235,12 @@ namespace SplineTrajectory
                         const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
             : time_segments_(time_segments),
               start_time_(start_time),
-              spatial_points_(spatial_points),
               boundary_(boundary)
         {
+            const int n_pts = static_cast<int>(spatial_points.size());
+            spatial_points_.resize(n_pts, DIM);
+            for (int i = 0; i < n_pts; ++i)
+                spatial_points_.row(i) = spatial_points[i].transpose();
             updateSplineInternal();
         }
 
@@ -1242,7 +1248,10 @@ namespace SplineTrajectory
                     const SplineVector<VectorType> &spatial_points,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            spatial_points_ = spatial_points;
+            const int n_pts = static_cast<int>(spatial_points.size());
+            spatial_points_.resize(n_pts, DIM);
+            for (int i = 0; i < n_pts; ++i)
+                spatial_points_.row(i) = spatial_points[i].transpose();
             boundary_ = boundary;
             convertTimePointsToSegments(t_points);
             updateSplineInternal();
@@ -1254,7 +1263,10 @@ namespace SplineTrajectory
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
             time_segments_ = time_segments;
-            spatial_points_ = spatial_points;
+            const int n_pts = static_cast<int>(spatial_points.size());
+            spatial_points_.resize(n_pts, DIM);
+            for (int i = 0; i < n_pts; ++i)
+                spatial_points_.row(i) = spatial_points[i].transpose();
             boundary_ = boundary;
             start_time_ = start_time;
             updateSplineInternal();
@@ -1280,7 +1292,7 @@ namespace SplineTrajectory
 
         size_t getNumPoints() const
         {
-            return spatial_points_.size();
+            return static_cast<size_t>(spatial_points_.rows());
         }
 
         int getNumSegments() const
@@ -1288,7 +1300,7 @@ namespace SplineTrajectory
             return num_segments_;
         }
 
-        const SplineVector<VectorType> &getSpacePoints() const { return spatial_points_; }
+        const MatrixType &getSpacePoints() const { return spatial_points_; }
         const std::vector<double> &getTimeSegments() const { return time_segments_; }
         const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
@@ -1560,8 +1572,8 @@ namespace SplineTrajectory
                 add_grad_d(i, grad_v_curr, grad_a_curr);
                 add_grad_d(i + 1, grad_v_next, grad_a_next);
 
-                const RowVectorType &P_curr = spatial_points_[i].transpose();
-                const RowVectorType &P_next = spatial_points_[i + 1].transpose();
+                const RowVectorType P_curr = spatial_points_.row(i);
+                const RowVectorType P_next = spatial_points_.row(i + 1);
                 const RowVectorType &V_curr = internal_vel_.row(i);
                 const RowVectorType &V_next = internal_vel_.row(i + 1);
                 const RowVectorType &A_curr = internal_acc_.row(i);
@@ -1603,14 +1615,12 @@ namespace SplineTrajectory
                     ws_lambda_.row(2 * i + 1) = gd_internal.row(i + 1).segment(DIM, DIM);
                 }
 
-                // Forward pass: lambda_0 = D_inv_0^T * lambda_0
                 multiplyStoredBlock2x2T_2xN(D_inv_cache_, 0,
                                             ws_lambda_.template middleRows<2>(0),
                                             ws_lambda_.template middleRows<2>(0));
 
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    // lambda_{i+1} -= U_i^T * lambda_i, then lambda_{i+1} = D_inv_{i+1}^T * lambda_{i+1}
                     subMultiplyStoredBlock2x2T_2xN(U_blocks_cache_, i,
                                                    ws_lambda_.template middleRows<2>(2 * i),
                                                    ws_lambda_.template middleRows<2>(2 * (i + 1)));
@@ -1621,13 +1631,9 @@ namespace SplineTrajectory
 
                 for (int i = num_blocks - 2; i >= 0; --i)
                 {
-                    auto lam_i = ws_lambda_.template middleRows<2>(2 * i);
-                    auto lam_i1 = ws_lambda_.template middleRows<2>(2 * (i + 1));
-                    Eigen::Matrix<double, 2, DIM> update_term;
-                    multiplyStoredBlock2x2T_2xN(L_blocks_cache_, i + 1, lam_i1, update_term);
-                    Eigen::Matrix<double, 2, DIM> scaled_update;
-                    multiplyStoredBlock2x2T_2xN(D_inv_cache_, i, update_term, scaled_update);
-                    lam_i -= scaled_update;
+                    subMultiplyChainedT_2xN(D_inv_cache_, i, L_blocks_cache_, i + 1,
+                                            ws_lambda_.template middleRows<2>(2 * (i + 1)),
+                                            ws_lambda_.template middleRows<2>(2 * i));
                 }
 
                 for (int i = 0; i < num_blocks; ++i)
@@ -1742,52 +1748,6 @@ namespace SplineTrajectory
             A_inv_out(1, 1) = a * inv_det;
         }
 
-        static inline void Multiply2x2(const Eigen::Matrix2d &A, const Eigen::Matrix2d &B, Eigen::Matrix2d &C_out) noexcept
-        {
-            const double a00 = A(0, 0), a01 = A(0, 1);
-            const double a10 = A(1, 0), a11 = A(1, 1);
-            const double b00 = B(0, 0), b01 = B(0, 1);
-            const double b10 = B(1, 0), b11 = B(1, 1);
-
-            C_out(0, 0) = a00 * b00 + a01 * b10;
-            C_out(0, 1) = a00 * b01 + a01 * b11;
-            C_out(1, 0) = a10 * b00 + a11 * b10;
-            C_out(1, 1) = a10 * b01 + a11 * b11;
-        }
-
-        template <int N>
-        static inline void Multiply2x2_2xN(const Eigen::Matrix2d &A, const Eigen::Matrix<double, 2, N> &B,
-                                           Eigen::Matrix<double, 2, N> &C_out) noexcept
-        {
-            const double a00 = A(0, 0), a01 = A(0, 1);
-            const double a10 = A(1, 0), a11 = A(1, 1);
-
-            for (int j = 0; j < N; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) = a00 * b0j + a01 * b1j;
-                C_out(1, j) = a10 * b0j + a11 * b1j;
-            }
-        }
-
-        template <int N>
-        static inline void Multiply2x2T_2xN(const Eigen::Matrix2d &A, const Eigen::Matrix<double, 2, N> &B,
-                                            Eigen::Matrix<double, 2, N> &C_out) noexcept
-        {
-            const double a00 = A(0, 0), a01 = A(0, 1);
-            const double a10 = A(1, 0), a11 = A(1, 1);
-
-            for (int j = 0; j < N; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-
-                C_out(0, j) = a00 * b0j + a10 * b1j;
-                C_out(1, j) = a01 * b0j + a11 * b1j;
-            }
-        }
-
         static inline void setBlock2x2(BlockMatrix2x2Storage &storage, int i, const Eigen::Matrix2d &M)
         {
             storage(i, 0) = M(0, 0);
@@ -1808,21 +1768,6 @@ namespace SplineTrajectory
             C_out(0, 1) = a00 * b01 + a01 * b11;
             C_out(1, 0) = a10 * b00 + a11 * b10;
             C_out(1, 1) = a10 * b01 + a11 * b11;
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void addMultiplyStoredBlock2x2_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                                  const BlockIn &B, BlockOut &C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) += a00 * b0j + a01 * b1j;
-                C_out(1, j) += a10 * b0j + a11 * b1j;
-            }
         }
 
         template <typename BlockOut, typename BlockIn>
@@ -1867,6 +1812,28 @@ namespace SplineTrajectory
                 const double b1j = B(1, j);
                 C_out(0, j) -= a00 * b0j + a10 * b1j;
                 C_out(1, j) -= a01 * b0j + a11 * b1j;
+            }
+        }
+
+        template <typename BlockOut, typename BlockIn>
+        inline void subMultiplyChainedT_2xN(const BlockMatrix2x2Storage &D_inv_storage, int idx_D,
+                                            const BlockMatrix2x2Storage &L_storage, int idx_L,
+                                            const BlockIn &lam_i1, BlockOut &&lam_i) const noexcept
+        {
+            const double d00 = D_inv_storage(idx_D, 0), d01 = D_inv_storage(idx_D, 1);
+            const double d10 = D_inv_storage(idx_D, 2), d11 = D_inv_storage(idx_D, 3);
+            const double l00 = L_storage(idx_L, 0), l01 = L_storage(idx_L, 1);
+            const double l10 = L_storage(idx_L, 2), l11 = L_storage(idx_L, 3);
+            const double m00 = d00 * l00 + d10 * l01;
+            const double m01 = d00 * l10 + d10 * l11;
+            const double m10 = d01 * l00 + d11 * l01;
+            const double m11 = d01 * l10 + d11 * l11;
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = lam_i1(0, j);
+                const double b1j = lam_i1(1, j);
+                lam_i(0, j) -= m00 * b0j + m01 * b1j;
+                lam_i(1, j) -= m10 * b0j + m11 * b1j;
             }
         }
 
@@ -1977,16 +1944,9 @@ namespace SplineTrajectory
 
         MatrixType solveQuintic()
         {
-            const int n_pts = static_cast<int>(spatial_points_.size());
             const int n = num_segments_;
 
-            MatrixType P(n_pts, DIM);
-            for (int i = 0; i < n_pts; ++i)
-            {
-                P.row(i) = spatial_points_[i].transpose();
-            }
-
-            solveInternalDerivatives(P, internal_vel_, internal_acc_);
+            solveInternalDerivatives(spatial_points_, internal_vel_, internal_acc_);
 
             MatrixType coeffs(n * 6, DIM);
 
@@ -1994,11 +1954,11 @@ namespace SplineTrajectory
             {
                 const auto &tp = time_powers_[i];
 
-                const RowVectorType c0 = P.row(i);
+                const RowVectorType c0 = spatial_points_.row(i);
                 const RowVectorType c1 = internal_vel_.row(i);
                 const RowVectorType c2 = internal_acc_.row(i) * 0.5;
 
-                const RowVectorType rhs1 = P.row(i + 1) - c0 - c1 * tp.h - c2 * (tp.h * tp.h);
+                const RowVectorType rhs1 = spatial_points_.row(i + 1) - c0 - c1 * tp.h - c2 * (tp.h * tp.h);
                 const RowVectorType rhs2 = internal_vel_.row(i + 1) - c1 - (2.0 * c2) * tp.h;
                 const RowVectorType rhs3 = internal_acc_.row(i + 1) - (2.0 * c2);
 
@@ -2056,7 +2016,7 @@ namespace SplineTrajectory
         std::vector<double> cumulative_times_;
         double start_time_{0.0};
 
-        SplineVector<VectorType> spatial_points_;
+        MatrixType spatial_points_;
 
         BoundaryConditions<DIM> boundary_;
 
@@ -2111,9 +2071,12 @@ namespace SplineTrajectory
         SepticSplineND(const std::vector<double> &t_points,
                        const SplineVector<VectorType> &spatial_points,
                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points),
-              boundary_(boundary)
+            : boundary_(boundary)
         {
+            const int n_pts = static_cast<int>(spatial_points.size());
+            spatial_points_.resize(n_pts, DIM);
+            for (int i = 0; i < n_pts; ++i)
+                spatial_points_.row(i) = spatial_points[i].transpose();
             convertTimePointsToSegments(t_points);
             updateSplineInternal();
         }
@@ -2124,9 +2087,12 @@ namespace SplineTrajectory
                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
             : time_segments_(time_segments),
               start_time_(start_time),
-              spatial_points_(spatial_points),
               boundary_(boundary)
         {
+            const int n_pts = static_cast<int>(spatial_points.size());
+            spatial_points_.resize(n_pts, DIM);
+            for (int i = 0; i < n_pts; ++i)
+                spatial_points_.row(i) = spatial_points[i].transpose();
             updateSplineInternal();
         }
 
@@ -2134,7 +2100,10 @@ namespace SplineTrajectory
                     const SplineVector<VectorType> &spatial_points,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            spatial_points_ = spatial_points;
+            const int n_pts = static_cast<int>(spatial_points.size());
+            spatial_points_.resize(n_pts, DIM);
+            for (int i = 0; i < n_pts; ++i)
+                spatial_points_.row(i) = spatial_points[i].transpose();
             boundary_ = boundary;
             convertTimePointsToSegments(t_points);
             updateSplineInternal();
@@ -2146,7 +2115,10 @@ namespace SplineTrajectory
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
             time_segments_ = time_segments;
-            spatial_points_ = spatial_points;
+            const int n_pts = static_cast<int>(spatial_points.size());
+            spatial_points_.resize(n_pts, DIM);
+            for (int i = 0; i < n_pts; ++i)
+                spatial_points_.row(i) = spatial_points[i].transpose();
             boundary_ = boundary;
             start_time_ = start_time;
             updateSplineInternal();
@@ -2172,7 +2144,7 @@ namespace SplineTrajectory
 
         size_t getNumPoints() const
         {
-            return spatial_points_.size();
+            return static_cast<size_t>(spatial_points_.rows());
         }
 
         int getNumSegments() const
@@ -2180,7 +2152,7 @@ namespace SplineTrajectory
             return num_segments_;
         }
 
-        const SplineVector<VectorType> &getSpacePoints() const { return spatial_points_; }
+        const MatrixType &getSpacePoints() const { return spatial_points_; }
         const std::vector<double> &getTimeSegments() const { return time_segments_; }
         const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
@@ -2495,8 +2467,8 @@ namespace SplineTrajectory
                 add_grad_d(i + 1, grad_v_next, grad_a_next, grad_j_next);
 
                 {
-                    const RowVectorType &P_curr = spatial_points_[i].transpose();
-                    const RowVectorType &P_next = spatial_points_[i + 1].transpose();
+                    const RowVectorType &P_curr = spatial_points_.row(i);
+                    const RowVectorType &P_next = spatial_points_.row(i + 1);
                     const RowVectorType &V_curr = internal_vel_.row(i);
                     const RowVectorType &V_next = internal_vel_.row(i + 1);
                     const RowVectorType &A_curr = internal_acc_.row(i);
@@ -2557,14 +2529,12 @@ namespace SplineTrajectory
                     ws_lambda_.row(3 * i + 2) = gd_internal.row(i + 1).segment(2 * DIM, DIM);
                 }
 
-                // Forward pass: lambda_0 = D_inv_0^T * lambda_0
                 multiplyStoredBlock3x3T_3xN(D_inv_cache_, 0,
                                             ws_lambda_.template middleRows<3>(0),
                                             ws_lambda_.template middleRows<3>(0));
 
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    // lambda_{i+1} -= U_i^T * lambda_i, then lambda_{i+1} = D_inv_{i+1}^T * lambda_{i+1}
                     subMultiplyStoredBlock3x3T_3xN(U_blocks_cache_, i,
                                                    ws_lambda_.template middleRows<3>(3 * i),
                                                    ws_lambda_.template middleRows<3>(3 * (i + 1)));
@@ -2573,16 +2543,11 @@ namespace SplineTrajectory
                                                 ws_lambda_.template middleRows<3>(3 * (i + 1)));
                 }
 
-                // Backward pass
                 for (int i = num_blocks - 2; i >= 0; --i)
                 {
-                    auto lam_i = ws_lambda_.template middleRows<3>(3 * i);
-                    auto lam_i1 = ws_lambda_.template middleRows<3>(3 * (i + 1));
-                    Eigen::Matrix<double, 3, DIM> update_term;
-                    multiplyStoredBlock3x3T_3xN(L_blocks_cache_, i + 1, lam_i1, update_term);
-                    Eigen::Matrix<double, 3, DIM> scaled_update;
-                    multiplyStoredBlock3x3T_3xN(D_inv_cache_, i, update_term, scaled_update);
-                    lam_i -= scaled_update;
+                    subMultiplyChainedT_3xN(D_inv_cache_, i, L_blocks_cache_, i + 1,
+                                            ws_lambda_.template middleRows<3>(3 * (i + 1)),
+                                            ws_lambda_.template middleRows<3>(3 * i));
                 }
 
                 for (int i = 0; i < num_blocks; ++i)
@@ -2731,69 +2696,6 @@ namespace SplineTrajectory
             A_inv_out(2, 2) = c22 * inv_det;
         }
 
-        static inline void Multiply3x3(const Eigen::Matrix3d &A, const Eigen::Matrix3d &B, Eigen::Matrix3d &C_out) noexcept
-        {
-            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
-            const double a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
-            const double a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
-
-            const double b00 = B(0, 0), b01 = B(0, 1), b02 = B(0, 2);
-            const double b10 = B(1, 0), b11 = B(1, 1), b12 = B(1, 2);
-            const double b20 = B(2, 0), b21 = B(2, 1), b22 = B(2, 2);
-
-            C_out(0, 0) = a00 * b00 + a01 * b10 + a02 * b20;
-            C_out(0, 1) = a00 * b01 + a01 * b11 + a02 * b21;
-            C_out(0, 2) = a00 * b02 + a01 * b12 + a02 * b22;
-
-            C_out(1, 0) = a10 * b00 + a11 * b10 + a12 * b20;
-            C_out(1, 1) = a10 * b01 + a11 * b11 + a12 * b21;
-            C_out(1, 2) = a10 * b02 + a11 * b12 + a12 * b22;
-
-            C_out(2, 0) = a20 * b00 + a21 * b10 + a22 * b20;
-            C_out(2, 1) = a20 * b01 + a21 * b11 + a22 * b21;
-            C_out(2, 2) = a20 * b02 + a21 * b12 + a22 * b22;
-        }
-
-        template <int N>
-        static inline void Multiply3x3_3xN(const Eigen::Matrix3d &A, const Eigen::Matrix<double, 3, N> &B,
-                                           Eigen::Matrix<double, 3, N> &C_out) noexcept
-        {
-            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
-            const double a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
-            const double a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
-
-            for (int j = 0; j < N; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-
-                C_out(0, j) = a00 * b0j + a01 * b1j + a02 * b2j;
-                C_out(1, j) = a10 * b0j + a11 * b1j + a12 * b2j;
-                C_out(2, j) = a20 * b0j + a21 * b1j + a22 * b2j;
-            }
-        }
-
-        template <int N>
-        static inline void Multiply3x3T_3xN(const Eigen::Matrix3d &A, const Eigen::Matrix<double, 3, N> &B,
-                                            Eigen::Matrix<double, 3, N> &C_out) noexcept
-        {
-            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
-            const double a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
-            const double a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
-
-            for (int j = 0; j < N; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-
-                C_out(0, j) = a00 * b0j + a10 * b1j + a20 * b2j;
-                C_out(1, j) = a01 * b0j + a11 * b1j + a21 * b2j;
-                C_out(2, j) = a02 * b0j + a12 * b1j + a22 * b2j;
-            }
-        }
-
         static inline void setBlock3x3(BlockMatrix3x3Storage &storage, int i, const Eigen::Matrix3d &M)
         {
             storage(i, 0) = M(0, 0);
@@ -2882,6 +2784,37 @@ namespace SplineTrajectory
             }
         }
 
+        template <typename BlockOut, typename BlockIn>
+        inline void subMultiplyChainedT_3xN(const BlockMatrix3x3Storage &D_inv_storage, int idx_D,
+                                            const BlockMatrix3x3Storage &L_storage, int idx_L,
+                                            const BlockIn &lam_i1, BlockOut &&lam_i) const noexcept
+        {
+            const double d00 = D_inv_storage(idx_D, 0), d01 = D_inv_storage(idx_D, 1), d02 = D_inv_storage(idx_D, 2);
+            const double d10 = D_inv_storage(idx_D, 3), d11 = D_inv_storage(idx_D, 4), d12 = D_inv_storage(idx_D, 5);
+            const double d20 = D_inv_storage(idx_D, 6), d21 = D_inv_storage(idx_D, 7), d22 = D_inv_storage(idx_D, 8);
+            const double l00 = L_storage(idx_L, 0), l01 = L_storage(idx_L, 1), l02 = L_storage(idx_L, 2);
+            const double l10 = L_storage(idx_L, 3), l11 = L_storage(idx_L, 4), l12 = L_storage(idx_L, 5);
+            const double l20 = L_storage(idx_L, 6), l21 = L_storage(idx_L, 7), l22 = L_storage(idx_L, 8);
+            const double m00 = d00 * l00 + d10 * l01 + d20 * l02;
+            const double m01 = d00 * l10 + d10 * l11 + d20 * l12;
+            const double m02 = d00 * l20 + d10 * l21 + d20 * l22;
+            const double m10 = d01 * l00 + d11 * l01 + d21 * l02;
+            const double m11 = d01 * l10 + d11 * l11 + d21 * l12;
+            const double m12 = d01 * l20 + d11 * l21 + d21 * l22;
+            const double m20 = d02 * l00 + d12 * l01 + d22 * l02;
+            const double m21 = d02 * l10 + d12 * l11 + d22 * l21;
+            const double m22 = d02 * l20 + d12 * l21 + d22 * l22;
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = lam_i1(0, j);
+                const double b1j = lam_i1(1, j);
+                const double b2j = lam_i1(2, j);
+                lam_i(0, j) -= m00 * b0j + m01 * b1j + m02 * b2j;
+                lam_i(1, j) -= m10 * b0j + m11 * b1j + m12 * b2j;
+                lam_i(2, j) -= m20 * b0j + m21 * b1j + m22 * b2j;
+            }
+        }
+
     private:
         void solveInternalDerivatives(const MatrixType &P,
                                       MatrixType &p_out,
@@ -2893,7 +2826,6 @@ namespace SplineTrajectory
             q_out.resize(n, DIM);
             s_out.resize(n, DIM);
 
-            // Boundary conditions
             p_out.row(0) = boundary_.start_velocity.transpose();
             q_out.row(0) = boundary_.start_acceleration.transpose();
             s_out.row(0) = boundary_.start_jerk.transpose();
@@ -3016,16 +2948,9 @@ namespace SplineTrajectory
 
         MatrixType solveSepticSpline()
         {
-            const int n_pts = static_cast<int>(spatial_points_.size());
             const int n = num_segments_;
 
-            MatrixType P(n_pts, DIM);
-            for (int i = 0; i < n_pts; ++i)
-            {
-                P.row(i) = spatial_points_[i].transpose();
-            }
-
-            solveInternalDerivatives(P, internal_vel_, internal_acc_, internal_jerk_);
+            solveInternalDerivatives(spatial_points_, internal_vel_, internal_acc_, internal_jerk_);
 
             MatrixType coeffs(n * 8, DIM);
 
@@ -3033,13 +2958,13 @@ namespace SplineTrajectory
             {
                 const auto &tp = time_powers_[i];
 
-                const RowVectorType c0 = P.row(i);
+                const RowVectorType c0 = spatial_points_.row(i);
                 const RowVectorType c1 = internal_vel_.row(i);
                 const RowVectorType c2 = internal_acc_.row(i) * 0.5;
                 const RowVectorType c3 = internal_jerk_.row(i) / 6.0;
 
-                const RowVectorType &P_curr = P.row(i);
-                const RowVectorType &P_next = P.row(i + 1);
+                const RowVectorType &P_curr = spatial_points_.row(i);
+                const RowVectorType &P_next = spatial_points_.row(i + 1);
                 const RowVectorType &V_curr = internal_vel_.row(i);
                 const RowVectorType &V_next = internal_vel_.row(i + 1);
                 const RowVectorType &A_curr = internal_acc_.row(i);
