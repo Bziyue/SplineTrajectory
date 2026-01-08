@@ -61,3 +61,4 @@ x86/
 *~
 .DS_Store
 Thumbs.db
+.cache/

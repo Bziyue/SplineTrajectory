@@ -1177,9 +1177,10 @@ namespace SplineTrajectory
         MatrixType coeffs_;
         PPolyND<DIM> trajectory_;
 
-        std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> D_inv_cache_;
-        std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> U_blocks_cache_;
-        std::vector<Eigen::Matrix2d, Eigen::aligned_allocator<Eigen::Matrix2d>> L_blocks_cache_;
+        using BlockMatrix2x2Storage = Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor>;
+        BlockMatrix2x2Storage D_inv_cache_;
+        BlockMatrix2x2Storage U_blocks_cache_;
+        BlockMatrix2x2Storage L_blocks_cache_;
         MatrixType internal_vel_;
         MatrixType internal_acc_;
 
@@ -1195,9 +1196,9 @@ namespace SplineTrajectory
         };
 
         std::vector<TimePowers> time_powers_;
-        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_rhs_mod_;
-        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_solution_;
-        std::vector<Eigen::Matrix<double, 2, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 2, DIM>>> ws_lambda_;
+        MatrixType ws_rhs_mod_;
+        MatrixType ws_solution_;
+        MatrixType ws_lambda_;
 
     private:
         void updateSplineInternal()
@@ -1594,38 +1595,39 @@ namespace SplineTrajectory
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
-                ws_lambda_.resize(num_blocks);
+                ws_lambda_.resize(num_blocks * 2, DIM);
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    ws_lambda_[i].row(0) = gd_internal.row(i + 1).segment(0, DIM);
-                    ws_lambda_[i].row(1) = gd_internal.row(i + 1).segment(DIM, DIM);
+                    ws_lambda_.row(2 * i) = gd_internal.row(i + 1).segment(0, DIM);
+                    ws_lambda_.row(2 * i + 1) = gd_internal.row(i + 1).segment(DIM, DIM);
                 }
 
-                {
-                    Eigen::Matrix<double, 2, DIM> tmp = ws_lambda_[0];
-                    Multiply2x2T_2xN(D_inv_cache_[0], tmp, ws_lambda_[0]);
-                }
+                // Forward pass: lambda_0 = D_inv_0^T * lambda_0
+                multiplyStoredBlock2x2T_2xN(D_inv_cache_, 0,
+                                            ws_lambda_.template middleRows<2>(0),
+                                            ws_lambda_.template middleRows<2>(0));
 
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    Eigen::Matrix<double, 2, DIM> update_term;
-                    Multiply2x2T_2xN(U_blocks_cache_[i], ws_lambda_[i], update_term);
-                    ws_lambda_[i + 1] -= update_term;
-
-                    Eigen::Matrix<double, 2, DIM> tmp = ws_lambda_[i + 1];
-                    Multiply2x2T_2xN(D_inv_cache_[i + 1], tmp, ws_lambda_[i + 1]);
+                    // lambda_{i+1} -= U_i^T * lambda_i, then lambda_{i+1} = D_inv_{i+1}^T * lambda_{i+1}
+                    subMultiplyStoredBlock2x2T_2xN(U_blocks_cache_, i,
+                                                   ws_lambda_.template middleRows<2>(2 * i),
+                                                   ws_lambda_.template middleRows<2>(2 * (i + 1)));
+                    multiplyStoredBlock2x2T_2xN(D_inv_cache_, i + 1,
+                                                ws_lambda_.template middleRows<2>(2 * (i + 1)),
+                                                ws_lambda_.template middleRows<2>(2 * (i + 1)));
                 }
 
                 for (int i = num_blocks - 2; i >= 0; --i)
                 {
+                    auto lam_i = ws_lambda_.template middleRows<2>(2 * i);
+                    auto lam_i1 = ws_lambda_.template middleRows<2>(2 * (i + 1));
                     Eigen::Matrix<double, 2, DIM> update_term;
-                    Multiply2x2T_2xN(L_blocks_cache_[i + 1], ws_lambda_[i + 1], update_term);
-
+                    multiplyStoredBlock2x2T_2xN(L_blocks_cache_, i + 1, lam_i1, update_term);
                     Eigen::Matrix<double, 2, DIM> scaled_update;
-                    Multiply2x2T_2xN(D_inv_cache_[i], update_term, scaled_update);
-
-                    ws_lambda_[i] -= scaled_update;
+                    multiplyStoredBlock2x2T_2xN(D_inv_cache_, i, update_term, scaled_update);
+                    lam_i -= scaled_update;
                 }
 
                 for (int i = 0; i < num_blocks; ++i)
@@ -1640,8 +1642,8 @@ namespace SplineTrajectory
                     const RowVectorType Snap_at_T = 24.0 * c4 + 120.0 * c5 * T;
                     const RowVectorType Crackle_at_T = 120.0 * c5;
 
-                    const RowVectorType &lam_snap = ws_lambda_[i].row(0);
-                    const RowVectorType &lam_jerk = ws_lambda_[i].row(1);
+                    const RowVectorType lam_snap = ws_lambda_.row(2 * i);
+                    const RowVectorType lam_jerk = ws_lambda_.row(2 * i + 1);
 
                     gradByTimes(seg_idx) += (lam_snap.dot(Crackle_at_T) + lam_jerk.dot(Snap_at_T));
 
@@ -1667,11 +1669,15 @@ namespace SplineTrajectory
                 }
 
                 Eigen::Matrix<double, 2, DIM> correction_start;
-                Multiply2x2T_2xN(L_blocks_cache_[0], ws_lambda_[0], correction_start);
+                multiplyStoredBlock2x2T_2xN(L_blocks_cache_, 0,
+                                            ws_lambda_.template middleRows<2>(0),
+                                            correction_start);
                 raw_start_grad -= correction_start;
 
                 Eigen::Matrix<double, 2, DIM> correction_end;
-                Multiply2x2T_2xN(U_blocks_cache_[num_blocks - 1], ws_lambda_.back(), correction_end);
+                multiplyStoredBlock2x2T_2xN(U_blocks_cache_, num_blocks - 1,
+                                            ws_lambda_.template middleRows<2>(2 * (num_blocks - 1)),
+                                            correction_end);
                 raw_end_grad -= correction_end;
             }
 
@@ -1782,6 +1788,88 @@ namespace SplineTrajectory
             }
         }
 
+        static inline void setBlock2x2(BlockMatrix2x2Storage &storage, int i, const Eigen::Matrix2d &M)
+        {
+            storage(i, 0) = M(0, 0);
+            storage(i, 1) = M(0, 1);
+            storage(i, 2) = M(1, 0);
+            storage(i, 3) = M(1, 1);
+        }
+
+        inline void MultiplyStoredBlock2x2(const BlockMatrix2x2Storage &A_storage, int idx_a,
+                                           const BlockMatrix2x2Storage &B_storage, int idx_b,
+                                           Eigen::Matrix2d &C_out) const noexcept
+        {
+            const double a00 = A_storage(idx_a, 0), a01 = A_storage(idx_a, 1);
+            const double a10 = A_storage(idx_a, 2), a11 = A_storage(idx_a, 3);
+            const double b00 = B_storage(idx_b, 0), b01 = B_storage(idx_b, 1);
+            const double b10 = B_storage(idx_b, 2), b11 = B_storage(idx_b, 3);
+            C_out(0, 0) = a00 * b00 + a01 * b10;
+            C_out(0, 1) = a00 * b01 + a01 * b11;
+            C_out(1, 0) = a10 * b00 + a11 * b10;
+            C_out(1, 1) = a10 * b01 + a11 * b11;
+        }
+
+        template <typename BlockOut, typename BlockIn>
+        inline void addMultiplyStoredBlock2x2_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
+                                                  const BlockIn &B, BlockOut &C_out) const noexcept
+        {
+            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
+            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                C_out(0, j) += a00 * b0j + a01 * b1j;
+                C_out(1, j) += a10 * b0j + a11 * b1j;
+            }
+        }
+
+        template <typename BlockOut, typename BlockIn>
+        inline void multiplyStoredBlock2x2_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
+                                               const BlockIn &B, BlockOut &&C_out) const noexcept
+        {
+            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
+            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                C_out(0, j) = a00 * b0j + a01 * b1j;
+                C_out(1, j) = a10 * b0j + a11 * b1j;
+            }
+        }
+
+        template <typename BlockOut, typename BlockIn>
+        inline void multiplyStoredBlock2x2T_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
+                                                const BlockIn &B, BlockOut &&C_out) const noexcept
+        {
+            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
+            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                C_out(0, j) = a00 * b0j + a10 * b1j;
+                C_out(1, j) = a01 * b0j + a11 * b1j;
+            }
+        }
+
+        template <typename BlockOut, typename BlockIn>
+        inline void subMultiplyStoredBlock2x2T_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
+                                                   const BlockIn &B, BlockOut &&C_out) const noexcept
+        {
+            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
+            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                C_out(0, j) -= a00 * b0j + a10 * b1j;
+                C_out(1, j) -= a01 * b0j + a11 * b1j;
+            }
+        }
+
         void solveInternalDerivatives(const MatrixType &P, MatrixType &p_out, MatrixType &q_out)
         {
             const int n = static_cast<int>(P.rows());
@@ -1803,10 +1891,10 @@ namespace SplineTrajectory
             B_right.row(0) = boundary_.end_velocity.transpose();
             B_right.row(1) = boundary_.end_acceleration.transpose();
 
-            U_blocks_cache_.resize(num_blocks);
-            D_inv_cache_.resize(num_blocks);
-            L_blocks_cache_.resize(num_blocks);
-            ws_rhs_mod_.resize(num_blocks);
+            U_blocks_cache_.resize(num_blocks, 4);
+            D_inv_cache_.resize(num_blocks, 4);
+            L_blocks_cache_.resize(num_blocks, 4);
+            ws_rhs_mod_.resize(num_blocks * 2, DIM);
 
             for (int i = 0; i < num_blocks; ++i)
             {
@@ -1814,63 +1902,76 @@ namespace SplineTrajectory
                 const auto &tp_L = time_powers_[k - 2];
                 const auto &tp_R = time_powers_[k - 1];
 
-                Eigen::Matrix<double, 1, DIM> r3 = 60.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h3_inv - (P.row(k - 1) - P.row(k - 2)) * tp_L.h3_inv);
-                Eigen::Matrix<double, 1, DIM> r4 = 360.0 * ((P.row(k - 1) - P.row(k)) * tp_R.h4_inv + (P.row(k - 2) - P.row(k - 1)) * tp_L.h4_inv);
-
-                Eigen::Matrix<double, 2, DIM> r;
-                r.row(0) = r4;
-                r.row(1) = r3;
+                auto rhs_block = ws_rhs_mod_.template middleRows<2>(2 * i);
+                rhs_block.row(0) = 360.0 * ((P.row(k - 1) - P.row(k)) * tp_R.h4_inv + (P.row(k - 2) - P.row(k - 1)) * tp_L.h4_inv);
+                rhs_block.row(1) = 60.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h3_inv - (P.row(k - 1) - P.row(k - 2)) * tp_L.h3_inv);
 
                 Eigen::Matrix2d D;
                 D << -192.0 * (tp_L.h3_inv + tp_R.h3_inv), 36.0 * (tp_L.h2_inv - tp_R.h2_inv),
                     -36.0 * (tp_L.h2_inv - tp_R.h2_inv), 9.0 * (tp_L.h_inv + tp_R.h_inv);
 
-                Eigen::Matrix2d &L = L_blocks_cache_[i];
+                Eigen::Matrix2d L;
                 L << -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv,
                     -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv;
+                setBlock2x2(L_blocks_cache_, i, L);
 
-                Eigen::Matrix2d &U = U_blocks_cache_[i];
+                Eigen::Matrix2d U;
                 U << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
                     24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
+                setBlock2x2(U_blocks_cache_, i, U);
 
-                if (i == 0) // k == 2
+                if (i == 0)
                 {
-                    r.noalias() -= L * B_left;
+                    rhs_block.noalias() -= L * B_left;
                 }
                 else
                 {
                     Eigen::Matrix2d X;
-                    Multiply2x2(D_inv_cache_[i - 1], U_blocks_cache_[i - 1], X);
+                    MultiplyStoredBlock2x2(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
                     Eigen::Matrix<double, 2, DIM> Y;
-                    Multiply2x2_2xN(D_inv_cache_[i - 1], ws_rhs_mod_[i - 1], Y);
-
+                    multiplyStoredBlock2x2_2xN(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<2>(2 * (i - 1)), Y);
                     D.noalias() -= L * X;
-                    r.noalias() -= L * Y;
+                    rhs_block.noalias() -= L * Y;
                 }
 
                 if (k == n - 1)
                 {
-                    r.noalias() -= U * B_right;
+                    rhs_block.noalias() -= U * B_right;
                 }
 
-                Inverse2x2(D, D_inv_cache_[i]);
-                ws_rhs_mod_[i] = r;
+                Eigen::Matrix2d D_inv;
+                Inverse2x2(D, D_inv);
+                setBlock2x2(D_inv_cache_, i, D_inv);
             }
 
-            ws_solution_.resize(num_blocks);
+            ws_solution_.resize(num_blocks * 2, DIM);
 
-            Multiply2x2_2xN(D_inv_cache_[num_blocks - 1], ws_rhs_mod_[num_blocks - 1], ws_solution_[num_blocks - 1]);
+            multiplyStoredBlock2x2_2xN(D_inv_cache_, num_blocks - 1,
+                                       ws_rhs_mod_.template middleRows<2>(2 * (num_blocks - 1)),
+                                       ws_solution_.template middleRows<2>(2 * (num_blocks - 1)));
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
-                const Eigen::Matrix<double, 2, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * ws_solution_[i + 1];
-                Multiply2x2_2xN(D_inv_cache_[i], rhs_temp, ws_solution_[i]);
+                auto sol_block = ws_solution_.template middleRows<2>(2 * i);
+                auto sol_next = ws_solution_.template middleRows<2>(2 * (i + 1));
+                auto rhs_i = ws_rhs_mod_.template middleRows<2>(2 * i);
+
+                const double u00 = U_blocks_cache_(i, 0), u01 = U_blocks_cache_(i, 1);
+                const double u10 = U_blocks_cache_(i, 2), u11 = U_blocks_cache_(i, 3);
+                Eigen::Matrix<double, 2, DIM> rhs_temp;
+                for (int j = 0; j < DIM; ++j)
+                {
+                    const double s0 = sol_next(0, j), s1 = sol_next(1, j);
+                    rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1);
+                    rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1);
+                }
+                multiplyStoredBlock2x2_2xN(D_inv_cache_, i, rhs_temp, sol_block);
             }
 
             for (int i = 0; i < num_blocks; ++i)
             {
-                p_out.row(i + 1) = ws_solution_[i].row(0);
-                q_out.row(i + 1) = ws_solution_[i].row(1);
+                p_out.row(i + 1) = ws_solution_.row(2 * i);
+                q_out.row(i + 1) = ws_solution_.row(2 * i + 1);
             }
         }
 
@@ -1978,13 +2079,14 @@ namespace SplineTrajectory
         };
         std::vector<TimePowers> time_powers_;
 
-        std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> D_inv_cache_;
-        std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> U_blocks_cache_;
-        std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> L_blocks_cache_;
+        using BlockMatrix3x3Storage = Eigen::Matrix<double, Eigen::Dynamic, 9, Eigen::RowMajor>;
+        BlockMatrix3x3Storage D_inv_cache_;
+        BlockMatrix3x3Storage U_blocks_cache_;
+        BlockMatrix3x3Storage L_blocks_cache_;
 
-        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_rhs_mod_;
-        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_solution_;
-        std::vector<Eigen::Matrix<double, 3, DIM>, Eigen::aligned_allocator<Eigen::Matrix<double, 3, DIM>>> ws_lambda_;
+        MatrixType ws_rhs_mod_;
+        MatrixType ws_solution_;
+        MatrixType ws_lambda_;
 
         MatrixType internal_vel_;
         MatrixType internal_acc_;
@@ -2446,38 +2548,41 @@ namespace SplineTrajectory
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
-                ws_lambda_.resize(num_blocks);
+                ws_lambda_.resize(num_blocks * 3, DIM);
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    ws_lambda_[i].row(0) = gd_internal.row(i + 1).segment(0, DIM);
-                    ws_lambda_[i].row(1) = gd_internal.row(i + 1).segment(DIM, DIM);
-                    ws_lambda_[i].row(2) = gd_internal.row(i + 1).segment(2 * DIM, DIM);
+                    ws_lambda_.row(3 * i) = gd_internal.row(i + 1).segment(0, DIM);
+                    ws_lambda_.row(3 * i + 1) = gd_internal.row(i + 1).segment(DIM, DIM);
+                    ws_lambda_.row(3 * i + 2) = gd_internal.row(i + 1).segment(2 * DIM, DIM);
                 }
 
-                {
-                    Eigen::Matrix<double, 3, DIM> tmp = ws_lambda_[0];
-                    Multiply3x3T_3xN(D_inv_cache_[0], tmp, ws_lambda_[0]);
-                }
+                // Forward pass: lambda_0 = D_inv_0^T * lambda_0
+                multiplyStoredBlock3x3T_3xN(D_inv_cache_, 0,
+                                            ws_lambda_.template middleRows<3>(0),
+                                            ws_lambda_.template middleRows<3>(0));
+
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    Eigen::Matrix<double, 3, DIM> update_term;
-                    Multiply3x3T_3xN(U_blocks_cache_[i], ws_lambda_[i], update_term);
-                    ws_lambda_[i + 1] -= update_term;
-
-                    Eigen::Matrix<double, 3, DIM> tmp = ws_lambda_[i + 1];
-                    Multiply3x3T_3xN(D_inv_cache_[i + 1], tmp, ws_lambda_[i + 1]);
+                    // lambda_{i+1} -= U_i^T * lambda_i, then lambda_{i+1} = D_inv_{i+1}^T * lambda_{i+1}
+                    subMultiplyStoredBlock3x3T_3xN(U_blocks_cache_, i,
+                                                   ws_lambda_.template middleRows<3>(3 * i),
+                                                   ws_lambda_.template middleRows<3>(3 * (i + 1)));
+                    multiplyStoredBlock3x3T_3xN(D_inv_cache_, i + 1,
+                                                ws_lambda_.template middleRows<3>(3 * (i + 1)),
+                                                ws_lambda_.template middleRows<3>(3 * (i + 1)));
                 }
 
+                // Backward pass
                 for (int i = num_blocks - 2; i >= 0; --i)
                 {
+                    auto lam_i = ws_lambda_.template middleRows<3>(3 * i);
+                    auto lam_i1 = ws_lambda_.template middleRows<3>(3 * (i + 1));
                     Eigen::Matrix<double, 3, DIM> update_term;
-                    Multiply3x3T_3xN(L_blocks_cache_[i + 1], ws_lambda_[i + 1], update_term);
-
+                    multiplyStoredBlock3x3T_3xN(L_blocks_cache_, i + 1, lam_i1, update_term);
                     Eigen::Matrix<double, 3, DIM> scaled_update;
-                    Multiply3x3T_3xN(D_inv_cache_[i], update_term, scaled_update);
-
-                    ws_lambda_[i] -= scaled_update;
+                    multiplyStoredBlock3x3T_3xN(D_inv_cache_, i, update_term, scaled_update);
+                    lam_i -= scaled_update;
                 }
 
                 for (int i = 0; i < num_blocks; ++i)
@@ -2495,9 +2600,9 @@ namespace SplineTrajectory
                     RowVectorType dCrackle_dT = 720.0 * c6 + 5040.0 * c7 * T;
                     RowVectorType dPop_dT = 5040.0 * c7;
 
-                    const RowVectorType &lam_snap = ws_lambda_[i].row(0);
-                    const RowVectorType &lam_crackle = ws_lambda_[i].row(1);
-                    const RowVectorType &lam_pop = ws_lambda_[i].row(2);
+                    const RowVectorType lam_snap = ws_lambda_.row(3 * i);
+                    const RowVectorType lam_crackle = ws_lambda_.row(3 * i + 1);
+                    const RowVectorType lam_pop = ws_lambda_.row(3 * i + 2);
 
                     gradByTimes(seg_idx) += (lam_snap.dot(dSnap_dT) +
                                              lam_crackle.dot(dCrackle_dT) +
@@ -2527,11 +2632,15 @@ namespace SplineTrajectory
                 }
 
                 Eigen::Matrix<double, 3, DIM> correction_start;
-                Multiply3x3T_3xN(L_blocks_cache_[0], ws_lambda_[0], correction_start);
+                multiplyStoredBlock3x3T_3xN(L_blocks_cache_, 0,
+                                            ws_lambda_.template middleRows<3>(0),
+                                            correction_start);
                 raw_start_grad -= correction_start;
 
                 Eigen::Matrix<double, 3, DIM> correction_end;
-                Multiply3x3T_3xN(U_blocks_cache_[num_blocks - 1], ws_lambda_.back(), correction_end);
+                multiplyStoredBlock3x3T_3xN(U_blocks_cache_, num_blocks - 1,
+                                            ws_lambda_.template middleRows<3>(3 * (num_blocks - 1)),
+                                            correction_end);
                 raw_end_grad -= correction_end;
             }
 
@@ -2685,6 +2794,94 @@ namespace SplineTrajectory
             }
         }
 
+        static inline void setBlock3x3(BlockMatrix3x3Storage &storage, int i, const Eigen::Matrix3d &M)
+        {
+            storage(i, 0) = M(0, 0);
+            storage(i, 1) = M(0, 1);
+            storage(i, 2) = M(0, 2);
+            storage(i, 3) = M(1, 0);
+            storage(i, 4) = M(1, 1);
+            storage(i, 5) = M(1, 2);
+            storage(i, 6) = M(2, 0);
+            storage(i, 7) = M(2, 1);
+            storage(i, 8) = M(2, 2);
+        }
+
+        inline void MultiplyStoredBlock3x3(const BlockMatrix3x3Storage &A_storage, int idx_a,
+                                           const BlockMatrix3x3Storage &B_storage, int idx_b,
+                                           Eigen::Matrix3d &C_out) const noexcept
+        {
+            const double a00 = A_storage(idx_a, 0), a01 = A_storage(idx_a, 1), a02 = A_storage(idx_a, 2);
+            const double a10 = A_storage(idx_a, 3), a11 = A_storage(idx_a, 4), a12 = A_storage(idx_a, 5);
+            const double a20 = A_storage(idx_a, 6), a21 = A_storage(idx_a, 7), a22 = A_storage(idx_a, 8);
+            const double b00 = B_storage(idx_b, 0), b01 = B_storage(idx_b, 1), b02 = B_storage(idx_b, 2);
+            const double b10 = B_storage(idx_b, 3), b11 = B_storage(idx_b, 4), b12 = B_storage(idx_b, 5);
+            const double b20 = B_storage(idx_b, 6), b21 = B_storage(idx_b, 7), b22 = B_storage(idx_b, 8);
+            C_out(0, 0) = a00 * b00 + a01 * b10 + a02 * b20;
+            C_out(0, 1) = a00 * b01 + a01 * b11 + a02 * b21;
+            C_out(0, 2) = a00 * b02 + a01 * b12 + a02 * b22;
+            C_out(1, 0) = a10 * b00 + a11 * b10 + a12 * b20;
+            C_out(1, 1) = a10 * b01 + a11 * b11 + a12 * b21;
+            C_out(1, 2) = a10 * b02 + a11 * b12 + a12 * b22;
+            C_out(2, 0) = a20 * b00 + a21 * b10 + a22 * b20;
+            C_out(2, 1) = a20 * b01 + a21 * b11 + a22 * b21;
+            C_out(2, 2) = a20 * b02 + a21 * b12 + a22 * b22;
+        }
+
+        template <typename BlockOut, typename BlockIn>
+        inline void multiplyStoredBlock3x3_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
+                                               const BlockIn &B, BlockOut &&C_out) const noexcept
+        {
+            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
+            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
+            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                const double b2j = B(2, j);
+                C_out(0, j) = a00 * b0j + a01 * b1j + a02 * b2j;
+                C_out(1, j) = a10 * b0j + a11 * b1j + a12 * b2j;
+                C_out(2, j) = a20 * b0j + a21 * b1j + a22 * b2j;
+            }
+        }
+
+        template <typename BlockOut, typename BlockIn>
+        inline void multiplyStoredBlock3x3T_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
+                                                const BlockIn &B, BlockOut &&C_out) const noexcept
+        {
+            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
+            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
+            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                const double b2j = B(2, j);
+                C_out(0, j) = a00 * b0j + a10 * b1j + a20 * b2j;
+                C_out(1, j) = a01 * b0j + a11 * b1j + a21 * b2j;
+                C_out(2, j) = a02 * b0j + a12 * b1j + a22 * b2j;
+            }
+        }
+
+        template <typename BlockOut, typename BlockIn>
+        inline void subMultiplyStoredBlock3x3T_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
+                                                   const BlockIn &B, BlockOut &&C_out) const noexcept
+        {
+            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
+            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
+            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
+            for (int j = 0; j < DIM; ++j)
+            {
+                const double b0j = B(0, j);
+                const double b1j = B(1, j);
+                const double b2j = B(2, j);
+                C_out(0, j) -= a00 * b0j + a10 * b1j + a20 * b2j;
+                C_out(1, j) -= a01 * b0j + a11 * b1j + a21 * b2j;
+                C_out(2, j) -= a02 * b0j + a12 * b1j + a22 * b2j;
+            }
+        }
+
     private:
         void solveInternalDerivatives(const MatrixType &P,
                                       MatrixType &p_out,
@@ -2718,10 +2915,10 @@ namespace SplineTrajectory
             B_right.row(1) = boundary_.end_acceleration.transpose();
             B_right.row(2) = boundary_.end_jerk.transpose();
 
-            U_blocks_cache_.resize(num_blocks);
-            D_inv_cache_.resize(num_blocks);
-            L_blocks_cache_.resize(num_blocks);
-            ws_rhs_mod_.resize(num_blocks);
+            U_blocks_cache_.resize(num_blocks, 9);
+            D_inv_cache_.resize(num_blocks, 9);
+            L_blocks_cache_.resize(num_blocks, 9);
+            ws_rhs_mod_.resize(num_blocks * 3, DIM);
 
             for (int i = 0; i < num_blocks; ++i)
             {
@@ -2745,15 +2942,17 @@ namespace SplineTrajectory
                     5400.0 * (tp_L.h4_inv - tp_R.h4_inv), -1200.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_L.h2_inv - tp_R.h2_inv),
                     25920.0 * (tp_L.h5_inv + tp_R.h5_inv), 5400.0 * (tp_R.h4_inv - tp_L.h4_inv), 480.0 * (tp_L.h3_inv + tp_R.h3_inv);
 
-                Eigen::Matrix3d &L = L_blocks_cache_[i];
+                Eigen::Matrix3d L;
                 L << 360.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv, 4.0 * tp_L.h_inv,
                     4680.0 * tp_L.h4_inv, 840.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv,
                     24480.0 * tp_L.h5_inv, 4680.0 * tp_L.h4_inv, 360.0 * tp_L.h3_inv;
+                setBlock3x3(L_blocks_cache_, i, L);
 
-                Eigen::Matrix3d &U = U_blocks_cache_[i];
+                Eigen::Matrix3d U;
                 U << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
                     -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
                     24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
+                setBlock3x3(U_blocks_cache_, i, U);
 
                 if (i == 0)
                 {
@@ -2761,15 +2960,10 @@ namespace SplineTrajectory
                 }
                 else
                 {
-                    const Eigen::Matrix3d &D_prev_inv = D_inv_cache_[i - 1];
-                    const Eigen::Matrix3d &U_prev = U_blocks_cache_[i - 1];
-                    const Eigen::Matrix<double, 3, DIM> &r_prev = ws_rhs_mod_[i - 1];
-
                     Eigen::Matrix3d X;
-                    Multiply3x3(D_prev_inv, U_prev, X);
+                    MultiplyStoredBlock3x3(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
                     Eigen::Matrix<double, 3, DIM> Y;
-                    Multiply3x3_3xN(D_prev_inv, r_prev, Y);
-
+                    multiplyStoredBlock3x3_3xN(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<3>(3 * (i - 1)), Y);
                     D.noalias() -= L * X;
                     r.noalias() -= L * Y;
                 }
@@ -2779,26 +2973,44 @@ namespace SplineTrajectory
                     r.noalias() -= U * B_right;
                 }
 
-                Inverse3x3(D, D_inv_cache_[i]);
-                ws_rhs_mod_[i] = r;
+                Eigen::Matrix3d D_inv;
+                Inverse3x3(D, D_inv);
+                setBlock3x3(D_inv_cache_, i, D_inv);
+                ws_rhs_mod_.template middleRows<3>(3 * i) = r;
             }
 
-            ws_solution_.resize(num_blocks);
+            ws_solution_.resize(num_blocks * 3, DIM);
 
-            Multiply3x3_3xN(D_inv_cache_[num_blocks - 1], ws_rhs_mod_[num_blocks - 1], ws_solution_[num_blocks - 1]);
+            multiplyStoredBlock3x3_3xN(D_inv_cache_, num_blocks - 1,
+                                       ws_rhs_mod_.template middleRows<3>(3 * (num_blocks - 1)),
+                                       ws_solution_.template middleRows<3>(3 * (num_blocks - 1)));
 
             for (int i = num_blocks - 2; i >= 0; --i)
             {
-                const Eigen::Matrix<double, 3, DIM> rhs_temp = ws_rhs_mod_[i] - U_blocks_cache_[i] * ws_solution_[i + 1];
-                Multiply3x3_3xN(D_inv_cache_[i], rhs_temp, ws_solution_[i]);
+                auto sol_block = ws_solution_.template middleRows<3>(3 * i);
+                auto sol_next = ws_solution_.template middleRows<3>(3 * (i + 1));
+                auto rhs_i = ws_rhs_mod_.template middleRows<3>(3 * i);
+
+                const double u00 = U_blocks_cache_(i, 0), u01 = U_blocks_cache_(i, 1), u02 = U_blocks_cache_(i, 2);
+                const double u10 = U_blocks_cache_(i, 3), u11 = U_blocks_cache_(i, 4), u12 = U_blocks_cache_(i, 5);
+                const double u20 = U_blocks_cache_(i, 6), u21 = U_blocks_cache_(i, 7), u22 = U_blocks_cache_(i, 8);
+                Eigen::Matrix<double, 3, DIM> rhs_temp;
+                for (int j = 0; j < DIM; ++j)
+                {
+                    const double s0 = sol_next(0, j), s1 = sol_next(1, j), s2 = sol_next(2, j);
+                    rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1 + u02 * s2);
+                    rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1 + u12 * s2);
+                    rhs_temp(2, j) = rhs_i(2, j) - (u20 * s0 + u21 * s1 + u22 * s2);
+                }
+                multiplyStoredBlock3x3_3xN(D_inv_cache_, i, rhs_temp, sol_block);
             }
 
             for (int i = 0; i < num_blocks; ++i)
             {
                 const int row = i + 1;
-                p_out.row(row) = ws_solution_[i].row(0);
-                q_out.row(row) = ws_solution_[i].row(1);
-                s_out.row(row) = ws_solution_[i].row(2);
+                p_out.row(row) = ws_solution_.row(3 * i);
+                q_out.row(row) = ws_solution_.row(3 * i + 1);
+                s_out.row(row) = ws_solution_.row(3 * i + 2);
             }
         }
 
@@ -2807,7 +3019,6 @@ namespace SplineTrajectory
             const int n_pts = static_cast<int>(spatial_points_.size());
             const int n = num_segments_;
 
-            // 1. Construct Points Matrix
             MatrixType P(n_pts, DIM);
             for (int i = 0; i < n_pts; ++i)
             {
