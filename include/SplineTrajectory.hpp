@@ -849,7 +849,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
-         * 
+         *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @return Gradients Structure containing:
@@ -866,6 +866,21 @@ namespace SplineTrajectory
                                   res.inner_points, res.times, res.start, res.end);
 
             return res;
+        }
+
+        /**
+         * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
+         *
+         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
+         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
+         * @param grads               Output gradients structure to populate
+         */
+        void propagateGrad(const MatrixType &partialGradByCoeffs,
+                           const Eigen::VectorXd &partialGradByTimes,
+                           Gradients &grads)
+        {
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  grads.inner_points, grads.times, grads.start, grads.end);
         }
 
     private:
@@ -1491,7 +1506,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
-         * 
+         *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @return Gradients Structure containing:
@@ -1508,6 +1523,21 @@ namespace SplineTrajectory
                                   res.inner_points, res.times, res.start, res.end);
 
             return res;
+        }
+
+        /**
+         * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
+         *
+         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
+         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
+         * @param grads               Output gradients structure to populate
+         */
+        void propagateGrad(const MatrixType &partialGradByCoeffs,
+                           const Eigen::VectorXd &partialGradByTimes,
+                           Gradients &grads)
+        {
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  grads.inner_points, grads.times, grads.start, grads.end);
         }
 
     private:
@@ -2384,7 +2414,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
-         * 
+         *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @return Gradients Structure containing:
@@ -2401,6 +2431,21 @@ namespace SplineTrajectory
                                   res.inner_points, res.times, res.start, res.end);
 
             return res;
+        }
+
+        /**
+         * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
+         *
+         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
+         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
+         * @param grads               Output gradients structure to populate
+         */
+        void propagateGrad(const MatrixType &partialGradByCoeffs,
+                           const Eigen::VectorXd &partialGradByTimes,
+                           Gradients &grads)
+        {
+            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                  grads.inner_points, grads.times, grads.start, grads.end);
         }
 
     private:

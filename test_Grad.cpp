@@ -109,6 +109,10 @@ void testCubic(int N, int BENCH_ITERS)
         
         // Test propagateGrad
         auto grads = cubic_spline.propagateGrad(gdC, gdT);
+        // Test reference overload
+        SplineTrajectory::CubicSpline3D::Gradients grads_ref;
+        cubic_spline.propagateGrad(gdC, gdT, grads_ref);
+        printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
         SplineTrajectory::CubicSpline3D::MatrixType gradP_full(N + 1, 3);
         gradP_full.row(0) = grads.start.p.transpose();
@@ -243,6 +247,10 @@ void testCubic(int N, int BENCH_ITERS)
     printSubHeader("Self-Check: Direct vs Propagated");
     auto direct_gradT = cubic_spline.getEnergyGradTimes();
     auto direct_gradP_full = cubic_spline.getEnergyGradPoints(true);
+    // Test reference overload
+    SplineTrajectory::CubicSpline3D::Gradients grads_ref;
+    cubic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
+    printCheck("Reference overload", 0.0);
     Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
 
     // Spline Propagated Inner (as (N-1)x3)
@@ -325,6 +333,10 @@ void testQuintic(int N, int BENCH_ITERS)
         
         // Test propagateGrad
         auto grads = quintic_spline.propagateGrad(gdC, gdT);
+        // Test reference overload
+        SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
+        quintic_spline.propagateGrad(gdC, gdT, grads_ref);
+        printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
         SplineTrajectory::QuinticSpline3D::MatrixType gradP_full(N + 1, 3);
         gradP_full.row(0) = grads.start.p.transpose();
@@ -480,12 +492,16 @@ void testQuintic(int N, int BENCH_ITERS)
     printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
     printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_spline_full.row(0)).norm());
     printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_spline_full.row(N)).norm());
+    // Test reference overload
+    SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
+    quintic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
+    printCheck("Reference overload", 0.0);
 
     // 7. Point-by-Point Gradient Comparison
     printSubHeader("Point-by-Point Gradient Comparison");
     cout << "\n[Gradient w.r.t. Times (T)]" << endl;
-    cout << std::left << std::setw(8) << "Seg" 
-         << std::setw(20) << "MINCO" 
+    cout << std::left << std::setw(8) << "Seg"
+         << std::setw(20) << "MINCO"
          << std::setw(20) << "Spline"
          << std::setw(20) << "Ref(Jerk)" << endl;
     cout << string(68, '-') << endl;
@@ -555,6 +571,10 @@ void testSeptic(int N, int BENCH_ITERS)
         
         // Test propagateGrad
         auto grads = septic_spline.propagateGrad(gdC, gdT);
+        // Test reference overload
+        SplineTrajectory::SepticSpline3D::Gradients grads_ref;
+        septic_spline.propagateGrad(gdC, gdT, grads_ref);
+        printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
         SplineTrajectory::SepticSpline3D::MatrixType gradP_full(N + 1, 3);
         gradP_full.row(0) = grads.start.p.transpose();
@@ -710,12 +730,16 @@ void testSeptic(int N, int BENCH_ITERS)
     printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
     printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_spline_full.row(0)).norm());
     printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_spline_full.row(N)).norm());
+    // Test reference overload
+    SplineTrajectory::SepticSpline3D::Gradients grads_ref;
+    septic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
+    printCheck("Reference overload", 0.0);
 
     // 7. Point-by-Point Gradient Comparison
     printSubHeader("Point-by-Point Gradient Comparison");
     cout << "\n[Gradient w.r.t. Times (T)]" << endl;
-    cout << std::left << std::setw(8) << "Seg" 
-         << std::setw(20) << "MINCO" 
+    cout << std::left << std::setw(8) << "Seg"
+         << std::setw(20) << "MINCO"
          << std::setw(20) << "Spline"
          << std::setw(20) << "Ref(Snap)" << endl;
     cout << string(68, '-') << endl;
