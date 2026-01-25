@@ -592,6 +592,12 @@ namespace SplineTrajectory
             BoundaryStateGrads() : p(VectorType::Zero()), v(VectorType::Zero()) {}
         };
 
+        struct BoundaryDualGrads
+        {
+            BoundaryStateGrads start;
+            BoundaryStateGrads end;
+        };
+
         struct Gradients
         {
             MatrixType inner_points;
@@ -845,6 +851,36 @@ namespace SplineTrajectory
             }
 
             return grad;
+        }
+
+        /**
+         * @brief Compute partial gradient of energy w.r.t. boundary conditions (Position, Velocity).
+         * @return BoundaryDualGrads containing gradients for start/end pos and vel.
+         */
+        BoundaryDualGrads getEnergyGradBoundary() const
+        {
+            BoundaryDualGrads res;
+            if (num_segments_ < 1) return res;
+
+            const RowVectorType c2_first = coeffs_.row(2); 
+            const RowVectorType c3_first = coeffs_.row(3); 
+
+            res.start.p =  12.0 * c3_first.transpose();
+            res.start.v =  -4.0 * c2_first.transpose();
+
+            int last_idx = num_segments_ - 1;
+            double T = time_segments_[last_idx];
+            
+            const RowVectorType c2_last = coeffs_.row(last_idx * 4 + 2);
+            const RowVectorType c3_last = coeffs_.row(last_idx * 4 + 3);
+
+            RowVectorType acc_end = 2.0 * c2_last + 6.0 * c3_last * T;
+            RowVectorType jerk_end = 6.0 * c3_last;
+
+            res.end.p = -2.0 * jerk_end.transpose(); 
+            res.end.v =  2.0 * acc_end.transpose();
+
+            return res;
         }
 
         /**
@@ -1186,6 +1222,12 @@ namespace SplineTrajectory
             BoundaryStateGrads() : p(VectorType::Zero()), v(VectorType::Zero()), a(VectorType::Zero()) {}
         };
 
+        struct BoundaryDualGrads
+        {
+            BoundaryStateGrads start;
+            BoundaryStateGrads end;
+        };
+
         struct Gradients
         {
             MatrixType inner_points;
@@ -1502,6 +1544,42 @@ namespace SplineTrajectory
             }
 
             return grad;
+        }
+
+        /**
+         * @brief Compute partial gradient of energy w.r.t. boundary conditions (Pos, Vel, Acc).
+         * @return BoundaryDualGrads containing gradients.
+         */
+        BoundaryDualGrads getEnergyGradBoundary() const
+        {
+            BoundaryDualGrads res;
+            if (num_segments_ < 1) return res;
+
+            const RowVectorType c3_first = coeffs_.row(3);
+            const RowVectorType c4_first = coeffs_.row(4);
+            const RowVectorType c5_first = coeffs_.row(5);
+
+            res.start.p = -240.0 * c5_first.transpose();
+            res.start.v =   48.0 * c4_first.transpose();
+            res.start.a =  -12.0 * c3_first.transpose();
+
+            int last_idx = num_segments_ - 1;
+            double T = time_segments_[last_idx];
+            double T2 = T * T;
+
+            const RowVectorType c3_last = coeffs_.row(last_idx * 6 + 3);
+            const RowVectorType c4_last = coeffs_.row(last_idx * 6 + 4);
+            const RowVectorType c5_last = coeffs_.row(last_idx * 6 + 5);
+
+            RowVectorType jerk_end = 6.0 * c3_last + 24.0 * c4_last * T + 60.0 * c5_last * T2;
+            RowVectorType snap_end = 24.0 * c4_last + 120.0 * c5_last * T;
+            RowVectorType crackle_end = 120.0 * c5_last;
+
+            res.end.p =  2.0 * crackle_end.transpose();
+            res.end.v = -2.0 * snap_end.transpose();
+            res.end.a =  2.0 * jerk_end.transpose();
+
+            return res;
         }
 
         /**
@@ -2067,6 +2145,12 @@ namespace SplineTrajectory
                                    a(VectorType::Zero()), j(VectorType::Zero()) {}
         };
 
+        struct BoundaryDualGrads
+        {
+            BoundaryStateGrads start;
+            BoundaryStateGrads end;
+        };
+
         struct Gradients
         {
             MatrixType inner_points;
@@ -2410,6 +2494,49 @@ namespace SplineTrajectory
             }
 
             return grad;
+        }
+
+        /**
+         * @brief Compute partial gradient of energy w.r.t. boundary conditions (Pos, Vel, Acc, Jerk).
+         * @return BoundaryDualGrads containing gradients.
+         */
+        BoundaryDualGrads getEnergyGradBoundary() const
+        {
+            BoundaryDualGrads res;
+            if (num_segments_ < 1) return res;
+
+            const RowVectorType c4_first = coeffs_.row(4);
+            const RowVectorType c5_first = coeffs_.row(5);
+            const RowVectorType c6_first = coeffs_.row(6);
+            const RowVectorType c7_first = coeffs_.row(7);
+
+            res.start.p =  10080.0 * c7_first.transpose();
+            res.start.v =  -1440.0 * c6_first.transpose();
+            res.start.a =    240.0 * c5_first.transpose();
+            res.start.j =    -48.0 * c4_first.transpose();
+
+            int last_idx = num_segments_ - 1;
+            double T = time_segments_[last_idx];
+            double T2 = T * T;
+            double T3 = T2 * T;
+
+            const RowVectorType c4_last = coeffs_.row(last_idx * 8 + 4);
+            const RowVectorType c5_last = coeffs_.row(last_idx * 8 + 5);
+            const RowVectorType c6_last = coeffs_.row(last_idx * 8 + 6);
+            const RowVectorType c7_last = coeffs_.row(last_idx * 8 + 7);
+
+            RowVectorType snap_end = 24.0 * c4_last + 120.0 * c5_last * T + 
+                                     360.0 * c6_last * T2 + 840.0 * c7_last * T3;
+            RowVectorType crackle_end = 120.0 * c5_last + 720.0 * c6_last * T + 2520.0 * c7_last * T2;
+            RowVectorType pop_end = 720.0 * c6_last + 5040.0 * c7_last * T;
+            RowVectorType d7_end = 5040.0 * c7_last;
+
+            res.end.p = -2.0 * d7_end.transpose();
+            res.end.v =  2.0 * pop_end.transpose();
+            res.end.a = -2.0 * crackle_end.transpose();
+            res.end.j =  2.0 * snap_end.transpose();
+
+            return res;
         }
 
         /**

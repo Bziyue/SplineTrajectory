@@ -15,13 +15,13 @@ using namespace SplineTrajectory;
 
 void testCubicGradients() {
     std::cout << "\n================ Testing CubicSplineND Gradients ================" << std::endl;
-    
+
     const int DIM = 3;
     using SplineType = CubicSplineND<DIM>;
-    
-    std::vector<double> times = {1.0, 2.0, 1.5}; 
+
+    std::vector<double> times = {1.0, 2.0, 1.5};
     SplineVector<Eigen::Matrix<double, DIM, 1>> points;
-    for(size_t i=0; i<=times.size(); ++i) points.push_back(Eigen::Matrix<double, DIM, 1>::Random()); 
+    for(size_t i=0; i<=times.size(); ++i) points.push_back(Eigen::Matrix<double, DIM, 1>::Random());
 
     BoundaryConditions<DIM> bc;
     bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
@@ -33,12 +33,13 @@ void testCubicGradients() {
     auto gdT = spline.getEnergyPartialGradByTimes();
 
     auto grads = spline.propagateGrad(gdC, gdT);
+    auto bc_grads = spline.getEnergyGradBoundary();
 
     double eps = 1e-6;
 
-    auto verify_boundary = [&](std::string name, double analytical_val, double& target_val_ref) {
+    auto verify_boundary = [&](std::string name, double grad_propagate, double grad_boundary, double& target_val_ref) {
         double original = target_val_ref;
-        
+
         // J(x + eps)
         target_val_ref = original + eps;
         spline.update(times, points, 0.0, bc);
@@ -56,35 +57,56 @@ void testCubicGradients() {
         target_val_ref = original;
         spline.update(times, points, 0.0, bc);
 
-        double err = relativeError(analytical_val, num_grad);
-        std::cout << std::left << std::setw(25) << name 
-                  << " | Ana: " << std::setw(12) << analytical_val 
-                  << " | Num: " << std::setw(12) << num_grad 
-                  << " | Err: " << err;
-        if (err < 1e-4) std::cout << " [PASS]" << std::endl;
+        // Check consistency between propagateGrad and getEnergyGradBoundary
+        double consistency_err = relativeError(grad_propagate, grad_boundary);
+        double numerical_err = relativeError(grad_propagate, num_grad);
+
+        std::cout << std::left << std::setw(25) << name
+                  << " | Prop: " << std::setw(12) << grad_propagate
+                  << " | Boundary: " << std::setw(12) << grad_boundary
+                  << " | Num: " << std::setw(12) << num_grad
+                  << " | CErr: " << consistency_err
+                  << " | NErr: " << numerical_err;
+
+        bool pass = consistency_err < 1e-10 && numerical_err < 1e-4;
+        if (pass) std::cout << " [PASS]" << std::endl;
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
 
+    // Test position gradients (start and end points)
     for (int d = 0; d < DIM; ++d) {
-        verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc.start_velocity(d));
+        verify_boundary("Start Pos [" + std::to_string(d) + "]",
+                         grads.start.p(d), bc_grads.start.p(d), points[0](d));
     }
 
     for (int d = 0; d < DIM; ++d) {
-        verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc.end_velocity(d));
+        verify_boundary("End Pos [" + std::to_string(d) + "]",
+                         grads.end.p(d), bc_grads.end.p(d), points[points.size()-1](d));
+    }
+
+    // Test velocity gradients
+    for (int d = 0; d < DIM; ++d) {
+        verify_boundary("Start Vel [" + std::to_string(d) + "]",
+                         grads.start.v(d), bc_grads.start.v(d), bc.start_velocity(d));
+    }
+
+    for (int d = 0; d < DIM; ++d) {
+        verify_boundary("End Vel [" + std::to_string(d) + "]",
+                         grads.end.v(d), bc_grads.end.v(d), bc.end_velocity(d));
     }
 }
 
 void testQuinticGradients() {
     std::cout << "================ Testing QuinticSplineND Gradients ================" << std::endl;
-    
+
     const int DIM = 3;
     using SplineType = QuinticSplineND<DIM>;
-    
-    std::vector<double> times = {1.0, 1.5, 0.8}; 
-    
+
+    std::vector<double> times = {1.0, 1.5, 0.8};
+
     SplineVector<Eigen::Matrix<double, DIM, 1>> points;
-    
-    for(size_t i=0; i<=times.size(); ++i) points.push_back(Eigen::Matrix<double, DIM, 1>::Random()); 
+
+    for(size_t i=0; i<=times.size(); ++i) points.push_back(Eigen::Matrix<double, DIM, 1>::Random());
 
     BoundaryConditions<DIM> bc;
     bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
@@ -98,12 +120,13 @@ void testQuinticGradients() {
     auto gdT = spline.getEnergyPartialGradByTimes();
 
     auto grads = spline.propagateGrad(gdC, gdT);
+    auto bc_grads = spline.getEnergyGradBoundary();
 
     double eps = 1e-6;
 
-    auto verify_boundary = [&](std::string name, double analytical_val, double& target_val_ref) {
+    auto verify_boundary = [&](std::string name, double grad_propagate, double grad_boundary, double& target_val_ref) {
         double original = target_val_ref;
-        
+
         // J(x + eps)
         target_val_ref = original + eps;
         spline.update(times, points, 0.0, bc);
@@ -120,23 +143,46 @@ void testQuinticGradients() {
         target_val_ref = original;
         spline.update(times, points, 0.0, bc);
 
-        double err = relativeError(analytical_val, num_grad);
-        std::cout << std::left << std::setw(25) << name 
-                  << " | Ana: " << std::setw(12) << analytical_val 
-                  << " | Num: " << std::setw(12) << num_grad 
-                  << " | Err: " << err;
-        if (err < 1e-4) std::cout << " [PASS]" << std::endl;
+        // Check consistency between propagateGrad and getEnergyGradBoundary
+        double consistency_err = relativeError(grad_propagate, grad_boundary);
+        double numerical_err = relativeError(grad_propagate, num_grad);
+
+        std::cout << std::left << std::setw(25) << name
+                  << " | Prop: " << std::setw(12) << grad_propagate
+                  << " | Boundary: " << std::setw(12) << grad_boundary
+                  << " | Num: " << std::setw(12) << num_grad
+                  << " | CErr: " << consistency_err
+                  << " | NErr: " << numerical_err;
+
+        bool pass = consistency_err < 1e-10 && numerical_err < 1e-4;
+        if (pass) std::cout << " [PASS]" << std::endl;
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
 
+    // Test position gradients (start and end points)
     for (int d = 0; d < DIM; ++d) {
-        verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc.start_velocity(d));
-        verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.start.a(d), bc.start_acceleration(d));
+        verify_boundary("Start Pos [" + std::to_string(d) + "]",
+                         grads.start.p(d), bc_grads.start.p(d), points[0](d));
     }
 
     for (int d = 0; d < DIM; ++d) {
-        verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc.end_velocity(d));
-        verify_boundary("End Acc [" + std::to_string(d) + "]", grads.end.a(d), bc.end_acceleration(d));
+        verify_boundary("End Pos [" + std::to_string(d) + "]",
+                         grads.end.p(d), bc_grads.end.p(d), points[points.size()-1](d));
+    }
+
+    // Test velocity gradients
+    for (int d = 0; d < DIM; ++d) {
+        verify_boundary("Start Vel [" + std::to_string(d) + "]",
+                         grads.start.v(d), bc_grads.start.v(d), bc.start_velocity(d));
+        verify_boundary("Start Acc [" + std::to_string(d) + "]",
+                         grads.start.a(d), bc_grads.start.a(d), bc.start_acceleration(d));
+    }
+
+    for (int d = 0; d < DIM; ++d) {
+        verify_boundary("End Vel [" + std::to_string(d) + "]",
+                         grads.end.v(d), bc_grads.end.v(d), bc.end_velocity(d));
+        verify_boundary("End Acc [" + std::to_string(d) + "]",
+                         grads.end.a(d), bc_grads.end.a(d), bc.end_acceleration(d));
     }
 }
 
@@ -167,10 +213,11 @@ void testSepticGradients() {
     auto gdT = spline.getEnergyPartialGradByTimes();
 
     auto grads = spline.propagateGrad(gdC, gdT);
+    auto bc_grads = spline.getEnergyGradBoundary();
 
     double eps = 1e-6;
 
-    auto verify_boundary = [&](std::string name, double analytical_val, double& target_val_ref) {
+    auto verify_boundary = [&](std::string name, double grad_propagate, double grad_boundary, double& target_val_ref) {
         double original = target_val_ref;
         target_val_ref = original + eps;
         spline.update(times, points, 0.0, bc);
@@ -185,22 +232,41 @@ void testSepticGradients() {
         target_val_ref = original;
         spline.update(times, points, 0.0, bc);
 
-        double err = relativeError(analytical_val, num_grad);
-        std::cout << std::left << std::setw(25) << name 
-                  << " | Ana: " << std::setw(12) << analytical_val 
-                  << " | Num: " << std::setw(12) << num_grad 
-                  << " | Err: " << err;
-        if (err < 1e-4) std::cout << " [PASS]" << std::endl;
+        // Check consistency between propagateGrad and getEnergyGradBoundary
+        double consistency_err = relativeError(grad_propagate, grad_boundary);
+        double numerical_err = relativeError(grad_propagate, num_grad);
+
+        std::cout << std::left << std::setw(25) << name
+                  << " | Prop: " << std::setw(12) << grad_propagate
+                  << " | Boundary: " << std::setw(12) << grad_boundary
+                  << " | Num: " << std::setw(12) << num_grad
+                  << " | CErr: " << consistency_err
+                  << " | NErr: " << numerical_err;
+
+        bool pass = consistency_err < 1e-10 && numerical_err < 1e-4;
+        if (pass) std::cout << " [PASS]" << std::endl;
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
 
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc.start_velocity(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.start.a(d), bc.start_acceleration(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Jerk [" + std::to_string(d) + "]", grads.start.j(d), bc.start_jerk(d));
+    // Test position gradients (start and end points)
+    for (int d = 0; d < DIM; ++d) {
+        verify_boundary("Start Pos [" + std::to_string(d) + "]",
+                         grads.start.p(d), bc_grads.start.p(d), points[0](d));
+    }
 
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc.end_velocity(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Acc [" + std::to_string(d) + "]", grads.end.a(d), bc.end_acceleration(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Jerk [" + std::to_string(d) + "]", grads.end.j(d), bc.end_jerk(d));
+    for (int d = 0; d < DIM; ++d) {
+        verify_boundary("End Pos [" + std::to_string(d) + "]",
+                         grads.end.p(d), bc_grads.end.p(d), points[points.size()-1](d));
+    }
+
+    // Test velocity, acceleration, and jerk gradients
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc_grads.start.v(d), bc.start_velocity(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.start.a(d), bc_grads.start.a(d), bc.start_acceleration(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Jerk [" + std::to_string(d) + "]", grads.start.j(d), bc_grads.start.j(d), bc.start_jerk(d));
+
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc_grads.end.v(d), bc.end_velocity(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Acc [" + std::to_string(d) + "]", grads.end.a(d), bc_grads.end.a(d), bc.end_acceleration(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Jerk [" + std::to_string(d) + "]", grads.end.j(d), bc_grads.end.j(d), bc.end_jerk(d));
 }
 
 int main() {
