@@ -820,34 +820,23 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Compute full gradient of energy w.r.t. waypoints.
-         * 
-         * @param includeEndpoints If true, include boundary points P0 and PN in output.
-         * @return MatrixType Full gradient dE/dP.
-         *         Size (N+1) × DIM if includeEndpoints=true (all points).
-         *         Size (N-1) × DIM if includeEndpoints=false (inner points only).
+         * @brief Compute full gradient of energy w.r.t. inner waypoints only.
+         * @return MatrixType Full gradient dE/dP for inner points only.
+         *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
-        MatrixType getEnergyGradPoints(bool includeEndpoints = false) const
+        MatrixType getEnergyGradInnerPoints() const
         {
             if (num_segments_ < 1)
                 return MatrixType::Zero(0, DIM);
 
-            int num_rows = includeEndpoints ? num_segments_ + 1 : std::max(0, num_segments_ - 1);
+            int num_rows = std::max(0, num_segments_ - 1);
             MatrixType grad(num_rows, DIM);
-
-            int write_offset = includeEndpoints ? 1 : 0;
 
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c3_L = coeffs_.row((i - 1) * 4 + 3);
                 const RowVectorType c3_R = coeffs_.row(i * 4 + 3);
-                grad.row(i - 1 + write_offset) = 12.0 * (c3_R - c3_L);
-            }
-
-            if (includeEndpoints)
-            {
-                grad.row(0) = 12.0 * coeffs_.row(3);
-                grad.row(num_segments_) = -12.0 * coeffs_.row((num_segments_ - 1) * 4 + 3);
+                grad.row(i - 1) = 12.0 * (c3_R - c3_L);
             }
 
             return grad;
@@ -1513,34 +1502,23 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Compute full gradient of energy w.r.t. waypoints.
-         * 
-         * @param includeEndpoints If true, include boundary points P0 and PN in output.
-         * @return MatrixType Full gradient dE/dP.
-         *         Size (N+1) × DIM if includeEndpoints=true (all points).
-         *         Size (N-1) × DIM if includeEndpoints=false (inner points only).
+         * @brief Compute full gradient of energy w.r.t. inner waypoints only.
+         * @return MatrixType Full gradient dE/dP for inner points only.
+         *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
-        MatrixType getEnergyGradPoints(bool includeEndpoints = false) const
+        MatrixType getEnergyGradInnerPoints() const
         {
             if (num_segments_ < 1)
                 return MatrixType::Zero(0, DIM);
 
-            int num_rows = includeEndpoints ? num_segments_ + 1 : std::max(0, num_segments_ - 1);
+            int num_rows = std::max(0, num_segments_ - 1);
             MatrixType grad(num_rows, DIM);
-
-            int write_offset = includeEndpoints ? 1 : 0;
 
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c5_L = coeffs_.row((i - 1) * 6 + 5);
                 const RowVectorType c5_R = coeffs_.row(i * 6 + 5);
-                grad.row(i - 1 + write_offset) = 240.0 * (c5_L - c5_R);
-            }
-
-            if (includeEndpoints)
-            {
-                grad.row(0) = -240.0 * coeffs_.row(5);
-                grad.row(num_segments_) = 240.0 * coeffs_.row((num_segments_ - 1) * 6 + 5);
+                grad.row(i - 1) = 240.0 * (c5_L - c5_R);
             }
 
             return grad;
@@ -2463,34 +2441,23 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Compute full gradient of energy w.r.t. waypoints.
-         * 
-         * @param includeEndpoints If true, include boundary points P0 and PN in output.
-         * @return MatrixType Full gradient dE/dP.
-         *         Size (N+1) × DIM if includeEndpoints=true (all points).
-         *         Size (N-1) × DIM if includeEndpoints=false (inner points only).
+         * @brief Compute full gradient of energy w.r.t. inner waypoints only.
+         * @return MatrixType Full gradient dE/dP for inner points only.
+         *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
-        MatrixType getEnergyGradPoints(bool includeEndpoints = false) const
+        MatrixType getEnergyGradInnerPoints() const
         {
             if (num_segments_ < 1)
                 return MatrixType::Zero(0, DIM);
 
-            int num_rows = includeEndpoints ? num_segments_ + 1 : std::max(0, num_segments_ - 1);
+            int num_rows = std::max(0, num_segments_ - 1);
             MatrixType grad(num_rows, DIM);
-
-            int write_offset = includeEndpoints ? 1 : 0;
 
             for (int i = 1; i < num_segments_; ++i)
             {
                 const RowVectorType c7_L = coeffs_.row((i - 1) * 8 + 7);
                 const RowVectorType c7_R = coeffs_.row(i * 8 + 7);
-                grad.row(i - 1 + write_offset) = 10080.0 * (c7_R - c7_L);
-            }
-
-            if (includeEndpoints)
-            {
-                grad.row(0) = 10080.0 * coeffs_.row(7);
-                grad.row(num_segments_) = -10080.0 * coeffs_.row((num_segments_ - 1) * 8 + 7);
+                grad.row(i - 1) = 10080.0 * (c7_R - c7_L);
             }
 
             return grad;

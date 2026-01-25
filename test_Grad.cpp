@@ -126,25 +126,31 @@ void testCubic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         auto direct_gradT = cubic_spline.getEnergyGradTimes();
-        auto direct_gradP_full = cubic_spline.getEnergyGradPoints(true);
-        
+        auto direct_gradP_inner = cubic_spline.getEnergyGradInnerPoints();
+        auto direct_bc_grads = cubic_spline.getEnergyGradBoundary();
+
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.times).norm());
-        
+
         if (N > 1) {
-            Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
             Eigen::MatrixXd prop_gradP_inner = gradP_full.block(1, 0, N - 1, 3);
             printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
 
-        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_full.row(0)).norm());
-        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_full.row(N)).norm());
-        
+        printCheck("Direct vs Prop (Start P)", (direct_bc_grads.start.p - grads.start.p).norm());
+        printCheck("Direct vs Prop (Start V)", (direct_bc_grads.start.v - grads.start.v).norm());
+        printCheck("Direct vs Prop (End P)", (direct_bc_grads.end.p - grads.end.p).norm());
+        printCheck("Direct vs Prop (End V)", (direct_bc_grads.end.v - grads.end.v).norm());
+
         // Print boundary gradients
-        printSubHeader("Start/End Gradients");
-        cout << "Start Point Grad: " << gradP_full.row(0) << endl;
-        cout << "End   Point Grad: " << gradP_full.row(N) << endl;
+        printSubHeader("Boundary Condition Gradients");
+        cout << "\n[Start Boundary Gradients]" << endl;
+        cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
+        cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
+        cout << "\n[End Boundary Gradients]" << endl;
+        cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
+        cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
         return;
     }
 
@@ -246,20 +252,22 @@ void testCubic(int N, int BENCH_ITERS)
     // 5. Self-Check (Direct vs Propagated)
     printSubHeader("Self-Check: Direct vs Propagated");
     auto direct_gradT = cubic_spline.getEnergyGradTimes();
-    auto direct_gradP_full = cubic_spline.getEnergyGradPoints(true);
+    auto direct_gradP_inner = cubic_spline.getEnergyGradInnerPoints();
+    auto direct_bc_grads = cubic_spline.getEnergyGradBoundary();
     // Test reference overload
     SplineTrajectory::CubicSpline3D::Gradients grads_ref;
     cubic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
     printCheck("Reference overload", 0.0);
-    Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
 
     // Spline Propagated Inner (as (N-1)x3)
     Eigen::MatrixXd prop_gradP_inner = gradP_spline_full.block(1, 0, N - 1, 3);
 
     printCheck("Direct vs Prop (Times)", (direct_gradT - gradT_spline_out).norm());
     printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
-    printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_spline_full.row(0)).norm());
-    printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_spline_full.row(N)).norm());
+    printCheck("Direct vs Prop (Start P)", (direct_bc_grads.start.p - grads_ref.start.p).norm());
+    printCheck("Direct vs Prop (Start V)", (direct_bc_grads.start.v - grads_ref.start.v).norm());
+    printCheck("Direct vs Prop (End P)", (direct_bc_grads.end.p - grads_ref.end.p).norm());
+    printCheck("Direct vs Prop (End V)", (direct_bc_grads.end.v - grads_ref.end.v).norm());
 
     // 6. Point-by-Point Gradient Comparison
     printSubHeader("Point-by-Point Gradient Comparison");
@@ -290,9 +298,13 @@ void testCubic(int N, int BENCH_ITERS)
     }
 
     // 7. Print Boundary Gradients
-    printSubHeader("Start/End Gradients (Spline Only)");
-    cout << "Start Point Grad: " << gradP_spline_full.row(0) << endl;
-    cout << "End   Point Grad: " << gradP_spline_full.row(N) << endl;
+    printSubHeader("Boundary Condition Gradients");
+    cout << "\n[Start Boundary Gradients]" << endl;
+    cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
+    cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
+    cout << "\n[End Boundary Gradients]" << endl;
+    cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
+    cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
 }
 
 // ---------------------------------------------------------
@@ -350,25 +362,35 @@ void testQuintic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         auto direct_gradT = quintic_spline.getEnergyGradTimes();
-        auto direct_gradP_full = quintic_spline.getEnergyGradPoints(true);
-        
+        auto direct_gradP_inner = quintic_spline.getEnergyGradInnerPoints();
+        auto direct_bc_grads = quintic_spline.getEnergyGradBoundary();
+
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.times).norm());
-        
+
         if (N > 1) {
-            Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
             Eigen::MatrixXd prop_gradP_inner = gradP_full.block(1, 0, N - 1, 3);
             printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
 
-        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_full.row(0)).norm());
-        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_full.row(N)).norm());
-        
+        printCheck("Direct vs Prop (Start P)", (direct_bc_grads.start.p - grads.start.p).norm());
+        printCheck("Direct vs Prop (Start V)", (direct_bc_grads.start.v - grads.start.v).norm());
+        printCheck("Direct vs Prop (Start A)", (direct_bc_grads.start.a - grads.start.a).norm());
+        printCheck("Direct vs Prop (End P)", (direct_bc_grads.end.p - grads.end.p).norm());
+        printCheck("Direct vs Prop (End V)", (direct_bc_grads.end.v - grads.end.v).norm());
+        printCheck("Direct vs Prop (End A)", (direct_bc_grads.end.a - grads.end.a).norm());
+
         // Print boundary gradients
-        printSubHeader("Start/End Gradients");
-        cout << "Start Point Grad: " << gradP_full.row(0) << endl;
-        cout << "End   Point Grad: " << gradP_full.row(N) << endl;
+        printSubHeader("Boundary Condition Gradients");
+        cout << "\n[Start Boundary Gradients]" << endl;
+        cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
+        cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
+        cout << "Acceleration (A): " << direct_bc_grads.start.a.transpose() << endl;
+        cout << "\n[End Boundary Gradients]" << endl;
+        cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
+        cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
+        cout << "Acceleration (A): " << direct_bc_grads.end.a.transpose() << endl;
         return;
     }
 
@@ -437,6 +459,8 @@ void testQuintic(int N, int BENCH_ITERS)
     SplineTrajectory::QuinticSpline3D::MatrixType gradP_spline_full;
     Eigen::VectorXd gradT_spline_out;
 
+    SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
+
     t1 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
         minco_s3.getEnergyPartialGradByCoeffs(gdC_minco);
@@ -458,6 +482,7 @@ void testQuintic(int N, int BENCH_ITERS)
             gradP_spline_full.block(1, 0, N - 1, 3) = grads.inner_points;
         }
         gradP_spline_full.row(N) = grads.end.p.transpose();
+        grads_ref = grads;
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 
@@ -476,12 +501,12 @@ void testQuintic(int N, int BENCH_ITERS)
     // 5. Direct Gradient Consistency Check (vs Ref min_jerk)
     printSubHeader("Consistency: Direct Gradients vs Ref");
     auto direct_gradT = quintic_spline.getEnergyGradTimes();
-    auto direct_gradP_full = quintic_spline.getEnergyGradPoints(true);
-    Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
+    auto direct_gradP_inner = quintic_spline.getEnergyGradInnerPoints();
+    auto direct_bc_grads = quintic_spline.getEnergyGradBoundary();
 
     // Ref min_jerk returns 3x(N-1), need transpose
     Eigen::MatrixXd ref_gradP = jerk_opt.getGradInnerP().transpose();
-    
+
     printCheck("Direct Grad (Times)", (direct_gradT - jerk_opt.getGradT()).norm());
     printCheck("Direct Grad (Inner P)", (direct_gradP_inner - ref_gradP).norm());
 
@@ -490,10 +515,13 @@ void testQuintic(int N, int BENCH_ITERS)
     Eigen::MatrixXd prop_gradP_inner = gradP_spline_full.block(1, 0, N - 1, 3);
     printCheck("Direct vs Prop (Times)", (direct_gradT - gradT_spline_out).norm());
     printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
-    printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_spline_full.row(0)).norm());
-    printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_spline_full.row(N)).norm());
+    printCheck("Direct vs Prop (Start P)", (direct_bc_grads.start.p - grads_ref.start.p).norm());
+    printCheck("Direct vs Prop (Start V)", (direct_bc_grads.start.v - grads_ref.start.v).norm());
+    printCheck("Direct vs Prop (Start A)", (direct_bc_grads.start.a - grads_ref.start.a).norm());
+    printCheck("Direct vs Prop (End P)", (direct_bc_grads.end.p - grads_ref.end.p).norm());
+    printCheck("Direct vs Prop (End V)", (direct_bc_grads.end.v - grads_ref.end.v).norm());
+    printCheck("Direct vs Prop (End A)", (direct_bc_grads.end.a - grads_ref.end.a).norm());
     // Test reference overload
-    SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
     quintic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
     printCheck("Reference overload", 0.0);
 
@@ -532,9 +560,15 @@ void testQuintic(int N, int BENCH_ITERS)
     }
 
     // 8. Print Boundary Gradients
-    printSubHeader("Start/End Gradients (Spline Only)");
-    cout << "Start Point Grad: " << gradP_spline_full.row(0) << endl;
-    cout << "End   Point Grad: " << gradP_spline_full.row(N) << endl;
+    printSubHeader("Boundary Condition Gradients");
+    cout << "\n[Start Boundary Gradients]" << endl;
+    cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
+    cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
+    cout << "Acceleration (A): " << direct_bc_grads.start.a.transpose() << endl;
+    cout << "\n[End Boundary Gradients]" << endl;
+    cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
+    cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
+    cout << "Acceleration (A): " << direct_bc_grads.end.a.transpose() << endl;
 }
 void testSeptic(int N, int BENCH_ITERS)
 {
@@ -588,25 +622,39 @@ void testSeptic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         auto direct_gradT = septic_spline.getEnergyGradTimes();
-        auto direct_gradP_full = septic_spline.getEnergyGradPoints(true);
-        
+        auto direct_gradP_inner = septic_spline.getEnergyGradInnerPoints();
+        auto direct_bc_grads = septic_spline.getEnergyGradBoundary();
+
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.times).norm());
-        
+
         if (N > 1) {
-            Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
             Eigen::MatrixXd prop_gradP_inner = gradP_full.block(1, 0, N - 1, 3);
             printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
         } else {
             cout << "Inner Points Grad: N/A (no inner points for N=1)" << endl;
         }
 
-        printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_full.row(0)).norm());
-        printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_full.row(N)).norm());
-        
+        printCheck("Direct vs Prop (Start P)", (direct_bc_grads.start.p - grads.start.p).norm());
+        printCheck("Direct vs Prop (Start V)", (direct_bc_grads.start.v - grads.start.v).norm());
+        printCheck("Direct vs Prop (Start A)", (direct_bc_grads.start.a - grads.start.a).norm());
+        printCheck("Direct vs Prop (Start J)", (direct_bc_grads.start.j - grads.start.j).norm());
+        printCheck("Direct vs Prop (End P)", (direct_bc_grads.end.p - grads.end.p).norm());
+        printCheck("Direct vs Prop (End V)", (direct_bc_grads.end.v - grads.end.v).norm());
+        printCheck("Direct vs Prop (End A)", (direct_bc_grads.end.a - grads.end.a).norm());
+        printCheck("Direct vs Prop (End J)", (direct_bc_grads.end.j - grads.end.j).norm());
+
         // Print boundary gradients
-        printSubHeader("Start/End Gradients");
-        cout << "Start Point Grad: " << gradP_full.row(0) << endl;
-        cout << "End   Point Grad: " << gradP_full.row(N) << endl;
+        printSubHeader("Boundary Condition Gradients");
+        cout << "\n[Start Boundary Gradients]" << endl;
+        cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
+        cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
+        cout << "Acceleration (A): " << direct_bc_grads.start.a.transpose() << endl;
+        cout << "Jerk (J): " << direct_bc_grads.start.j.transpose() << endl;
+        cout << "\n[End Boundary Gradients]" << endl;
+        cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
+        cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
+        cout << "Acceleration (A): " << direct_bc_grads.end.a.transpose() << endl;
+        cout << "Jerk (J): " << direct_bc_grads.end.j.transpose() << endl;
         return;
     }
 
@@ -675,6 +723,8 @@ void testSeptic(int N, int BENCH_ITERS)
     SplineTrajectory::SepticSpline3D::MatrixType gradP_spline_full;
     Eigen::VectorXd gradT_spline_out;
 
+    SplineTrajectory::SepticSpline3D::Gradients grads_ref;
+
     t1 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
         minco_s4.getEnergyPartialGradByCoeffs(gdC_minco);
@@ -696,6 +746,7 @@ void testSeptic(int N, int BENCH_ITERS)
             gradP_spline_full.block(1, 0, N - 1, 3) = grads.inner_points;
         }
         gradP_spline_full.row(N) = grads.end.p.transpose();
+        grads_ref = grads;
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
 
@@ -714,12 +765,12 @@ void testSeptic(int N, int BENCH_ITERS)
     // 5. Direct Gradient Consistency Check (vs Ref min_snap)
     printSubHeader("Consistency: Direct Gradients vs Ref");
     auto direct_gradT = septic_spline.getEnergyGradTimes();
-    auto direct_gradP_full = septic_spline.getEnergyGradPoints(true);
-    Eigen::MatrixXd direct_gradP_inner = direct_gradP_full.block(1, 0, N - 1, 3);
+    auto direct_gradP_inner = septic_spline.getEnergyGradInnerPoints();
+    auto direct_bc_grads = septic_spline.getEnergyGradBoundary();
 
     // Ref min_snap returns 3x(N-1), need transpose
     Eigen::MatrixXd ref_gradP = snap_opt.getGradInnerP().transpose();
-    
+
     printCheck("Direct Grad (Times)", (direct_gradT - snap_opt.getGradT()).norm());
     printCheck("Direct Grad (Inner P)", (direct_gradP_inner - ref_gradP).norm());
 
@@ -728,10 +779,15 @@ void testSeptic(int N, int BENCH_ITERS)
     Eigen::MatrixXd prop_gradP_inner = gradP_spline_full.block(1, 0, N - 1, 3);
     printCheck("Direct vs Prop (Times)", (direct_gradT - gradT_spline_out).norm());
     printCheck("Direct vs Prop (Inner P)", (direct_gradP_inner - prop_gradP_inner).norm());
-    printCheck("Start Grad Consistency", (direct_gradP_full.row(0) - gradP_spline_full.row(0)).norm());
-    printCheck("End Grad Consistency", (direct_gradP_full.row(N) - gradP_spline_full.row(N)).norm());
+    printCheck("Direct vs Prop (Start P)", (direct_bc_grads.start.p.transpose() - grads_ref.start.p.transpose()).norm());
+    printCheck("Direct vs Prop (Start V)", (direct_bc_grads.start.v.transpose() - grads_ref.start.v.transpose()).norm());
+    printCheck("Direct vs Prop (Start A)", (direct_bc_grads.start.a.transpose() - grads_ref.start.a.transpose()).norm());
+    printCheck("Direct vs Prop (Start J)", (direct_bc_grads.start.j.transpose() - grads_ref.start.j.transpose()).norm());
+    printCheck("Direct vs Prop (End P)", (direct_bc_grads.end.p.transpose() - grads_ref.end.p.transpose()).norm());
+    printCheck("Direct vs Prop (End V)", (direct_bc_grads.end.v.transpose() - grads_ref.end.v.transpose()).norm());
+    printCheck("Direct vs Prop (End A)", (direct_bc_grads.end.a.transpose() - grads_ref.end.a.transpose()).norm());
+    printCheck("Direct vs Prop (End J)", (direct_bc_grads.end.j.transpose() - grads_ref.end.j.transpose()).norm());
     // Test reference overload
-    SplineTrajectory::SepticSpline3D::Gradients grads_ref;
     septic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
     printCheck("Reference overload", 0.0);
 
@@ -770,9 +826,17 @@ void testSeptic(int N, int BENCH_ITERS)
     }
 
     // 8. Print Boundary Gradients
-    printSubHeader("Start/End Gradients (Spline Only)");
-    cout << "Start Point Grad: " << gradP_spline_full.row(0) << endl;
-    cout << "End   Point Grad: " << gradP_spline_full.row(N) << endl;
+    printSubHeader("Boundary Condition Gradients");
+    cout << "\n[Start Boundary Gradients]" << endl;
+    cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
+    cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
+    cout << "Acceleration (A): " << direct_bc_grads.start.a.transpose() << endl;
+    cout << "Jerk (J): " << direct_bc_grads.start.j.transpose() << endl;
+    cout << "\n[End Boundary Gradients]" << endl;
+    cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
+    cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
+    cout << "Acceleration (A): " << direct_bc_grads.end.a.transpose() << endl;
+    cout << "Jerk (J): " << direct_bc_grads.end.j.transpose() << endl;
 }
 
 int main()
