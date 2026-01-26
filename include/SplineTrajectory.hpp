@@ -304,6 +304,22 @@ namespace SplineTrajectory
             return evaluate(t, static_cast<int>(type));
         }
 
+        VectorType evaluate(double t, int* last_idx_hint, Deriv type = Deriv::Pos) const
+        {
+            return evaluate(t, last_idx_hint, static_cast<int>(type));
+        }
+
+        VectorType evaluate(double t, int* last_idx_hint, int derivative_order) const
+        {
+            if (derivative_order >= num_coeffs_)
+                return VectorType::Zero();
+            
+            int segment_idx = findSegment(t, last_idx_hint);
+            double dt = t - breakpoints_[segment_idx];
+
+            return Segment(this, segment_idx).evaluate(dt, derivative_order);
+        }
+
         double getTrajectoryLength(double dt = 0.01) const
         {
             return getTrajectoryLength(getStartTime(), getEndTime(), dt);
@@ -461,6 +477,36 @@ namespace SplineTrajectory
             }
             auto it = std::upper_bound(breakpoints_.begin(), breakpoints_.end(), t);
             return static_cast<int>(std::distance(breakpoints_.begin(), it)) - 1;
+        }
+
+        inline int findSegment(double t, int* last_idx_hint) const
+        {
+            if (!last_idx_hint) return findSegment(t);
+
+            int idx = *last_idx_hint;
+
+            if (idx >= 0 && idx < num_segments_)
+            {
+                if (t >= breakpoints_[idx] && t < breakpoints_[idx + 1])
+                {
+                    return idx; 
+                }
+                
+                if (idx + 1 < num_segments_)
+                {
+                    if (t >= breakpoints_[idx + 1] && t < breakpoints_[idx + 2])
+                    {
+                        *last_idx_hint = idx + 1; 
+                        return idx + 1;
+                    }
+                }
+            }
+
+            int found_idx = findSegment(t);
+
+            *last_idx_hint = found_idx;
+
+            return found_idx;
         }
     };
 

@@ -160,10 +160,39 @@ int main() {
         double global_t = seg_start_t + 0.5;
 
         Eigen::Vector3d global_val = traj.evaluate(global_t, Deriv::Crackle);
-        
+
         assertVectorEq(global_val, Eigen::Vector3d(120, 120, 120), "Global Evaluate Crackle");
-        
+
         printPass("Global Evaluation");
+    }
+
+    {
+        std::cout << "\nTesting Evaluation with Hint Optimization..." << std::endl;
+
+        int hint = 0;
+        double start_time = traj.getStartTime();
+        double end_time = traj.getEndTime();
+        double dt = 0.01;
+
+        int num_evaluations = static_cast<int>((end_time - start_time) / dt) + 1;
+        std::cout << "Evaluating " << num_evaluations << " points with dt=" << dt << "..." << std::endl;
+
+        int hint_changes = 0;
+        int prev_hint = hint;
+
+        for (double t = start_time; t <= end_time + 1e-9; t += dt) {
+            Eigen::Vector3d pos = traj.evaluate(t, &hint, Deriv::Pos);
+
+            if (hint != prev_hint && prev_hint != 0) {
+                hint_changes++;
+            }
+            prev_hint = hint;
+        }
+
+        std::cout << "Hint changes during evaluation: " << hint_changes << std::endl;
+        std::cout << "Final hint value: " << hint << std::endl;
+
+        printPass("Evaluation with Hint Optimization");
     }
 
     std::cout << "\n-------------------------------------------" << std::endl;
