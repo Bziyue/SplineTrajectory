@@ -223,212 +223,6 @@ void printConsistency(const ConsistencyResult &r)
     }
 }
 
-// 新增：从段化时间序列提取时间点
-template <int DIM>
-std::vector<double> extractTimePointsFromSegmented(const SegmentedTimeSequence& segmented_seq)
-{
-    std::vector<double> time_points;
-    time_points.reserve(segmented_seq.getTotalSize());
-    
-    for (const auto& segment : segmented_seq.segments)
-    {
-        for (double t : segment.times)
-        {
-            time_points.push_back(t);
-        }
-    }
-    
-    return time_points;
-}
-
-// 新增：测试段化批量评估性能
-template <int DIM>
-BatchPerformanceResult testSegmentedBatchEvaluation(
-    const SplineTrajectory::QuinticSplineND<DIM>& quintic_spline,
-    const std::vector<Trajectory<5>>& minco_trajs,
-    double dt)
-{
-    using QuinticSpline = SplineTrajectory::QuinticSplineND<DIM>;
-    using VectorD = typename QuinticSpline::VectorType;
-    
-    BatchPerformanceResult result = {0, 0, 0, 0, 0};
-
-    double start_time = quintic_spline.getTrajectory().getStartTime();
-    double end_time = quintic_spline.getTrajectory().getEndTime();
-
-    // 1. 生成段化时间序列
-    auto t1 = std::chrono::high_resolution_clock::now();
-    auto segmented_seq = quintic_spline.getTrajectory().generateSegmentedTimeSequence(start_time, end_time, dt);
-    auto t2 = std::chrono::high_resolution_clock::now();
-    result.segmented_time_generation_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-    result.total_points = segmented_seq.getTotalSize();
-    
-    // 2. QuinticSpline 段化批量评估
-    auto t3 = std::chrono::high_resolution_clock::now();
-    auto quintic_pos = quintic_spline.getTrajectory().evaluateSegmented(segmented_seq, 0);
-    auto quintic_vel = quintic_spline.getTrajectory().evaluateSegmented(segmented_seq, 1);
-    auto quintic_acc = quintic_spline.getTrajectory().evaluateSegmented(segmented_seq, 2);
-    auto quintic_jerk = quintic_spline.getTrajectory().evaluateSegmented(segmented_seq, 3);
-    auto quintic_snap = quintic_spline.getTrajectory().evaluateSegmented(segmented_seq, 4);
-    auto t4 = std::chrono::high_resolution_clock::now();
-    result.quintic_batch_evaluation_us = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
-    
-    // 3. 提取时间点用于MINCO评估
-    std::vector<double> time_points = extractTimePointsFromSegmented<DIM>(segmented_seq);
-    
-    // 4. MINCO 批量评估（模拟）
-    auto t5 = std::chrono::high_resolution_clock::now();
-    int num_minco_instances = (DIM + 2) / 3;
-    SplineVector<VectorD> minco_pos(result.total_points), minco_vel(result.total_points),
-        minco_acc(result.total_points), minco_jerk(result.total_points), minco_snap(result.total_points);
-
-    for (size_t i = 0; i < time_points.size(); ++i)
-    {
-        double t = time_points[i];
-
-        VectorD p = VectorD::Zero();
-        VectorD v = VectorD::Zero();
-        VectorD a = VectorD::Zero();
-        VectorD jrk = VectorD::Zero();
-        VectorD snp = VectorD::Zero();
-
-        for (int j = 0; j < num_minco_instances; ++j)
-        {
-            int start_dim = j * 3;
-            int current_dim = std::min(3, DIM - start_dim);
-
-            if (start_dim < DIM)
-            {
-                Eigen::Vector3d pos_3d = minco_trajs[j].getPos(t);
-                Eigen::Vector3d vel_3d = minco_trajs[j].getVel(t);
-                Eigen::Vector3d acc_3d = minco_trajs[j].getAcc(t);
-                Eigen::Vector3d jerk_3d = minco_trajs[j].getJer(t);
-                Eigen::Vector3d snap_3d = minco_trajs[j].getSnap(t);
-
-                p.segment(start_dim, current_dim) = pos_3d.head(current_dim);
-                v.segment(start_dim, current_dim) = vel_3d.head(current_dim);
-                a.segment(start_dim, current_dim) = acc_3d.head(current_dim);
-                jrk.segment(start_dim, current_dim) = jerk_3d.head(current_dim);
-                snp.segment(start_dim, current_dim) = snap_3d.head(current_dim);
-            }
-        }
-        minco_pos[i] = p;
-        minco_vel[i] = v;
-        minco_acc[i] = a;
-        minco_jerk[i] = jrk;
-        minco_snap[i] = snp;
-    }
-    auto t6 = std::chrono::high_resolution_clock::now();
-    result.minco_batch_evaluation_us = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count();
-    
-    // 5. 计算性能提升比
-    if (result.quintic_batch_evaluation_us > 0)
-    {
-        result.speedup_ratio = static_cast<double>(result.minco_batch_evaluation_us) / result.quintic_batch_evaluation_us;
-    }
-    
-    // 6. 验证一致性
-    std::cout << "\n    段化批量评估一致性检查:" << std::endl;
-    auto cons = testConsistency(quintic_pos, quintic_vel, quintic_acc, quintic_jerk, quintic_snap,
-                                minco_pos, minco_vel, minco_acc, minco_jerk, minco_snap);
-    printConsistency(cons);
-    
-    return result;
-}
-
-// 新增：测试优化的evaluate重载函数
-template <int DIM>
-void testOptimizedEvaluateOverload(
-    const SplineTrajectory::QuinticSplineND<DIM>& quintic_spline,
-    double dt)
-{
-    double start_time = quintic_spline.getTrajectory().getStartTime();
-    double end_time = quintic_spline.getTrajectory().getEndTime();
-    
-    std::cout << "\n2.6) 优化的evaluate重载函数测试 (dt=" << dt << "):" << std::endl;
-    
-    // 1. 使用新的evaluate重载函数
-    auto t1 = std::chrono::high_resolution_clock::now();
-    auto quintic_pos_opt = quintic_spline.getTrajectory().evaluate(start_time, end_time, dt, 0);
-    auto quintic_vel_opt = quintic_spline.getTrajectory().evaluate(start_time, end_time, dt, 1);
-    auto quintic_acc_opt = quintic_spline.getTrajectory().evaluate(start_time, end_time, dt, 2);
-    auto quintic_jerk_opt = quintic_spline.getTrajectory().evaluate(start_time, end_time, dt, 3);
-    auto quintic_snap_opt = quintic_spline.getTrajectory().evaluate(start_time, end_time, dt, 4);
-    auto t2 = std::chrono::high_resolution_clock::now();
-    double quintic_opt_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-    
-    // 2. 使用优化便捷函数
-    auto t3 = std::chrono::high_resolution_clock::now();
-    auto quintic_pos_conv = quintic_spline.getTrajectory().getPos(start_time, end_time, dt);
-    auto quintic_vel_conv = quintic_spline.getTrajectory().getVel(start_time, end_time, dt);
-    auto quintic_acc_conv = quintic_spline.getTrajectory().getAcc(start_time, end_time, dt);
-    auto quintic_jerk_conv = quintic_spline.getTrajectory().getJerk(start_time, end_time, dt);
-    auto quintic_snap_conv = quintic_spline.getTrajectory().getSnap(start_time, end_time, dt);
-    auto t4 = std::chrono::high_resolution_clock::now();
-    double quintic_conv_us = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
-    
-    // 3. 普通方法（生成时间序列然后查询）
-    auto t5 = std::chrono::high_resolution_clock::now();
-    auto time_seq = quintic_spline.getTrajectory().generateTimeSequence(start_time, end_time, dt);
-    auto quintic_pos_trad = quintic_spline.getTrajectory().getPos(time_seq);
-    auto quintic_vel_trad = quintic_spline.getTrajectory().getVel(time_seq);
-    auto quintic_acc_trad = quintic_spline.getTrajectory().getAcc(time_seq);
-    auto quintic_jerk_trad = quintic_spline.getTrajectory().getJerk(time_seq);
-    auto quintic_snap_trad = quintic_spline.getTrajectory().getSnap(time_seq);
-    auto t6 = std::chrono::high_resolution_clock::now();
-    double quintic_trad_us = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count();
-    
-    std::cout << "  - 段批量查询优化evaluate()重载函数: " << quintic_opt_us << " μs (" << quintic_pos_opt.size() << " 点)" << std::endl;
-    std::cout << "  - 段批量查询优化便捷函数(getPos/Vel/Acc等): " << quintic_conv_us << " μs (" << quintic_pos_conv.size() << " 点)" << std::endl;
-    std::cout << "  - 普通方法(时间序列+批量查询): " << quintic_trad_us << " μs (" << quintic_pos_trad.size() << " 点)" << std::endl;
-    
-    if (quintic_trad_us > 0)
-    {
-        std::cout << "  - 性能提升比 (普通/优化): " << std::fixed << std::setprecision(3) 
-                  << quintic_trad_us / quintic_opt_us << "x" << std::endl;
-        std::cout << "  - 性能提升比 (普通/便捷): " << std::fixed << std::setprecision(3) 
-                  << quintic_trad_us / quintic_conv_us << "x" << std::endl;
-    }
-    
-    // 4. 验证结果一致性
-    std::cout << "\n    段批量查询优化函数结果一致性验证:" << std::endl;
-    double max_pos_diff = 0, max_vel_diff = 0, max_acc_diff = 0, max_jerk_diff = 0, max_snap_diff = 0;
-    
-    if (quintic_pos_opt.size() == quintic_pos_trad.size())
-    {
-        for (size_t i = 0; i < quintic_pos_opt.size(); ++i)
-        {
-            max_pos_diff = std::max(max_pos_diff, (quintic_pos_opt[i] - quintic_pos_trad[i]).norm());
-            max_vel_diff = std::max(max_vel_diff, (quintic_vel_opt[i] - quintic_vel_trad[i]).norm());
-            max_acc_diff = std::max(max_acc_diff, (quintic_acc_opt[i] - quintic_acc_trad[i]).norm());
-            max_jerk_diff = std::max(max_jerk_diff, (quintic_jerk_opt[i] - quintic_jerk_trad[i]).norm());
-            max_snap_diff = std::max(max_snap_diff, (quintic_snap_opt[i] - quintic_snap_trad[i]).norm());
-        }
-        
-        std::cout << std::scientific << std::setprecision(4);
-        std::cout << "  - 位置最大差异: " << max_pos_diff << std::endl;
-        std::cout << "  - 速度最大差异: " << max_vel_diff << std::endl;
-        std::cout << "  - 加速度最大差异: " << max_acc_diff << std::endl;
-        std::cout << "  - 加加速最大差异: " << max_jerk_diff << std::endl;
-        std::cout << "  - 四阶导最大差异: " << max_snap_diff << std::endl;
-        
-        if (max_pos_diff < 1e-12 && max_vel_diff < 1e-12 && max_acc_diff < 1e-12 &&
-            max_jerk_diff < 1e-12 && max_snap_diff < 1e-12)
-        {
-            std::cout << "  - 优化函数验证通过!" << std::endl;
-        }
-        else
-        {
-            std::cout << "  - 优化函数验证失败! 存在数值差异。" << std::endl;
-        }
-    }
-    else
-    {
-        std::cout << "  - 结果大小不匹配: 优化=" << quintic_pos_opt.size() 
-                  << ", 普通=" << quintic_pos_trad.size() << std::endl;
-    }
-}
-
 // ===================================================================================
 // ============================= 模板化的主测试逻辑 =================================
 // ===================================================================================
@@ -580,7 +374,7 @@ void runQuinticTest()
 
     // 五次样条单点查询性能
     std::function<void(int)> quintic_func = [&](int i)
-    { quintic_spline.getTrajectory().getPos(time_seq[i]); };
+    { quintic_spline.getTrajectory().evaluate(time_seq[i], Deriv::Pos); };
     auto perf_quintic = measurePerformance(quintic_func, num_queries);
     printPerformance(perf_quintic, "  - QuinticSpline" + std::to_string(DIM) + "D");
 
@@ -606,11 +400,11 @@ void runQuinticTest()
 
     // 五次样条批量查询
     auto t1 = std::chrono::high_resolution_clock::now();
-    auto quintic_results_position = quintic_spline.getTrajectory().getPos(time_seq);
-    auto quintic_results_velocity = quintic_spline.getTrajectory().getVel(time_seq);
-    auto quintic_results_acceleration = quintic_spline.getTrajectory().getAcc(time_seq);
-    auto quintic_results_jerk = quintic_spline.getTrajectory().getJerk(time_seq);
-    auto quintic_results_snap = quintic_spline.getTrajectory().getSnap(time_seq);
+    auto quintic_results_position = quintic_spline.getTrajectory().evaluate(time_seq, Deriv::Pos);
+    auto quintic_results_velocity = quintic_spline.getTrajectory().evaluate(time_seq, Deriv::Vel);
+    auto quintic_results_acceleration = quintic_spline.getTrajectory().evaluate(time_seq, Deriv::Acc);
+    auto quintic_results_jerk = quintic_spline.getTrajectory().evaluate(time_seq, Deriv::Jerk);
+    auto quintic_results_snap = quintic_spline.getTrajectory().evaluate(time_seq, Deriv::Snap);
     auto t2 = std::chrono::high_resolution_clock::now();
     double quintic_batch_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     std::cout << "  - QuinticSpline" << DIM << "D 普通批量查询: " << quintic_batch_us << " μs" << std::endl;
@@ -695,28 +489,6 @@ void runQuinticTest()
     else
     {
         std::cout << "  - 验证失败! 差异过大。" << std::endl;
-    }
-
-    // ===== 新增测试：段化批量评估 =====
-    std::cout << "\n2.6) 段化批量评估性能测试:" << std::endl;
-    double test_dt = 0.01;
-    auto batch_result = testSegmentedBatchEvaluation<DIM>(quintic_spline,minco_trajs, test_dt);
-    printBatchPerformance(batch_result, "  - " + std::to_string(DIM) + "D");
-
-    // ===== 新增测试：优化的evaluate重载函数 =====
-    testOptimizedEvaluateOverload<DIM>(quintic_spline,test_dt);
-
-    // ===== 新增测试：不同dt下的性能对比 =====
-    std::cout << "\n2.7) 不同时间步长下的段化评估性能:" << std::endl;
-    std::vector<double> test_dts = {0.001,0.0001};
-    
-    for (double test_dt_var : test_dts)
-    {
-        auto batch_result_var = testSegmentedBatchEvaluation<DIM>(quintic_spline,minco_trajs, test_dt_var);
-        std::cout << std::fixed << std::setprecision(4);
-        std::cout << "  - dt=" << test_dt_var << ": QuinticSpline=" << batch_result_var.quintic_batch_evaluation_us 
-                  << "μs, MINCO=" << batch_result_var.minco_batch_evaluation_us 
-                  << "μs, 提升=" << batch_result_var.speedup_ratio << "x (" << batch_result_var.total_points << "点)" << std::endl;
     }
 
     // DIM=3 特殊测试: 轨迹能量计算函数一致性

@@ -263,7 +263,7 @@ void runTest()
 
     std::cout << "\n2.2) 单点查询性能 (" << num_queries << "个点):" << std::endl;
     std::function<void(int)> cubic_func = [&](int i)
-    { cubic_spline.getTrajectory().getPos(time_seq[i]); };
+    { cubic_spline.getTrajectory().evaluate(time_seq[i], Deriv::Pos); };
     auto perf_cubic = measurePerformance(cubic_func, num_queries);
     printPerformance(perf_cubic, "  - CubicSpline" + std::to_string(DIM) + "D");
 
@@ -282,10 +282,10 @@ void runTest()
 
     std::cout << "\n2.3) 批量查询性能 (一次性查询 " << num_queries << " 个点):" << std::endl;
     auto t1 = std::chrono::high_resolution_clock::now();
-    auto cubic_results_position = cubic_spline.getTrajectory().getPos(time_seq);
-    auto cubic_results_velocity = cubic_spline.getTrajectory().getVel(time_seq);
-    auto cubic_results_acceleration = cubic_spline.getTrajectory().getAcc(time_seq);
-    auto cubic_results_jerk = cubic_spline.getTrajectory().getJerk(time_seq);
+    auto cubic_results_position = cubic_spline.getTrajectory().evaluate(time_seq, Deriv::Pos);
+    auto cubic_results_velocity = cubic_spline.getTrajectory().evaluate(time_seq, Deriv::Vel);
+    auto cubic_results_acceleration = cubic_spline.getTrajectory().evaluate(time_seq, Deriv::Acc);
+    auto cubic_results_jerk = cubic_spline.getTrajectory().evaluate(time_seq, Deriv::Jerk);
     auto t2 = std::chrono::high_resolution_clock::now();
     double cubic_batch_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     std::cout << "  - CubicSpline" << DIM << "D 批量查询 (getTrajectorySequence): " << cubic_batch_us << " μs" << std::endl;

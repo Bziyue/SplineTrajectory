@@ -223,7 +223,7 @@ void runEvaluationTests()
     
     // SepticSpline random evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_pos_random = septicSpline.getTrajectory().getPos(random_times);
+    auto ss_pos_random = septicSpline.getTrajectory().evaluate(random_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_pos_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -239,7 +239,7 @@ void runEvaluationTests()
     
     // SepticSpline random evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_vel_random = septicSpline.getTrajectory().getVel(random_times);
+    auto ss_vel_random = septicSpline.getTrajectory().evaluate(random_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_vel_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -255,7 +255,7 @@ void runEvaluationTests()
     
     // SepticSpline random evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_acc_random = septicSpline.getTrajectory().getAcc(random_times);
+    auto ss_acc_random = septicSpline.getTrajectory().evaluate(random_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_acc_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -275,7 +275,6 @@ void runEvaluationTests()
     std::cout << "----------------------------------------------------------------" << std::endl;
     
     auto uniform_times = generateUniformTimeSequence(0.0, total_duration, dt_batch);
-    auto segmented_times = septicSpline.getTrajectory().generateSegmentedTimeSequence(0.0, total_duration, dt_batch);
     std::cout << "Number of evaluation points: " << uniform_times.size() << std::endl;
     
     // MinSnap batch evaluation (using for loop) - Position
@@ -290,15 +289,9 @@ void runEvaluationTests()
     
     // SepticSpline normal batch evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_pos_batch_normal = septicSpline.getTrajectory().getPos(uniform_times);
+    auto ss_pos_batch_normal = septicSpline.getTrajectory().evaluate(uniform_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_pos_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    
-    // SepticSpline optimized batch evaluation - Position
-    t0 = std::chrono::high_resolution_clock::now();
-    auto ss_pos_batch_optimized = septicSpline.getTrajectory().getPos(segmented_times);
-    t1 = std::chrono::high_resolution_clock::now();
-    double ss_batch_pos_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
     // MinSnap batch evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
@@ -312,15 +305,10 @@ void runEvaluationTests()
     
     // SepticSpline batch evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_vel_batch_normal = septicSpline.getTrajectory().getVel(uniform_times);
+    auto ss_vel_batch_normal = septicSpline.getTrajectory().evaluate(uniform_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_vel_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    
-    t0 = std::chrono::high_resolution_clock::now();
-    auto ss_vel_batch_optimized = septicSpline.getTrajectory().getVel(segmented_times);
-    t1 = std::chrono::high_resolution_clock::now();
-    double ss_batch_vel_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    
+
     // MinSnap batch evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
     std::vector<Vector3d> ms_acc_batch(uniform_times.size());
@@ -333,28 +321,23 @@ void runEvaluationTests()
     
     // SepticSpline batch evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_acc_batch_normal = septicSpline.getTrajectory().getAcc(uniform_times);
+    auto ss_acc_batch_normal = septicSpline.getTrajectory().evaluate(uniform_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_acc_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
-    t0 = std::chrono::high_resolution_clock::now();
-    auto ss_acc_batch_optimized = septicSpline.getTrajectory().getAcc(segmented_times);
-    t1 = std::chrono::high_resolution_clock::now();
-    double ss_batch_acc_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    
-    std::cout << "Eval Type\tMinSnap(μs)\tSS_Normal(μs)\tSS_Optimized(μs)\tMS/SS_Normal\tMS/SS_Opt" << std::endl;
+    std::cout << "Eval Type\tMinSnap(μs)\tSS_Normal(μs)\tMS/SS_Normal" << std::endl;
     std::cout << "Position\t" << std::fixed << std::setprecision(0) 
-              << ms_batch_pos_time << "\t\t" << ss_batch_pos_normal_time << "\t\t" << ss_batch_pos_optimized_time << "\t\t\t"
+              << ms_batch_pos_time << "\t\t" << ss_batch_pos_normal_time << "\t\t"
               << std::setprecision(2) << (ms_batch_pos_time / ss_batch_pos_normal_time) << "\t\t"
-              << (ms_batch_pos_time / ss_batch_pos_optimized_time) << std::endl;
+              << std::endl;
     std::cout << "Velocity\t" << std::fixed << std::setprecision(0) 
-              << ms_batch_vel_time << "\t\t" << ss_batch_vel_normal_time << "\t\t" << ss_batch_vel_optimized_time << "\t\t\t"
+              << ms_batch_vel_time << "\t\t" << ss_batch_vel_normal_time << "\t\t"
               << std::setprecision(2) << (ms_batch_vel_time / ss_batch_vel_normal_time) << "\t\t"
-              << (ms_batch_vel_time / ss_batch_vel_optimized_time) << std::endl;
+              << std::endl;
     std::cout << "Acceleration\t" << std::fixed << std::setprecision(0) 
-              << ms_batch_acc_time << "\t\t" << ss_batch_acc_normal_time << "\t\t" << ss_batch_acc_optimized_time << "\t\t\t"
+              << ms_batch_acc_time << "\t\t" << ss_batch_acc_normal_time << "\t\t"
               << std::setprecision(2) << (ms_batch_acc_time / ss_batch_acc_normal_time) << "\t\t"
-              << (ms_batch_acc_time / ss_batch_acc_optimized_time) << std::endl;
+              << std::endl;
     
     // 3. Consistency verification
     std::cout << "\n3. Consistency Verification (" << num_consistency_points << " points)" << std::endl;
@@ -374,9 +357,9 @@ void runEvaluationTests()
         ms_acc_consistency[i] = minSnapTraj.getAcc(consistency_times[i]);
     }
     
-    auto ss_pos_consistency = septicSpline.getTrajectory().getPos(consistency_times);
-    auto ss_vel_consistency = septicSpline.getTrajectory().getVel(consistency_times);
-    auto ss_acc_consistency = septicSpline.getTrajectory().getAcc(consistency_times);
+    auto ss_pos_consistency = septicSpline.getTrajectory().evaluate(consistency_times, Deriv::Pos);
+    auto ss_vel_consistency = septicSpline.getTrajectory().evaluate(consistency_times, Deriv::Vel);
+    auto ss_acc_consistency = septicSpline.getTrajectory().evaluate(consistency_times, Deriv::Acc);
     
     // Convert SplineVector to std::vector for error calculation
     std::vector<Vector3d> ss_pos_consistency_vec(ss_pos_consistency.begin(), ss_pos_consistency.end());

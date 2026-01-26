@@ -221,7 +221,7 @@ void runEvaluationTests()
     
     // QuinticSpline random evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_pos_random = quinticSpline.getTrajectory().getPos(random_times);
+    auto qs_pos_random = quinticSpline.getTrajectory().evaluate(random_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_random_pos_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -237,7 +237,7 @@ void runEvaluationTests()
     
     // QuinticSpline random evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_vel_random = quinticSpline.getTrajectory().getVel(random_times);
+    auto qs_vel_random = quinticSpline.getTrajectory().evaluate(random_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_random_vel_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -253,7 +253,7 @@ void runEvaluationTests()
     
     // QuinticSpline random evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_acc_random = quinticSpline.getTrajectory().getAcc(random_times);
+    auto qs_acc_random = quinticSpline.getTrajectory().evaluate(random_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_random_acc_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -273,7 +273,6 @@ void runEvaluationTests()
     std::cout << "----------------------------------------------------------------" << std::endl;
     
     auto uniform_times = generateUniformTimeSequence(0.0, total_duration, dt_batch);
-    auto segmented_times = quinticSpline.getTrajectory().generateSegmentedTimeSequence(0.0, total_duration, dt_batch);
     std::cout << "Number of evaluation points: " << uniform_times.size() << std::endl;
     
     // MinJerk batch evaluation (using for loop) - Position
@@ -288,15 +287,9 @@ void runEvaluationTests()
     
     // QuinticSpline normal batch evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_pos_batch_normal = quinticSpline.getTrajectory().getPos(uniform_times);
+    auto qs_pos_batch_normal = quinticSpline.getTrajectory().evaluate(uniform_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_pos_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    
-    // QuinticSpline optimized batch evaluation - Position
-    t0 = std::chrono::high_resolution_clock::now();
-    auto qs_pos_batch_optimized = quinticSpline.getTrajectory().getPos(segmented_times);
-    t1 = std::chrono::high_resolution_clock::now();
-    double qs_batch_pos_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
     // MinJerk batch evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
@@ -310,14 +303,9 @@ void runEvaluationTests()
     
     // QuinticSpline batch evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_vel_batch_normal = quinticSpline.getTrajectory().getVel(uniform_times);
+    auto qs_vel_batch_normal = quinticSpline.getTrajectory().evaluate(uniform_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_vel_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    
-    t0 = std::chrono::high_resolution_clock::now();
-    auto qs_vel_batch_optimized = quinticSpline.getTrajectory().getVel(segmented_times);
-    t1 = std::chrono::high_resolution_clock::now();
-    double qs_batch_vel_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
     // MinJerk batch evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
@@ -331,28 +319,23 @@ void runEvaluationTests()
     
     // QuinticSpline batch evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_acc_batch_normal = quinticSpline.getTrajectory().getAcc(uniform_times);
+    auto qs_acc_batch_normal = quinticSpline.getTrajectory().evaluate(uniform_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_acc_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
-    t0 = std::chrono::high_resolution_clock::now();
-    auto qs_acc_batch_optimized = quinticSpline.getTrajectory().getAcc(segmented_times);
-    t1 = std::chrono::high_resolution_clock::now();
-    double qs_batch_acc_optimized_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    
-    std::cout << "Eval Type\tMinJerk(μs)\tQS_Normal(μs)\tQS_Optimized(μs)\tMJ/QS_Normal\tMJ/QS_Opt" << std::endl;
+    std::cout << "Eval Type\tMinJerk(μs)\tQS_Normal(μs)\tMJ/QS_Normal" << std::endl;
     std::cout << "Position\t" << std::fixed << std::setprecision(0) 
-              << mj_batch_pos_time << "\t\t" << qs_batch_pos_normal_time << "\t\t" << qs_batch_pos_optimized_time << "\t\t\t"
+              << mj_batch_pos_time << "\t\t" << qs_batch_pos_normal_time << "\t\t"
               << std::setprecision(2) << (mj_batch_pos_time / qs_batch_pos_normal_time) << "\t\t"
-              << (mj_batch_pos_time / qs_batch_pos_optimized_time) << std::endl;
+              << std::endl;
     std::cout << "Velocity\t" << std::fixed << std::setprecision(0) 
-              << mj_batch_vel_time << "\t\t" << qs_batch_vel_normal_time << "\t\t" << qs_batch_vel_optimized_time << "\t\t\t"
+              << mj_batch_vel_time << "\t\t" << qs_batch_vel_normal_time << "\t\t"
               << std::setprecision(2) << (mj_batch_vel_time / qs_batch_vel_normal_time) << "\t\t"
-              << (mj_batch_vel_time / qs_batch_vel_optimized_time) << std::endl;
+              << std::endl;
     std::cout << "Acceleration\t" << std::fixed << std::setprecision(0) 
-              << mj_batch_acc_time << "\t\t" << qs_batch_acc_normal_time << "\t\t" << qs_batch_acc_optimized_time << "\t\t\t"
+              << mj_batch_acc_time << "\t\t" << qs_batch_acc_normal_time << "\t\t"
               << std::setprecision(2) << (mj_batch_acc_time / qs_batch_acc_normal_time) << "\t\t"
-              << (mj_batch_acc_time / qs_batch_acc_optimized_time) << std::endl;
+              << std::endl;
     
     // 3. Consistency verification
     std::cout << "\n3. Consistency Verification (" << num_consistency_points << " points)" << std::endl;
@@ -372,9 +355,9 @@ void runEvaluationTests()
         mj_acc_consistency[i] = minJerkTraj.getAcc(consistency_times[i]);
     }
     
-    auto qs_pos_consistency = quinticSpline.getTrajectory().getPos(consistency_times);
-    auto qs_vel_consistency = quinticSpline.getTrajectory().getVel(consistency_times);
-    auto qs_acc_consistency = quinticSpline.getTrajectory().getAcc(consistency_times);
+    auto qs_pos_consistency = quinticSpline.getTrajectory().evaluate(consistency_times, Deriv::Pos);
+    auto qs_vel_consistency = quinticSpline.getTrajectory().evaluate(consistency_times, Deriv::Vel);
+    auto qs_acc_consistency = quinticSpline.getTrajectory().evaluate(consistency_times, Deriv::Acc);
     
     // Convert SplineVector to std::vector for error calculation
     std::vector<Vector3d> qs_pos_consistency_vec(qs_pos_consistency.begin(), qs_pos_consistency.end());

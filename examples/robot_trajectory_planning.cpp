@@ -81,9 +81,9 @@ int main() {
     std::cout << "\n=== Trajectory Validation ===" << std::endl;
     
     std::vector<double> eval_times = robot_trajectory.getTrajectory().generateTimeSequence(0.01);
-    auto positions = robot_trajectory.getTrajectory().getPos(eval_times);
-    auto velocities = robot_trajectory.getTrajectory().getVel(eval_times);
-    auto accelerations = robot_trajectory.getTrajectory().getAcc(eval_times);
+    auto positions = robot_trajectory.getTrajectory().evaluate(eval_times, Deriv::Pos);
+    auto velocities = robot_trajectory.getTrajectory().evaluate(eval_times, Deriv::Vel);
+    auto accelerations = robot_trajectory.getTrajectory().evaluate(eval_times, Deriv::Acc);
     
     bool position_valid = true, velocity_valid = true, acceleration_valid = true;
     double max_velocity = 0.0, max_acceleration = 0.0;
@@ -127,9 +127,9 @@ int main() {
     
     int command_count = 0;
     for (double t = 0.0; t <= robot_trajectory.getEndTime(); t += dt) {
-        SplinePoint6d pos = robot_trajectory.getTrajectory().getPos(t);
-        SplinePoint6d vel = robot_trajectory.getTrajectory().getVel(t);
-        SplinePoint6d acc = robot_trajectory.getTrajectory().getAcc(t);
+        SplinePoint6d pos = robot_trajectory.getTrajectory().evaluate(t, Deriv::Pos);
+        SplinePoint6d vel = robot_trajectory.getTrajectory().evaluate(t, Deriv::Vel);
+        SplinePoint6d acc = robot_trajectory.getTrajectory().evaluate(t, Deriv::Acc);
         
         cmd_file << t;
         for (int i = 0; i < 6; ++i) cmd_file << "," << pos(i);
@@ -164,7 +164,7 @@ int main() {
     
     // Calculate smoothness metrics
     double total_jerk = 0.0;
-    auto jerks = robot_trajectory.getTrajectory().getJerk(eval_times);
+    auto jerks = robot_trajectory.getTrajectory().evaluate(eval_times, Deriv::Jerk);
     for (const auto& jerk : jerks) {
         total_jerk += jerk.squaredNorm();
     }

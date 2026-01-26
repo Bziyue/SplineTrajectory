@@ -53,9 +53,9 @@ int main() {
     std::cout << std::fixed << std::setprecision(3);
     
     for (double t = 0.0; t <= 6.0; t += 0.5) {
-        SplinePoint3d pos = spline.getTrajectory().getPos(t);
-        SplinePoint3d vel = spline.getTrajectory().getVel(t);
-        SplinePoint3d acc = spline.getTrajectory().getAcc(t);
+        SplinePoint3d pos = spline.getTrajectory().evaluate(t,Deriv::Pos);
+        SplinePoint3d vel = spline.getTrajectory().evaluate(t,Deriv::Vel);
+        SplinePoint3d acc = spline.getTrajectory().evaluate(t,Deriv::Acc);
         
         std::cout << "t=" << std::setw(4) << t 
                   << " pos=[" << std::setw(6) << pos.x() << "," << std::setw(6) << pos.y() << "," << std::setw(6) << pos.z() << "]"
@@ -70,9 +70,9 @@ int main() {
     // Batch evaluation for plotting
     std::cout << "\n=== Generating CSV Output ===" << std::endl;
     std::vector<double> eval_times = spline.getTrajectory().generateTimeSequence(0.02);
-    auto positions = spline.getTrajectory().getPos(eval_times);
-    auto velocities = spline.getTrajectory().getVel(eval_times);
-    auto accelerations = spline.getTrajectory().getAcc(eval_times);
+    auto positions = spline.getTrajectory().evaluate(eval_times, Deriv::Pos);
+    auto velocities = spline.getTrajectory().evaluate(eval_times, Deriv::Vel);
+    auto accelerations = spline.getTrajectory().evaluate(eval_times, Deriv::Acc);
     
     // Save to CSV file for plotting
     std::ofstream csv_file("cubic_spline_trajectory.csv");

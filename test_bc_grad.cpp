@@ -103,8 +103,8 @@ void testCubicGradients() {
 
     // Start Boundary (t=0)
     // Vel (n=1) -> Acc (m=2): Grad_Vel / Acc = -2
-    auto start_acc = traj.getAcc(0.0);
-    auto start_jerk = traj.getJerk(0.0);
+    auto start_acc = traj.evaluate(0.0, Deriv::Acc);
+    auto start_jerk = traj.evaluate(0.0, Deriv::Jerk);
 
     std::cout << "\n[Start Boundary t=0]" << std::endl;
     std::cout << "Grad_V / Acc:  " << (grads.start.v.array() / start_acc.array()).transpose()
@@ -114,8 +114,8 @@ void testCubicGradients() {
 
     // End Boundary (t=T)
     double T = spline.getEndTime();
-    auto end_acc = traj.getAcc(T);
-    auto end_jerk = traj.getJerk(T);
+    auto end_acc = traj.evaluate(T, Deriv::Acc);
+    auto end_jerk = traj.evaluate(T, Deriv::Jerk);
 
     std::cout << "\n[End Boundary t=T]" << std::endl;
     std::cout << "Grad_V / Acc:  " << (grads.end.v.array() / end_acc.array()).transpose()
@@ -223,8 +223,8 @@ void testQuinticGradients() {
     // Acc (n=2) -> Jerk (m=3): Grad_Acc / Jerk = -2
     // Vel (n=1) -> Snap (m=4): Grad_Vel / Snap = 2
     // Pos (n=0) -> Crackle (m=5): Grad_Pos / Crackle = -2
-    auto start_jerk = traj.getJerk(0.0);
-    auto start_snap = traj.getSnap(0.0);
+    auto start_jerk = traj.evaluate(0.0, Deriv::Jerk);
+    auto start_snap = traj.evaluate(0.0, Deriv::Snap);
     auto start_crackle = traj.evaluate(0.0, 5);  // 5th derivative
 
     std::cout << "\n[Start Boundary t=0]" << std::endl;
@@ -237,8 +237,8 @@ void testQuinticGradients() {
 
     // End Boundary (t=T)
     double T = spline.getEndTime();
-    auto end_jerk = traj.getJerk(T);
-    auto end_snap = traj.getSnap(T);
+    auto end_jerk = traj.evaluate(T, Deriv::Jerk);
+    auto end_snap = traj.evaluate(T, Deriv::Snap);
     auto end_crackle = traj.evaluate(T, 5);
 
     std::cout << "\n[End Boundary t=T]" << std::endl;
@@ -343,7 +343,7 @@ void testSepticGradients() {
     // Acc (n=2) -> Crackle (m=5): Grad_Acc / Crackle = 2
     // Vel (n=1) -> Pop (m=6): Grad_Vel / Pop = -2
     // Pos (n=0) -> Flick (m=7): Grad_Pos / Flick = 2
-    auto start_snap = traj.getSnap(0.0);
+    auto start_snap = traj.evaluate(0.0, Deriv::Snap);
     auto start_crackle = traj.evaluate(0.0, 5);   // 5th derivative
     auto start_pop = traj.evaluate(0.0, 6);      // 6th derivative
     auto start_flick = traj.evaluate(0.0, 7);     // 7th derivative
@@ -360,7 +360,7 @@ void testSepticGradients() {
 
     // End Boundary (t=T)
     double T = spline.getEndTime();
-    auto end_snap = traj.getSnap(T);
+    auto end_snap = traj.evaluate(T, Deriv::Snap);
     auto end_crackle = traj.evaluate(T, 5);
     auto end_pop = traj.evaluate(T, 6);
     auto end_flick = traj.evaluate(T, 7);

@@ -97,27 +97,15 @@ namespace SplineTrajectory
         }
     };
 
-    struct SegmentedTimeSequence
+    enum class Deriv : int
     {
-        struct SegmentInfo
-        {
-            int segment_idx;
-            double segment_start;
-            std::vector<double> times;
-            std::vector<double> relative_times;
-        };
-
-        std::vector<SegmentInfo> segments;
-
-        size_t getTotalSize() const
-        {
-            size_t total = 0;
-            for (const auto &seg : segments)
-            {
-                total += seg.times.size();
-            }
-            return total;
-        }
+        Pos = 0,
+        Vel = 1,
+        Acc = 2,
+        Jerk = 3,
+        Snap = 4,
+        Crackle = 5,
+        Pop = 6
     };
 
     template <int DIM>
@@ -128,252 +116,193 @@ namespace SplineTrajectory
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
     private:
         std::vector<double> breakpoints_;
         MatrixType coefficients_;
         int num_segments_;
-        int order_;
+        int num_coeffs_;
         bool is_initialized_;
 
-        mutable int cached_segment_idx_;
-        mutable bool cache_valid_;
+        static inline double computeDerivativeFactor(int n, int k)
+        {
+            if (k == 0)
+                return 1.0;
+            if (k > n)
+                return 0.0;
+            if (k == 1)
+                return static_cast<double>(n);
 
-        mutable SplineVector<VectorType> cached_coeffs_;
-
-        mutable std::vector<std::vector<double>> derivative_factors_cache_;
-
-        mutable std::vector<bool> derivative_factors_computed_;
+            double res = 1.0;
+            for (int i = 0; i < k; ++i)
+                res *= (n - i);
+            return res;
+        }
 
     public:
-        PPolyND() : num_segments_(0), order_(0), is_initialized_(false),
-                    cached_segment_idx_(0), cache_valid_(false) {}
+        class Segment
+        {
+            friend class PPolyND;
+            const PPolyND *parent_;
+            int idx_;
+
+            Segment(const PPolyND *parent, int idx) : parent_(parent), idx_(idx) {}
+
+        public:
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+            double duration() const
+            {
+                return parent_->breakpoints_[idx_ + 1] - parent_->breakpoints_[idx_];
+            }
+
+            double startTime() const { return parent_->breakpoints_[idx_]; }
+
+            double endTime() const { return parent_->breakpoints_[idx_ + 1]; }
+
+            int index() const { return idx_; }
+
+            VectorType evaluate(double t, Deriv type = Deriv::Pos) const
+            {
+                return evaluate(t, static_cast<int>(type));
+            }
+
+            VectorType evaluate(double t, int derivative_order) const
+            {
+                const int order = parent_->num_coeffs_;
+                if (derivative_order >= order)
+                    return VectorType::Zero();
+
+                VectorType result = VectorType::Zero();
+                double t_power = 1.0;
+
+                int base_row = idx_ * order;
+                const auto &coeffs = parent_->coefficients_;
+
+                for (int k = derivative_order; k < order; ++k)
+                {
+                    double factor = PPolyND::computeDerivativeFactor(k, derivative_order);
+                    result.noalias() += (factor * t_power) * coeffs.row(base_row + k);
+                    t_power *= t;
+                }
+                return result;
+            }
+
+            auto getCoeffs() const -> decltype(parent_->coefficients_.block(0, 0, 0, 0))
+            {
+                return parent_->coefficients_.block(idx_ * parent_->num_coeffs_, 0, parent_->num_coeffs_, DIM);
+            }
+        };
+
+        class ConstIterator
+        {
+            const PPolyND *ptr_;
+            int idx_;
+
+        public:
+            using iterator_category = std::random_access_iterator_tag;
+            using value_type = Segment;
+            using difference_type = std::ptrdiff_t;
+            using pointer = Segment *;
+            using reference = Segment;
+
+            ConstIterator(const PPolyND *ptr, int idx) : ptr_(ptr), idx_(idx) {}
+
+            reference operator*() const { return Segment(ptr_, idx_); }
+
+            class Proxy
+            {
+                Segment seg;
+
+            public:
+                Proxy(Segment s) : seg(s) {}
+                const Segment *operator->() const { return &seg; }
+            };
+            Proxy operator->() const { return Proxy(Segment(ptr_, idx_)); }
+
+            ConstIterator &operator++()
+            {
+                ++idx_;
+                return *this;
+            }
+            ConstIterator operator++(int)
+            {
+                ConstIterator tmp = *this;
+                ++idx_;
+                return tmp;
+            }
+            ConstIterator &operator--()
+            {
+                --idx_;
+                return *this;
+            }
+            ConstIterator operator--(int)
+            {
+                ConstIterator tmp = *this;
+                --idx_;
+                return tmp;
+            }
+
+            bool operator==(const ConstIterator &other) const { return idx_ == other.idx_ && ptr_ == other.ptr_; }
+            bool operator!=(const ConstIterator &other) const { return !(*this == other); }
+
+            difference_type operator-(const ConstIterator &other) const { return idx_ - other.idx_; }
+            ConstIterator operator+(difference_type n) const { return ConstIterator(ptr_, idx_ + n); }
+        };
+
+        PPolyND() : num_segments_(0), num_coeffs_(0), is_initialized_(false) {}
 
         PPolyND(const std::vector<double> &breakpoints,
                 const MatrixType &coefficients,
                 int order)
-            : is_initialized_(false), cached_segment_idx_(0), cache_valid_(false)
+            : is_initialized_(false)
         {
             initializeInternal(breakpoints, coefficients, order);
         }
 
-        void update(const std::vector<double> &breakpoints,
-                    const MatrixType &coefficients,
-                    int order)
+        ConstIterator begin() const { return ConstIterator(this, 0); }
+        ConstIterator end() const { return ConstIterator(this, num_segments_); }
+
+        Segment operator[](int idx) const
         {
-            initializeInternal(breakpoints, coefficients, order);
+            return Segment(this, idx);
         }
 
-        bool isInitialized() const { return is_initialized_; }
-        int getDimension() const { return DIM; }
-        int getOrder() const { return order_; }
-        int getNumSegments() const { return num_segments_; }
-
-        void clearCache() const
+        Segment at(int idx) const
         {
-            cache_valid_ = false;
-            cached_segment_idx_ = 0;
-
-            derivative_factors_computed_.assign(order_, false);
+            if (idx < 0 || idx >= num_segments_)
+                throw std::out_of_range("Segment index out of range");
+            return Segment(this, idx);
         }
 
-        VectorType evaluate(double t, int derivative_order = 0) const
+        VectorType evaluate(double t, int derivative_order) const
         {
-            if (derivative_order >= order_)
+            if (derivative_order >= num_coeffs_)
                 return VectorType::Zero();
-
-            ensureDerivativeFactorsComputed(derivative_order);
-
-            int segment_idx = findSegmentCached(t);
+            int segment_idx = findSegment(t);
             double dt = t - breakpoints_[segment_idx];
 
-            VectorType result = VectorType::Zero();
-            double dt_power = 1.0;
-
-            for (int k = derivative_order; k < order_; ++k)
-            {
-                const double coeff_factor = derivative_factors_cache_[derivative_order][k];
-                const VectorType &coeff = cached_coeffs_[k];
-
-                result += (coeff_factor * coeff) * dt_power;
-                dt_power *= dt;
-            }
-
-            return result;
+            return Segment(this, segment_idx).evaluate(dt, derivative_order);
         }
 
-        SplineVector<VectorType> evaluate(const std::vector<double> &t, int derivative_order = 0) const
+        VectorType evaluate(double t, Deriv type = Deriv::Pos) const
+        {
+            return evaluate(t, static_cast<int>(type));
+        }
+
+        SplineVector<VectorType> evaluate(const std::vector<double> &t, int derivative_order) const
         {
             SplineVector<VectorType> results;
             results.reserve(t.size());
             for (double time : t)
-            {
                 results.push_back(evaluate(time, derivative_order));
-            }
             return results;
         }
 
-        SplineVector<VectorType> evaluate(double start_t, double end_t, double dt, int derivative_order = 0) const
+        SplineVector<VectorType> evaluate(const std::vector<double> &t, Deriv type = Deriv::Pos) const
         {
-            auto segmented_seq = generateSegmentedTimeSequence(start_t, end_t, dt);
-            return evaluateSegmented(segmented_seq, derivative_order);
+            return evaluate(t, static_cast<int>(type));
         }
-
-        SegmentedTimeSequence generateSegmentedTimeSequence(double start_t, double end_t, double dt) const
-        {
-            SegmentedTimeSequence segmented_seq;
-
-            if (start_t <= end_t && dt > 0.0)
-            {
-                double current_t = start_t;
-                int current_segment_idx = findSegment(current_t);
-
-                while (current_t <= end_t)
-                {
-                    double segment_start = breakpoints_[current_segment_idx];
-                    double segment_end = (current_segment_idx < num_segments_ - 1)
-                                             ? breakpoints_[current_segment_idx + 1]
-                                             : std::numeric_limits<double>::max();
-
-                    typename SegmentedTimeSequence::SegmentInfo segment_info;
-                    segment_info.segment_idx = current_segment_idx;
-                    segment_info.segment_start = segment_start;
-
-                    while (current_t <= end_t && current_t < segment_end)
-                    {
-                        segment_info.times.push_back(current_t);
-                        segment_info.relative_times.push_back(current_t - segment_start);
-                        current_t += dt;
-                    }
-
-                    if (!segment_info.times.empty())
-                    {
-                        segmented_seq.segments.push_back(std::move(segment_info));
-                    }
-
-                    if (current_segment_idx < num_segments_ - 1)
-                    {
-                        current_segment_idx++;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
-
-                if (segmented_seq.segments.empty() || segmented_seq.segments.back().times.back() < end_t)
-                {
-                    int end_seg_idx = findSegment(end_t);
-                    if (!segmented_seq.segments.empty() && end_seg_idx == segmented_seq.segments.back().segment_idx)
-                    {
-                        auto &last_segment = segmented_seq.segments.back();
-                        last_segment.times.push_back(end_t);
-                        last_segment.relative_times.push_back(end_t - last_segment.segment_start);
-                    }
-                    else
-                    {
-                        typename SegmentedTimeSequence::SegmentInfo end_segment;
-                        end_segment.segment_idx = end_seg_idx;
-                        end_segment.segment_start = breakpoints_[end_seg_idx];
-                        end_segment.times.push_back(end_t);
-                        end_segment.relative_times.push_back(end_t - end_segment.segment_start);
-                        segmented_seq.segments.push_back(std::move(end_segment));
-                    }
-                }
-            }
-            return segmented_seq;
-        }
-
-        SplineVector<VectorType> evaluateSegmented(const SegmentedTimeSequence &segmented_seq, int derivative_order = 0) const
-        {
-            SplineVector<VectorType> results;
-            const size_t total_size = segmented_seq.getTotalSize();
-            results.reserve(total_size);
-
-            if (derivative_order >= order_)
-            {
-                results.resize(total_size, VectorType::Zero());
-            }
-            else
-            {
-                ensureDerivativeFactorsComputed(derivative_order);
-
-                for (const auto &segment_info : segmented_seq.segments)
-                {
-                    SplineVector<VectorType> segment_coeffs(order_);
-                    for (int k = 0; k < order_; ++k)
-                    {
-                        segment_coeffs[k] = coefficients_.row(segment_info.segment_idx * order_ + k);
-                    }
-
-                    for (double dt : segment_info.relative_times)
-                    {
-                        VectorType result = VectorType::Zero();
-                        double dt_power = 1.0;
-
-                        for (int k = derivative_order; k < order_; ++k)
-                        {
-                            const double coeff_factor = derivative_factors_cache_[derivative_order][k];
-                            result += (coeff_factor * segment_coeffs[k]) * dt_power;
-                            dt_power *= dt;
-                        }
-
-                        results.push_back(result);
-                    }
-                }
-            }
-            return results;
-        }
-
-        std::vector<double> generateTimeSequence(double start_t, double end_t, double dt) const
-        {
-            std::vector<double> time_sequence;
-            double current_t = start_t;
-
-            while (current_t <= end_t)
-            {
-                time_sequence.push_back(current_t);
-                current_t += dt;
-            }
-
-            if (time_sequence.empty() || time_sequence.back() < end_t)
-            {
-                time_sequence.push_back(end_t);
-            }
-
-            return time_sequence;
-        }
-
-        std::vector<double> generateTimeSequence(double dt) const
-        {
-            return generateTimeSequence(getStartTime(), getEndTime(), dt);
-        }
-
-        // Single time point evaluation
-        VectorType getPos(double t) const { return evaluate(t, 0); }
-        VectorType getVel(double t) const { return evaluate(t, 1); }
-        VectorType getAcc(double t) const { return evaluate(t, 2); }
-        VectorType getJerk(double t) const { return evaluate(t, 3); }
-        VectorType getSnap(double t) const { return evaluate(t, 4); }
-
-        // Multiple time points evaluation
-        SplineVector<VectorType> getPos(const std::vector<double> &t) const { return evaluate(t, 0); }
-        SplineVector<VectorType> getVel(const std::vector<double> &t) const { return evaluate(t, 1); }
-        SplineVector<VectorType> getAcc(const std::vector<double> &t) const { return evaluate(t, 2); }
-        SplineVector<VectorType> getJerk(const std::vector<double> &t) const { return evaluate(t, 3); }
-        SplineVector<VectorType> getSnap(const std::vector<double> &t) const { return evaluate(t, 4); }
-
-        // Time range evaluation(internal segmentation)
-        SplineVector<VectorType> getPos(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 0); }
-        SplineVector<VectorType> getVel(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 1); }
-        SplineVector<VectorType> getAcc(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 2); }
-        SplineVector<VectorType> getJerk(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 3); }
-        SplineVector<VectorType> getSnap(double start_t, double end_t, double dt) const { return evaluate(start_t, end_t, dt, 4); }
-
-        SplineVector<VectorType> getPos(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 0); }
-        SplineVector<VectorType> getVel(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 1); }
-        SplineVector<VectorType> getAcc(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 2); }
-        SplineVector<VectorType> getJerk(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 3); }
-        SplineVector<VectorType> getSnap(const SegmentedTimeSequence &segmented_seq) const { return evaluateSegmented(segmented_seq, 4); }
 
         double getTrajectoryLength(double dt = 0.01) const
         {
@@ -391,187 +320,147 @@ namespace SplineTrajectory
                 double t_next = time_sequence[i + 1];
                 double dt_actual = t_next - t_current;
 
-                VectorType velocity = getVel(t_current);
+                VectorType velocity = evaluate(t_current, Deriv::Vel);
                 total_length += velocity.norm() * dt_actual;
             }
             return total_length;
         }
 
-        double getCumulativeLength(double t, double dt = 0.01) const
+        void update(const std::vector<double> &breakpoints, const MatrixType &coefficients, int num_coefficients)
         {
-            return getTrajectoryLength(getStartTime(), t, dt);
+            initializeInternal(breakpoints, coefficients, num_coefficients);
+        }
+
+        bool isInitialized() const { return is_initialized_; }
+        int getDimension() const { return DIM; }
+        int getNumCoeffs() const { return num_coeffs_; }
+        int getDegree() const { return num_coeffs_ > 0 ? num_coeffs_ - 1 : 0; }
+        int getNumSegments() const { return num_segments_; }
+        double getStartTime() const { return breakpoints_.empty() ? 0.0 : breakpoints_.front(); }
+        double getEndTime() const { return breakpoints_.empty() ? 0.0 : breakpoints_.back(); }
+        double getDuration() const { return getEndTime() - getStartTime(); }
+        const std::vector<double> &getBreakpoints() const { return breakpoints_; }
+        const MatrixType &getCoefficients() const { return coefficients_; }
+
+        std::vector<double> generateTimeSequence(double start_t, double end_t, double dt) const
+        {
+            std::vector<double> time_sequence;
+            double duration = end_t - start_t;
+            int num_steps = std::floor(duration / dt);
+
+            time_sequence.reserve(num_steps + 1);
+
+            for (int i = 0; i <= num_steps; ++i)
+            {
+                time_sequence.push_back(start_t + i * dt);
+            }
+
+            if (time_sequence.empty() || std::abs(time_sequence.back() - end_t) > 1e-6)
+            {
+                time_sequence.push_back(end_t);
+            }
+
+            return time_sequence;
+        }
+
+        std::vector<double> generateTimeSequence(double dt) const
+        {
+            return generateTimeSequence(getStartTime(), getEndTime(), dt);
         }
 
         PPolyND derivative(int derivative_order = 1) const
         {
-            if (derivative_order >= order_)
+            if (num_segments_ == 0 || derivative_order >= num_coeffs_)
             {
+                if (num_segments_ == 0)
+                    return PPolyND();
                 MatrixType zero_coeffs = MatrixType::Zero(num_segments_, DIM);
                 return PPolyND(breakpoints_, zero_coeffs, 1);
             }
 
-            int new_order = order_ - derivative_order;
+            int new_order = num_coeffs_ - derivative_order;
             MatrixType new_coeffs(num_segments_ * new_order, DIM);
 
             for (int seg = 0; seg < num_segments_; ++seg)
             {
                 for (int k = 0; k < new_order; ++k)
                 {
-
                     int orig_k = k + derivative_order;
-
-                    double coeff_factor = 1.0;
-                    for (int j = 0; j < derivative_order; ++j)
-                    {
-                        coeff_factor *= (orig_k - j);
-                    }
-
-                    VectorType orig_coeff = coefficients_.row(seg * order_ + orig_k);
+                    double coeff_factor = computeDerivativeFactor(orig_k, derivative_order);
+                    VectorType orig_coeff = coefficients_.row(seg * num_coeffs_ + orig_k);
                     new_coeffs.row(seg * new_order + k) = coeff_factor * orig_coeff;
                 }
             }
-
             return PPolyND(breakpoints_, new_coeffs, new_order);
         }
 
-        double getStartTime() const
+        static PPolyND zero(const std::vector<double> &breakpoints, int num_coefficients = 1)
         {
-            return breakpoints_.front();
+            int num_segments = breakpoints.size() > 1 ? static_cast<int>(breakpoints.size()) - 1 : 0;
+            MatrixType zero_coeffs = MatrixType::Zero(num_segments * num_coefficients, DIM);
+            return PPolyND(breakpoints, zero_coeffs, num_coefficients);
         }
 
-        double getEndTime() const
+        static PPolyND constant(const std::vector<double> &breakpoints, const VectorType &constant_value)
         {
-            return breakpoints_.back();
-        }
-
-        double getDuration() const
-        {
-            return breakpoints_.back() - breakpoints_.front();
-        }
-
-        const std::vector<double> &getBreakpoints() const { return breakpoints_; }
-        const MatrixType &getCoefficients() const { return coefficients_; }
-
-        static PPolyND zero(const std::vector<double> &breakpoints, int order = 1)
-        {
-            int num_segments = breakpoints.size() - 1;
-            MatrixType zero_coeffs = MatrixType::Zero(num_segments * order, DIM);
-            return PPolyND(breakpoints, zero_coeffs, order);
-        }
-
-        static PPolyND constant(const std::vector<double> &breakpoints,
-                                const VectorType &constant_value)
-        {
-            int num_segments = breakpoints.size() - 1;
+            int num_segments = breakpoints.size() > 1 ? static_cast<int>(breakpoints.size()) - 1 : 0;
             MatrixType coeffs = MatrixType::Zero(num_segments, DIM);
-
             for (int i = 0; i < num_segments; ++i)
             {
                 coeffs.row(i) = constant_value.transpose();
             }
-
             return PPolyND(breakpoints, coeffs, 1);
         }
 
     private:
         inline void initializeInternal(const std::vector<double> &breakpoints,
                                        const MatrixType &coefficients,
-                                       int order)
+                                       int num_coefficients)
         {
+            if (breakpoints.size() < 2)
+            {
+                num_segments_ = 0;
+                num_coeffs_ = 0;
+                is_initialized_ = false;
+                breakpoints_.clear();
+                coefficients_.resize(0, DIM);
+                return;
+            }
+
+            long expected_rows = static_cast<long>(breakpoints.size() - 1) * num_coefficients;
+            if (coefficients.rows() != expected_rows)
+            {
+                num_segments_ = 0;
+                num_coeffs_ = 0;
+                is_initialized_ = false;
+                return;
+            }
+
             breakpoints_ = breakpoints;
             coefficients_ = coefficients;
-            order_ = order;
-            num_segments_ = breakpoints_.size() - 1;
-
-            cached_coeffs_.resize(order_);
-            for (int i = 0; i < order_; ++i)
-            {
-                cached_coeffs_[i] = VectorType::Zero();
-            }
-
-            derivative_factors_cache_.assign(order_, std::vector<double>());
-            derivative_factors_computed_.assign(order_, false);
-
+            num_coeffs_ = num_coefficients;
+            num_segments_ = static_cast<int>(breakpoints_.size()) - 1;
             is_initialized_ = true;
-            clearCache();
-        }
-
-        inline void ensureDerivativeFactorsComputed(int derivative_order) const
-        {
-            if (!derivative_factors_computed_[derivative_order])
-            {
-                derivative_factors_cache_[derivative_order].resize(order_);
-                for (int k = derivative_order; k < order_; ++k)
-                {
-                    double factor = 1.0;
-                    for (int j = 0; j < derivative_order; ++j)
-                    {
-                        factor *= (k - j);
-                    }
-                    derivative_factors_cache_[derivative_order][k] = factor;
-                }
-                derivative_factors_computed_[derivative_order] = true;
-            }
         }
 
         inline int findSegment(double t) const
         {
+            if (num_segments_ == 0 || breakpoints_.empty())
+                return 0;
             if (t <= breakpoints_.front())
                 return 0;
             if (t >= breakpoints_.back())
                 return num_segments_ - 1;
-
+            constexpr int kLinearSearchThreshold = 32;
+            if (num_segments_ < kLinearSearchThreshold)
+            {
+                for (int i = 0; i < num_segments_; ++i)
+                    if (t < breakpoints_[i + 1])
+                        return i;
+                return num_segments_ - 1;
+            }
             auto it = std::upper_bound(breakpoints_.begin(), breakpoints_.end(), t);
-            return std::distance(breakpoints_.begin(), it) - 1;
-        }
-
-        inline int findSegmentCached(double t) const
-        {
-            if (t <= breakpoints_.front())
-            {
-                updateCache(0);
-                return 0;
-            }
-
-            if (t >= breakpoints_.back())
-            {
-                updateCache(num_segments_ - 1);
-                return num_segments_ - 1;
-            }
-
-            if (cache_valid_ &&
-                t >= breakpoints_[cached_segment_idx_] &&
-                t < breakpoints_[cached_segment_idx_ + 1])
-            {
-                return cached_segment_idx_;
-            }
-
-            if (cache_valid_ && cached_segment_idx_ + 1 < num_segments_)
-            {
-                int next_idx = cached_segment_idx_ + 1;
-                if (t >= breakpoints_[next_idx] &&
-                    (next_idx + 1 >= num_segments_ || t < breakpoints_[next_idx + 1]))
-                {
-                    updateCache(next_idx);
-                    return next_idx;
-                }
-            }
-
-            int segment_idx = findSegment(t);
-            updateCache(segment_idx);
-            return segment_idx;
-        }
-
-        inline void updateCache(int segment_idx) const
-        {
-            cached_segment_idx_ = segment_idx;
-
-            for (int k = 0; k < order_; ++k)
-            {
-                cached_coeffs_[k] = coefficients_.row(segment_idx * order_ + k);
-            }
-
-            cache_valid_ = true;
+            return static_cast<int>(std::distance(breakpoints_.begin(), it)) - 1;
         }
     };
 
@@ -742,7 +631,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
-         * 
+         *
          * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 4) × DIM.
          *         Each row corresponds to one coefficient dimension.
          * @note This computes only the direct partial derivative, not the full gradient.
@@ -771,7 +660,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
-         * 
+         *
          * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
          * @note This computes only the explicit time dependency, not the full gradient.
@@ -797,7 +686,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute full gradient of energy w.r.t. segment durations.
-         * 
+         *
          * @return VectorXd Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
@@ -849,25 +738,26 @@ namespace SplineTrajectory
         BoundaryDualGrads getEnergyGradBoundary() const
         {
             BoundaryDualGrads res;
-            if (num_segments_ < 1) return res;
+            if (num_segments_ < 1)
+                return res;
 
-            const RowVectorType c2_first = coeffs_.row(2); 
-            const RowVectorType c3_first = coeffs_.row(3); 
+            const RowVectorType c2_first = coeffs_.row(2);
+            const RowVectorType c3_first = coeffs_.row(3);
 
-            res.start.p =  12.0 * c3_first.transpose();
-            res.start.v =  -4.0 * c2_first.transpose();
+            res.start.p = 12.0 * c3_first.transpose();
+            res.start.v = -4.0 * c2_first.transpose();
 
             int last_idx = num_segments_ - 1;
             double T = time_segments_[last_idx];
-            
+
             const RowVectorType c2_last = coeffs_.row(last_idx * 4 + 2);
             const RowVectorType c3_last = coeffs_.row(last_idx * 4 + 3);
 
             RowVectorType acc_end = 2.0 * c2_last + 6.0 * c3_last * T;
             RowVectorType jerk_end = 6.0 * c3_last;
 
-            res.end.p = -2.0 * jerk_end.transpose(); 
-            res.end.v =  2.0 * acc_end.transpose();
+            res.end.p = -2.0 * jerk_end.transpose();
+            res.end.v = 2.0 * acc_end.transpose();
 
             return res;
         }
@@ -1259,7 +1149,7 @@ namespace SplineTrajectory
         std::vector<double> cumulative_times_;
         double start_time_{0.0};
 
-        MatrixType spatial_points_;  
+        MatrixType spatial_points_;
 
         BoundaryConditions<DIM> boundary_;
 
@@ -1279,11 +1169,11 @@ namespace SplineTrajectory
         struct TimePowers
         {
             double h;
-            double h_inv;  
-            double h2_inv; 
-            double h3_inv; 
-            double h4_inv; 
-            double h5_inv; 
+            double h_inv;
+            double h2_inv;
+            double h3_inv;
+            double h4_inv;
+            double h5_inv;
             double h6_inv;
         };
 
@@ -1437,7 +1327,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
-         * 
+         *
          * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 6) × DIM.
          *         Each row corresponds to one coefficient dimension.
          * @note This computes only the direct partial derivative, not the full gradient.
@@ -1477,7 +1367,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
-         * 
+         *
          * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
          * @note This computes only the explicit time dependency, not the full gradient.
@@ -1505,7 +1395,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute full gradient of energy w.r.t. segment durations.
-         * 
+         *
          * @return VectorXd Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
@@ -1560,15 +1450,16 @@ namespace SplineTrajectory
         BoundaryDualGrads getEnergyGradBoundary() const
         {
             BoundaryDualGrads res;
-            if (num_segments_ < 1) return res;
+            if (num_segments_ < 1)
+                return res;
 
             const RowVectorType c3_first = coeffs_.row(3);
             const RowVectorType c4_first = coeffs_.row(4);
             const RowVectorType c5_first = coeffs_.row(5);
 
             res.start.p = -240.0 * c5_first.transpose();
-            res.start.v =   48.0 * c4_first.transpose();
-            res.start.a =  -12.0 * c3_first.transpose();
+            res.start.v = 48.0 * c4_first.transpose();
+            res.start.a = -12.0 * c3_first.transpose();
 
             int last_idx = num_segments_ - 1;
             double T = time_segments_[last_idx];
@@ -1582,9 +1473,9 @@ namespace SplineTrajectory
             RowVectorType snap_end = 24.0 * c4_last + 120.0 * c5_last * T;
             RowVectorType crackle_end = 120.0 * c5_last;
 
-            res.end.p =  2.0 * crackle_end.transpose();
+            res.end.p = 2.0 * crackle_end.transpose();
             res.end.v = -2.0 * snap_end.transpose();
-            res.end.a =  2.0 * jerk_end.transpose();
+            res.end.a = 2.0 * jerk_end.transpose();
 
             return res;
         }
@@ -2388,7 +2279,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
-         * 
+         *
          * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 8) × DIM.
          *         Each row corresponds to one coefficient dimension.
          * @note This computes only the direct partial derivative, not the full gradient.
@@ -2440,7 +2331,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
-         * 
+         *
          * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
          * @note This computes only the explicit time dependency, not the full gradient.
@@ -2468,7 +2359,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute full gradient of energy w.r.t. segment durations.
-         * 
+         *
          * @return VectorXd Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
@@ -2528,17 +2419,18 @@ namespace SplineTrajectory
         BoundaryDualGrads getEnergyGradBoundary() const
         {
             BoundaryDualGrads res;
-            if (num_segments_ < 1) return res;
+            if (num_segments_ < 1)
+                return res;
 
             const RowVectorType c4_first = coeffs_.row(4);
             const RowVectorType c5_first = coeffs_.row(5);
             const RowVectorType c6_first = coeffs_.row(6);
             const RowVectorType c7_first = coeffs_.row(7);
 
-            res.start.p =  10080.0 * c7_first.transpose();
-            res.start.v =  -1440.0 * c6_first.transpose();
-            res.start.a =    240.0 * c5_first.transpose();
-            res.start.j =    -48.0 * c4_first.transpose();
+            res.start.p = 10080.0 * c7_first.transpose();
+            res.start.v = -1440.0 * c6_first.transpose();
+            res.start.a = 240.0 * c5_first.transpose();
+            res.start.j = -48.0 * c4_first.transpose();
 
             int last_idx = num_segments_ - 1;
             double T = time_segments_[last_idx];
@@ -2550,16 +2442,16 @@ namespace SplineTrajectory
             const RowVectorType c6_last = coeffs_.row(last_idx * 8 + 6);
             const RowVectorType c7_last = coeffs_.row(last_idx * 8 + 7);
 
-            RowVectorType snap_end = 24.0 * c4_last + 120.0 * c5_last * T + 
+            RowVectorType snap_end = 24.0 * c4_last + 120.0 * c5_last * T +
                                      360.0 * c6_last * T2 + 840.0 * c7_last * T3;
             RowVectorType crackle_end = 120.0 * c5_last + 720.0 * c6_last * T + 2520.0 * c7_last * T2;
             RowVectorType pop_end = 720.0 * c6_last + 5040.0 * c7_last * T;
             RowVectorType d7_end = 5040.0 * c7_last;
 
             res.end.p = -2.0 * d7_end.transpose();
-            res.end.v =  2.0 * pop_end.transpose();
+            res.end.v = 2.0 * pop_end.transpose();
             res.end.a = -2.0 * crackle_end.transpose();
-            res.end.j =  2.0 * snap_end.transpose();
+            res.end.j = 2.0 * snap_end.transpose();
 
             return res;
         }

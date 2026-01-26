@@ -67,10 +67,10 @@ int main() {
     std::cout << "\n=== Smoothness Analysis ===" << std::endl;
     std::vector<double> eval_times = cubic_spline.getTrajectory().generateTimeSequence(0.05);
     
-    auto cubic_accelerations = cubic_spline.getTrajectory().getAcc(eval_times);
-    auto quintic_accelerations = quintic_spline.getTrajectory().getAcc(eval_times);
-    auto cubic_jerks = cubic_spline.getTrajectory().getJerk(eval_times);
-    auto quintic_jerks = quintic_spline.getTrajectory().getJerk(eval_times);
+    auto cubic_accelerations = cubic_spline.getTrajectory().evaluate(eval_times, Deriv::Acc);
+    auto quintic_accelerations = quintic_spline.getTrajectory().evaluate(eval_times, Deriv::Acc);
+    auto cubic_jerks = cubic_spline.getTrajectory().evaluate(eval_times, Deriv::Jerk);
+    auto quintic_jerks = quintic_spline.getTrajectory().evaluate(eval_times, Deriv::Jerk);
     
     // Calculate RMS values for smoothness comparison
     double cubic_acc_rms = 0.0, quintic_acc_rms = 0.0;
@@ -98,10 +98,10 @@ int main() {
     // Generate detailed comparison data
     std::cout << "\n=== Generating Comparison Data ===" << std::endl;
     
-    auto cubic_positions = cubic_spline.getTrajectory().getPos(eval_times);
-    auto quintic_positions = quintic_spline.getTrajectory().getPos(eval_times);
-    auto cubic_velocities = cubic_spline.getTrajectory().getVel(eval_times);
-    auto quintic_velocities = quintic_spline.getTrajectory().getVel(eval_times);
+    auto cubic_positions = cubic_spline.getTrajectory().evaluate(eval_times, Deriv::Pos);
+    auto quintic_positions = quintic_spline.getTrajectory().evaluate(eval_times, Deriv::Pos);
+    auto cubic_velocities = cubic_spline.getTrajectory().evaluate(eval_times, Deriv::Vel);
+    auto quintic_velocities = quintic_spline.getTrajectory().evaluate(eval_times, Deriv::Vel);
     
     // Save comparison data
     std::ofstream csv_file("spline_comparison.csv");
@@ -130,7 +130,7 @@ int main() {
     auto start_time = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_evaluations; ++i) {
         double t = 6.0 * i / num_evaluations;
-        volatile auto pos = cubic_spline.getTrajectory().getPos(t);
+        volatile auto pos = cubic_spline.getTrajectory().evaluate(t, Deriv::Pos);
     }
     auto end_time = std::chrono::high_resolution_clock::now();
     auto cubic_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
@@ -138,7 +138,7 @@ int main() {
     start_time = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_evaluations; ++i) {
         double t = 6.0 * i / num_evaluations;
-        volatile auto pos = quintic_spline.getTrajectory().getPos(t);
+        volatile auto pos = quintic_spline.getTrajectory().evaluate(t, Deriv::Pos);
     }
     end_time = std::chrono::high_resolution_clock::now();
     auto quintic_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
