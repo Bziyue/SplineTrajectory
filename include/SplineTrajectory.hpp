@@ -39,62 +39,31 @@ namespace SplineTrajectory
     struct BoundaryConditions
     {
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+        
         using VectorType = Eigen::Matrix<double, DIM, 1>;
-        VectorType start_velocity;
-        VectorType start_acceleration;
-        VectorType end_velocity;
-        VectorType end_acceleration;
-        VectorType start_jerk;
-        VectorType end_jerk;
 
-        BoundaryConditions()
-            : start_velocity(VectorType::Zero()),
-              start_acceleration(VectorType::Zero()),
-              end_velocity(VectorType::Zero()),
-              end_acceleration(VectorType::Zero()),
-              start_jerk(VectorType::Zero()),
-              end_jerk(VectorType::Zero())
-        {
-        }
+        VectorType start_velocity     = VectorType::Zero();
+        VectorType start_acceleration = VectorType::Zero();
+        VectorType start_jerk         = VectorType::Zero();
 
-        BoundaryConditions(const VectorType &start_velocity,
-                           const VectorType &end_velocity)
-            : start_velocity(start_velocity),
-              start_acceleration(VectorType::Zero()),
-              end_velocity(end_velocity),
-              end_acceleration(VectorType::Zero()),
-              start_jerk(VectorType::Zero()),
-              end_jerk(VectorType::Zero())
-        {
-        }
+        VectorType end_velocity       = VectorType::Zero();
+        VectorType end_acceleration   = VectorType::Zero();
+        VectorType end_jerk           = VectorType::Zero();
 
-        BoundaryConditions(const VectorType &start_velocity,
-                           const VectorType &start_acceleration,
-                           const VectorType &end_velocity,
-                           const VectorType &end_acceleration)
-            : start_velocity(start_velocity),
-              start_acceleration(start_acceleration),
-              end_velocity(end_velocity),
-              end_acceleration(end_acceleration),
-              start_jerk(VectorType::Zero()),
-              end_jerk(VectorType::Zero())
-        {
-        }
+        BoundaryConditions() = default;
 
-        BoundaryConditions(const VectorType &start_velocity,
-                           const VectorType &start_acceleration,
-                           const VectorType &end_velocity,
-                           const VectorType &end_acceleration,
-                           const VectorType &start_jerk,
-                           const VectorType &end_jerk)
-            : start_velocity(start_velocity),
-              start_acceleration(start_acceleration),
-              end_velocity(end_velocity),
-              end_acceleration(end_acceleration),
-              start_jerk(start_jerk),
-              end_jerk(end_jerk)
-        {
-        }
+        BoundaryConditions(const VectorType &start_vel, const VectorType &end_vel)
+            : start_velocity(start_vel), end_velocity(end_vel) {}
+
+        BoundaryConditions(const VectorType &start_vel, const VectorType &start_acc, 
+                           const VectorType &end_vel, const VectorType &end_acc)
+            : start_velocity(start_vel), start_acceleration(start_acc), 
+              end_velocity(end_vel), end_acceleration(end_acc) {}
+
+        BoundaryConditions(const VectorType &start_vel, const VectorType &start_acc, const VectorType &start_jerk,
+                           const VectorType &end_vel, const VectorType &end_acc, const VectorType &end_jerk)
+            : start_velocity(start_vel), start_acceleration(start_acc), start_jerk(start_jerk), 
+              end_velocity(end_vel), end_acceleration(end_acc), end_jerk(end_jerk) {}
     };
 
     enum class Deriv : int

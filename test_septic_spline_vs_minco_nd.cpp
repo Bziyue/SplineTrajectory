@@ -251,9 +251,8 @@ void runSepticTest()
     for (const auto &v : waypoints_vec_eigen)
         waypoints.push_back(v);
 
-    BoundaryConditions<DIM> bc(start_vel_eigen, start_acc_eigen,
-                               end_vel_eigen, end_acc_eigen,
-                               start_jerk_eigen, end_jerk_eigen);
+    BoundaryConditions<DIM> bc(start_vel_eigen, start_acc_eigen,start_jerk_eigen,
+                               end_vel_eigen, end_acc_eigen, end_jerk_eigen);
 
     std::cout << "2.1) 样条拟合性能 (平均 " << fit_runs << " 次):" << std::endl;
 
