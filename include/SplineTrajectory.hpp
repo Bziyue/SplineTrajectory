@@ -873,6 +873,35 @@ namespace SplineTrajectory
         }
 
         /**
+         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
+         *
+         * @return Gradients Structure containing:
+         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
+         *       - times: gradient w.r.t. time segments, size N
+         *       - start/end: gradients w.r.t. boundary states (position, velocity)
+         */
+        Gradients getEnergyGrad() const
+        {
+            Gradients res;
+            getEnergyGrad(res);
+            return res;
+        }
+
+        /**
+         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
+         *
+         * @param grads Output gradients structure to populate
+         */
+        void getEnergyGrad(Gradients &grads) const
+        {
+            grads.inner_points = getEnergyGradInnerPoints();
+            grads.times = getEnergyGradTimes();
+            BoundaryDualGrads boundary = getEnergyGradBoundary();
+            grads.start = boundary.start;
+            grads.end = boundary.end;
+        }
+
+        /**
          * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
@@ -1558,6 +1587,35 @@ namespace SplineTrajectory
             res.end.a =  2.0 * jerk_end.transpose();
 
             return res;
+        }
+
+        /**
+         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
+         *
+         * @return Gradients Structure containing:
+         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
+         *       - times: gradient w.r.t. time segments, size N
+         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
+         */
+        Gradients getEnergyGrad() const
+        {
+            Gradients res;
+            getEnergyGrad(res);
+            return res;
+        }
+
+        /**
+         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
+         *
+         * @param grads Output gradients structure to populate
+         */
+        void getEnergyGrad(Gradients &grads) const
+        {
+            grads.inner_points = getEnergyGradInnerPoints();
+            grads.times = getEnergyGradTimes();
+            BoundaryDualGrads boundary = getEnergyGradBoundary();
+            grads.start = boundary.start;
+            grads.end = boundary.end;
         }
 
         /**
@@ -2504,6 +2562,35 @@ namespace SplineTrajectory
             res.end.j =  2.0 * snap_end.transpose();
 
             return res;
+        }
+
+        /**
+         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
+         *
+         * @return Gradients Structure containing:
+         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
+         *       - times: gradient w.r.t. time segments, size N
+         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
+         */
+        Gradients getEnergyGrad() const
+        {
+            Gradients res;
+            getEnergyGrad(res);
+            return res;
+        }
+
+        /**
+         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
+         *
+         * @param grads Output gradients structure to populate
+         */
+        void getEnergyGrad(Gradients &grads) const
+        {
+            grads.inner_points = getEnergyGradInnerPoints();
+            grads.times = getEnergyGradTimes();
+            BoundaryDualGrads boundary = getEnergyGradBoundary();
+            grads.start = boundary.start;
+            grads.end = boundary.end;
         }
 
         /**
