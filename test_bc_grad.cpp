@@ -94,10 +94,38 @@ void testCubicGradients() {
         verify_boundary("End Vel [" + std::to_string(d) + "]",
                          grads.end.v(d), bc_grads.end.v(d), bc.end_velocity(d));
     }
+
+    // --- PROOF SECTION: Cubic Spline (k=2) ---
+    std::cout << "\n--- [Proof] Hierarchy: Pos->Jerk, Vel->Acc (Cubic k=2) ---" << std::endl;
+    std::cout << "Formula: m = 2k-1-n, where n is boundary derivative order" << std::endl;
+
+    auto& traj = spline.getTrajectory();
+
+    // Start Boundary (t=0)
+    // Vel (n=1) -> Acc (m=2): Grad_Vel / Acc = -2
+    auto start_acc = traj.getAcc(0.0);
+    auto start_jerk = traj.getJerk(0.0);
+
+    std::cout << "\n[Start Boundary t=0]" << std::endl;
+    std::cout << "Grad_V / Acc:  " << (grads.start.v.array() / start_acc.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
+    std::cout << "Grad_P / Jerk: " << (grads.start.p.array() / start_jerk.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
+
+    // End Boundary (t=T)
+    double T = spline.getEndTime();
+    auto end_acc = traj.getAcc(T);
+    auto end_jerk = traj.getJerk(T);
+
+    std::cout << "\n[End Boundary t=T]" << std::endl;
+    std::cout << "Grad_V / Acc:  " << (grads.end.v.array() / end_acc.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
+    std::cout << "Grad_P / Jerk: " << (grads.end.p.array() / end_jerk.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
 }
 
 void testQuinticGradients() {
-    std::cout << "================ Testing QuinticSplineND Gradients ================" << std::endl;
+    std::cout << "\n================ Testing QuinticSplineND Gradients ================" << std::endl;
 
     const int DIM = 3;
     using SplineType = QuinticSplineND<DIM>;
@@ -159,7 +187,7 @@ void testQuinticGradients() {
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
 
-    // Test position gradients (start and end points)
+    // Test position gradients
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("Start Pos [" + std::to_string(d) + "]",
                          grads.start.p(d), bc_grads.start.p(d), points[0](d));
@@ -184,6 +212,42 @@ void testQuinticGradients() {
         verify_boundary("End Acc [" + std::to_string(d) + "]",
                          grads.end.a(d), bc_grads.end.a(d), bc.end_acceleration(d));
     }
+
+    // --- PROOF SECTION: Quintic Spline (k=3) ---
+    std::cout << "\n--- [Proof] Hierarchy: Pos->Crackle, Vel->Snap, Acc->Jerk (Quintic k=3) ---" << std::endl;
+    std::cout << "Formula: m = 2k-1-n = 5-n, where n is boundary derivative order" << std::endl;
+
+    auto& traj = spline.getTrajectory();
+
+    // Start Boundary (t=0)
+    // Acc (n=2) -> Jerk (m=3): Grad_Acc / Jerk = -2
+    // Vel (n=1) -> Snap (m=4): Grad_Vel / Snap = 2
+    // Pos (n=0) -> Crackle (m=5): Grad_Pos / Crackle = -2
+    auto start_jerk = traj.getJerk(0.0);
+    auto start_snap = traj.getSnap(0.0);
+    auto start_crackle = traj.evaluate(0.0, 5);  // 5th derivative
+
+    std::cout << "\n[Start Boundary t=0]" << std::endl;
+    std::cout << "Grad_A / Jerk:    " << (grads.start.a.array() / start_jerk.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
+    std::cout << "Grad_V / Snap:    " << (grads.start.v.array() / start_snap.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
+    std::cout << "Grad_P / Crackle: " << (grads.start.p.array() / start_crackle.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
+
+    // End Boundary (t=T)
+    double T = spline.getEndTime();
+    auto end_jerk = traj.getJerk(T);
+    auto end_snap = traj.getSnap(T);
+    auto end_crackle = traj.evaluate(T, 5);
+
+    std::cout << "\n[End Boundary t=T]" << std::endl;
+    std::cout << "Grad_A / Jerk:    " << (grads.end.a.array() / end_jerk.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
+    std::cout << "Grad_V / Snap:    " << (grads.end.v.array() / end_snap.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
+    std::cout << "Grad_P / Crackle: " << (grads.end.p.array() / end_crackle.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
 }
 
 void testSepticGradients() {
@@ -248,7 +312,7 @@ void testSepticGradients() {
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
 
-    // Test position gradients (start and end points)
+    // Test position gradients
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("Start Pos [" + std::to_string(d) + "]",
                          grads.start.p(d), bc_grads.start.p(d), points[0](d));
@@ -267,6 +331,49 @@ void testSepticGradients() {
     for (int d = 0; d < DIM; ++d) verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc_grads.end.v(d), bc.end_velocity(d));
     for (int d = 0; d < DIM; ++d) verify_boundary("End Acc [" + std::to_string(d) + "]", grads.end.a(d), bc_grads.end.a(d), bc.end_acceleration(d));
     for (int d = 0; d < DIM; ++d) verify_boundary("End Jerk [" + std::to_string(d) + "]", grads.end.j(d), bc_grads.end.j(d), bc.end_jerk(d));
+
+    // --- PROOF SECTION: Septic Spline (k=4) ---
+    std::cout << "\n--- [Proof] Hierarchy: Pos->Flick, Vel->Pop, Acc->Crackle, Jerk->Snap (Septic k=4) ---" << std::endl;
+    std::cout << "Formula: m = 2k-1-n = 7-n, where n is boundary derivative order" << std::endl;
+
+    auto& traj = spline.getTrajectory();
+
+    // Start Boundary (t=0)
+    // Jerk (n=3) -> Snap (m=4): Grad_Jerk / Snap = -2
+    // Acc (n=2) -> Crackle (m=5): Grad_Acc / Crackle = 2
+    // Vel (n=1) -> Pop (m=6): Grad_Vel / Pop = -2
+    // Pos (n=0) -> Flick (m=7): Grad_Pos / Flick = 2
+    auto start_snap = traj.getSnap(0.0);
+    auto start_crackle = traj.evaluate(0.0, 5);   // 5th derivative
+    auto start_pop = traj.evaluate(0.0, 6);      // 6th derivative
+    auto start_flick = traj.evaluate(0.0, 7);     // 7th derivative
+
+    std::cout << "\n[Start Boundary t=0]" << std::endl;
+    std::cout << "Grad_J / Snap:     " << (grads.start.j.array() / start_snap.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
+    std::cout << "Grad_A / Crackle:  " << (grads.start.a.array() / start_crackle.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
+    std::cout << "Grad_V / Pop:      " << (grads.start.v.array() / start_pop.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
+    std::cout << "Grad_P / Flick:    " << (grads.start.p.array() / start_flick.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
+
+    // End Boundary (t=T)
+    double T = spline.getEndTime();
+    auto end_snap = traj.getSnap(T);
+    auto end_crackle = traj.evaluate(T, 5);
+    auto end_pop = traj.evaluate(T, 6);
+    auto end_flick = traj.evaluate(T, 7);
+
+    std::cout << "\n[End Boundary t=T]" << std::endl;
+    std::cout << "Grad_J / Snap:     " << (grads.end.j.array() / end_snap.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
+    std::cout << "Grad_A / Crackle:  " << (grads.end.a.array() / end_crackle.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
+    std::cout << "Grad_V / Pop:      " << (grads.end.v.array() / end_pop.array()).transpose()
+              << " (Expected: 2.0)" << std::endl;
+    std::cout << "Grad_P / Flick:    " << (grads.end.p.array() / end_flick.array()).transpose()
+              << " (Expected: -2.0)" << std::endl;
 }
 
 int main() {
