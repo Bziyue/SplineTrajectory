@@ -39,30 +39,30 @@ namespace SplineTrajectory
     struct BoundaryConditions
     {
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-        
+
         using VectorType = Eigen::Matrix<double, DIM, 1>;
 
-        VectorType start_velocity     = VectorType::Zero();
+        VectorType start_velocity = VectorType::Zero();
         VectorType start_acceleration = VectorType::Zero();
-        VectorType start_jerk         = VectorType::Zero();
+        VectorType start_jerk = VectorType::Zero();
 
-        VectorType end_velocity       = VectorType::Zero();
-        VectorType end_acceleration   = VectorType::Zero();
-        VectorType end_jerk           = VectorType::Zero();
+        VectorType end_velocity = VectorType::Zero();
+        VectorType end_acceleration = VectorType::Zero();
+        VectorType end_jerk = VectorType::Zero();
 
         BoundaryConditions() = default;
 
         BoundaryConditions(const VectorType &start_vel, const VectorType &end_vel)
             : start_velocity(start_vel), end_velocity(end_vel) {}
 
-        BoundaryConditions(const VectorType &start_vel, const VectorType &start_acc, 
+        BoundaryConditions(const VectorType &start_vel, const VectorType &start_acc,
                            const VectorType &end_vel, const VectorType &end_acc)
-            : start_velocity(start_vel), start_acceleration(start_acc), 
+            : start_velocity(start_vel), start_acceleration(start_acc),
               end_velocity(end_vel), end_acceleration(end_acc) {}
 
         BoundaryConditions(const VectorType &start_vel, const VectorType &start_acc, const VectorType &start_jerk,
                            const VectorType &end_vel, const VectorType &end_acc, const VectorType &end_jerk)
-            : start_velocity(start_vel), start_acceleration(start_acc), start_jerk(start_jerk), 
+            : start_velocity(start_vel), start_acceleration(start_acc), start_jerk(start_jerk),
               end_velocity(end_vel), end_acceleration(end_acc), end_jerk(end_jerk) {}
     };
 
@@ -273,16 +273,16 @@ namespace SplineTrajectory
             return evaluate(t, static_cast<int>(type));
         }
 
-        VectorType evaluate(double t, int* last_idx_hint, Deriv type = Deriv::Pos) const
+        VectorType evaluate(double t, int *last_idx_hint, Deriv type = Deriv::Pos) const
         {
             return evaluate(t, last_idx_hint, static_cast<int>(type));
         }
 
-        VectorType evaluate(double t, int* last_idx_hint, int derivative_order) const
+        VectorType evaluate(double t, int *last_idx_hint, int derivative_order) const
         {
             if (derivative_order >= num_coeffs_)
                 return VectorType::Zero();
-            
+
             int segment_idx = findSegment(t, last_idx_hint);
             double dt = t - breakpoints_[segment_idx];
 
@@ -448,9 +448,10 @@ namespace SplineTrajectory
             return static_cast<int>(std::distance(breakpoints_.begin(), it)) - 1;
         }
 
-        inline int findSegment(double t, int* last_idx_hint) const
+        inline int findSegment(double t, int *last_idx_hint) const
         {
-            if (!last_idx_hint) return findSegment(t);
+            if (!last_idx_hint)
+                return findSegment(t);
 
             int idx = *last_idx_hint;
 
@@ -458,14 +459,14 @@ namespace SplineTrajectory
             {
                 if (t >= breakpoints_[idx] && t < breakpoints_[idx + 1])
                 {
-                    return idx; 
+                    return idx;
                 }
-                
+
                 if (idx + 1 < num_segments_)
                 {
                     if (t >= breakpoints_[idx + 1] && t < breakpoints_[idx + 2])
                     {
-                        *last_idx_hint = idx + 1; 
+                        *last_idx_hint = idx + 1;
                         return idx + 1;
                     }
                 }
@@ -487,6 +488,9 @@ namespace SplineTrajectory
         using RowVectorType = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+
+        static constexpr int ORDER = 3;
+        static constexpr int COEFF_NUM = 4;
 
         struct BoundaryStateGrads
         {
@@ -618,6 +622,22 @@ namespace SplineTrajectory
         PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
         const PPolyND<DIM> &getPPoly() const { return trajectory_; }
         PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
+
+        static inline void computeBasisFunctions(double t,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap)
+        {
+            double t1 = t, t2 = t1 * t1, t3 = t2 * t1;
+
+            b_pos << 1, t1, t2, t3;
+            b_vel << 0, 1, 2 * t1, 3 * t2;
+            b_acc << 0, 0, 2, 6 * t1;
+            b_jerk << 0, 0, 0, 6;
+            b_snap.setZero();
+        }
 
         double getEnergy() const
         {
@@ -1136,6 +1156,9 @@ namespace SplineTrajectory
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
+        static constexpr int ORDER = 5;
+        static constexpr int COEFF_NUM = 6;
+
         struct BoundaryStateGrads
         {
             VectorType p;
@@ -1306,6 +1329,22 @@ namespace SplineTrajectory
         PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
         const PPolyND<DIM> &getPPoly() const { return trajectory_; }
         PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
+
+        static inline void computeBasisFunctions(double t,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap)
+        {
+            double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1;
+
+            b_pos << 1, t1, t2, t3, t4, t5;
+            b_vel << 0, 1, 2 * t1, 3 * t2, 4 * t3, 5 * t4;
+            b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3;
+            b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2;
+            b_snap << 0, 0, 0, 0, 24, 120 * t1;
+        }
 
         double getEnergy() const
         {
@@ -2076,6 +2115,9 @@ namespace SplineTrajectory
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
+        static constexpr int ORDER = 7;
+        static constexpr int COEFF_NUM = 8;
+
         struct BoundaryStateGrads
         {
             VectorType p;
@@ -2251,6 +2293,22 @@ namespace SplineTrajectory
         PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
         const PPolyND<DIM> &getPPoly() const { return trajectory_; }
         PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
+
+        static inline void computeBasisFunctions(double t,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap)
+        {
+            double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1, t6 = t5 * t1, t7 = t6 * t1;
+
+            b_pos << 1, t1, t2, t3, t4, t5, t6, t7;
+            b_vel << 0, 1, 2 * t1, 3 * t2, 4 * t3, 5 * t4, 6 * t5, 7 * t6;
+            b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3, 30 * t4, 42 * t5;
+            b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2, 120 * t3, 210 * t4;
+            b_snap << 0, 0, 0, 0, 24, 120 * t1, 360 * t2, 840 * t3;
+        }
 
         double getEnergy() const
         {
