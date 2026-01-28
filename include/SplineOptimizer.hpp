@@ -36,6 +36,23 @@ namespace SplineTrajectory
     };
 
     /**
+     * @brief SpatialMap Interface Protocol [NEW]
+     * Defines how the unconstrained variable (xi) maps to physical position (p).
+     * Unlike TimeMap, this acts on an instance level to hold constraints (e.g., Polyhedrons).
+     */
+    struct SpatialMapProtocol
+    {
+        // Forward: xi (unconstrained) -> p (physical)
+        Eigen::VectorXd toPhysical(const Eigen::VectorXd& xi, int index) const;
+        
+        // Backward: p (physical) -> xi (unconstrained), used for initial guess
+        Eigen::VectorXd toUnconstrained(const Eigen::VectorXd& p, int index) const;
+        
+        // Gradient: dCost/dxi = (dCost/dp) * (dp/dxi)
+        Eigen::VectorXd backwardGrad(const Eigen::VectorXd& xi, const Eigen::VectorXd& grad_p, int index) const;
+    };
+
+    /**
      * @brief SpatialCostFunc Protocol
      * Functor to compute trajectory integral cost.
      * Returns the scalar cost value.
@@ -84,6 +101,7 @@ namespace SplineTrajectory
         template <typename...>
         using void_t = void;
 
+        // --- TimeMap Traits ---
         template <typename T, typename = void>
         struct HasTimeMapInterface : std::false_type {};
 
@@ -94,6 +112,20 @@ namespace SplineTrajectory
             decltype(static_cast<double>(T::backward(std::declval<double>(), std::declval<double>(), std::declval<double>())))
         >> : std::true_type {};
 
+        // --- SpatialMap Traits ---
+        template <typename T, int DIM, typename = void>
+        struct HasSpatialMapInterface : std::false_type {};
+
+        template <typename T, int DIM>
+        struct HasSpatialMapInterface<T, DIM, void_t<
+            decltype(std::declval<T>().toPhysical(std::declval<Eigen::Matrix<double, DIM, 1>>(), std::declval<int>())),
+            decltype(std::declval<T>().toUnconstrained(std::declval<Eigen::Matrix<double, DIM, 1>>(), std::declval<int>())),
+            decltype(std::declval<T>().backwardGrad(std::declval<Eigen::Matrix<double, DIM, 1>>(), 
+                                                    std::declval<Eigen::Matrix<double, DIM, 1>>(), 
+                                                    std::declval<int>()))
+        >> : std::true_type {};
+
+        // --- Cost Func Traits ---
         template <typename T, typename = void>
         struct HasTimeCostInterface : std::false_type {};
 
@@ -112,6 +144,7 @@ namespace SplineTrajectory
         struct HasSpatialCostInterface<T, VecT, void_t<
             decltype(static_cast<double>(std::declval<T>()(
                 std::declval<double>(),                  // t
+                std::declval<int>(),                     // segment_index
                 std::declval<const VecT &>(),            // p
                 std::declval<const VecT &>(),            // v
                 std::declval<const VecT &>(),            // a
@@ -134,12 +167,59 @@ namespace SplineTrajectory
         static double backward(double tau, double T, double gradT) { return gradT; }
     };
 
-    struct ExpTimeMap
+    struct QuadInvTimeMap
     {
-        static double toTime(double tau) { return std::exp(tau); }
-        static double toTau(double T) { return std::log(T); }
-        // T = exp(tau) => dT/dtau = exp(tau) = T => grad_tau = gradT * T
-        static double backward(double tau, double T, double gradT) { return gradT * T; }
+        static double toTime(double tau)
+        {
+            return tau > 0 
+                ? ((0.5 * tau + 1.0) * tau + 1.0)
+                : (1.0 / ((0.5 * tau - 1.0) * tau + 1.0));
+        }
+
+        static double toTau(double T)
+        {
+            return T > 1.0
+                   ? (std::sqrt(2.0 * T - 1.0) - 1.0)
+                   : (1.0 - std::sqrt(2.0 / T - 1.0));
+        }
+
+        static double backward(double tau, double T, double gradT)
+        {
+            if (tau > 0)
+            {
+                return gradT * (tau + 1.0);
+            }
+            else
+            {
+                double den = (0.5 * tau - 1.0) * tau + 1.0; 
+                return gradT * (1.0 - tau) / (den * den);
+            }
+        }
+    };
+
+    /**
+     * @brief IdentitySpatialMap
+     * Default unconstrained mapping (xi = p).
+     */
+    template <int DIM>
+    struct IdentitySpatialMap
+    {
+        using VectorType = Eigen::Matrix<double, DIM, 1>;
+
+        VectorType toPhysical(const VectorType& xi, int index) const 
+        { 
+            return xi; 
+        }
+
+        VectorType toUnconstrained(const VectorType& p, int index) const 
+        { 
+            return p; 
+        }
+
+        VectorType backwardGrad(const VectorType& xi, const VectorType& grad_p, int index) const 
+        { 
+            return grad_p; 
+        }
     };
 
     struct OptimizationFlags
@@ -156,7 +236,8 @@ namespace SplineTrajectory
 
     template <int DIM,
               typename SplineType = QuinticSplineND<DIM>,
-              typename TimeMap = IdentityTimeMap>
+              typename TimeMap = IdentityTimeMap,
+              typename SpatialMap = IdentitySpatialMap<DIM>>
     class SplineOptimizer
     {
         static_assert(TypeTraits::HasTimeMapInterface<TimeMap>::value,
@@ -165,6 +246,10 @@ namespace SplineTrajectory
                       "  static double toTime(double tau);\n"
                       "  static double toTau(double T);\n"
                       "  static double backward(double tau, double T, double gradT);\n");
+
+        static_assert(TypeTraits::HasSpatialMapInterface<SpatialMap, DIM>::value,
+                      "\n[SplineOptimizer Error] The provided 'SpatialMap' type does not satisfy the required interface.\n"
+                      "It must implement toPhysical, toUnconstrained, and backwardGrad methods.\n");
 
     public:
         using VectorType = typename SplineType::VectorType;
@@ -202,7 +287,7 @@ namespace SplineTrajectory
         };
 
     private:
-        std::vector<double> ref_times_; // Represents segment durations
+        std::vector<double> ref_times_; 
         WaypointsType ref_waypoints_;
         BoundaryConditions<DIM> ref_bc_;
         double start_time_ = 0.0;
@@ -214,7 +299,8 @@ namespace SplineTrajectory
         double rho_energy_ = 0.0;
         double integral_step_ = 0.05;
 
-        // === Internal Workspace for Convenience API ===
+        SpatialMap spatial_map_;
+
         mutable std::unique_ptr<Workspace> internal_ws_;
 
     public:
@@ -229,7 +315,8 @@ namespace SplineTrajectory
               num_segments_(other.num_segments_),
               opt_dim_(other.opt_dim_),
               rho_energy_(other.rho_energy_),
-              integral_step_(other.integral_step_)
+              integral_step_(other.integral_step_),
+              spatial_map_(other.spatial_map_) // Copy map
         {
             if (other.internal_ws_)
                 internal_ws_ = std::unique_ptr<Workspace>(new Workspace(*other.internal_ws_));
@@ -248,6 +335,7 @@ namespace SplineTrajectory
                 opt_dim_ = other.opt_dim_;
                 rho_energy_ = other.rho_energy_;
                 integral_step_ = other.integral_step_;
+                spatial_map_ = other.spatial_map_;
                 if (other.internal_ws_)
                     internal_ws_ = std::unique_ptr<Workspace>(new Workspace(*other.internal_ws_));
                 else
@@ -255,6 +343,8 @@ namespace SplineTrajectory
             }
             return *this;
         }
+
+        void setSpatialMap(const SpatialMap& map) { spatial_map_ = map; }
 
         /**
          * @brief Initialize using Absolute Time Points.
@@ -307,6 +397,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Generate initial guess x based on reference state.
+         * Applies 'toUnconstrained' mapping for inner waypoints.
          */
         Eigen::VectorXd generateInitialGuess() const
         {
@@ -319,7 +410,7 @@ namespace SplineTrajectory
 
             for (int i = 1; i < num_segments_; ++i)
             {
-                x.segment<DIM>(offset) = ref_waypoints_[i];
+                x.segment<DIM>(offset) = spatial_map_.toUnconstrained(ref_waypoints_[i], i - 1);
                 offset += DIM;
             }
 
@@ -376,7 +467,7 @@ namespace SplineTrajectory
 
             static_assert(TypeTraits::HasSpatialCostInterface<SCF, VectorType>::value,
                           "\n[SplineOptimizer Error] The provided 'SpatialCostFunc' does not satisfy the required interface.\n"
-                          "Signature required: double operator()(double t, const VectorXd& p, ..., VectorXd &gp, ...)\n");
+                          "Signature required: double operator()(double t, int seg_idx, const VectorXd& p, ..., VectorXd &gp, ...)\n");
 
             ws.resize(num_segments_);
             grad_out.setZero(x.size());
@@ -389,7 +480,8 @@ namespace SplineTrajectory
 
             for (int i = 1; i < num_segments_; ++i)
             {
-                ws.cache_waypoints[i] = x.template segment<DIM>(offset);
+                VectorType xi = x.template segment<DIM>(offset);
+                ws.cache_waypoints[i] = spatial_map_.toPhysical(xi, i - 1);
                 offset += DIM;
             }
 
@@ -400,6 +492,9 @@ namespace SplineTrajectory
             auto pull_vec = [&](bool flag, VectorType &target)
             { if(flag) { target = x.template segment<DIM>(offset); offset += DIM; } };
 
+            // Note: If start_p/end_p are enabled, we might need mapping too. 
+            // Assuming boundary points are fixed in physical space or handled by user if optimization flag is true.
+            // For now, keeping original logic for boundary flags as they are usually pure physical constraints.
             pull_vec(flags_.start_p, ws.cache_waypoints[0]);
             pull_vec(flags_.start_v, current_bc.start_velocity);
             if constexpr (SplineType::ORDER >= 5)
@@ -415,9 +510,6 @@ namespace SplineTrajectory
                 pull_vec(flags_.end_j, current_bc.end_jerk);
 
             ws.spline.update(ws.cache_times, ws.cache_waypoints, start_time_, current_bc);
-
-            if (!ws.spline.isInitialized())
-                return 1e9;
 
             ws.cache_gdT.setZero();
             for (int i = 0; i < num_segments_; ++i)
@@ -469,9 +561,13 @@ namespace SplineTrajectory
                 offset++;
             }
 
+            // 2. Inner Waypoints (Spatial Map Backward)
             for (int i = 0; i < n_inner; ++i)
             {
-                grad_out.template segment<DIM>(offset) = ws.grads.inner_points.row(i);
+                VectorType xi = x.template segment<DIM>(offset); 
+                VectorType grad_p = ws.grads.inner_points.row(i);
+                
+                grad_out.template segment<DIM>(offset) = spatial_map_.backwardGrad(xi, grad_p, i);
                 offset += DIM;
             }
 
@@ -605,7 +701,7 @@ namespace SplineTrajectory
                     VectorType gp = VectorType::Zero(), gv = VectorType::Zero(), ga = VectorType::Zero(),
                                gj = VectorType::Zero(), gs = VectorType::Zero();
 
-                    double c_val = spatial_cost(t, p, v, a, j, s, gp, gv, ga, gj, gs);
+                    double c_val = spatial_cost(t, i, p, v, a, j, s, gp, gv, ga, gj, gs);
 
                     if (c_val > 0)
                     {
