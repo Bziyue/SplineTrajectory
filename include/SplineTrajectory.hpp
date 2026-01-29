@@ -628,7 +628,8 @@ namespace SplineTrajectory
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap)
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
         {
             double t1 = t, t2 = t1 * t1, t3 = t2 * t1;
 
@@ -637,6 +638,7 @@ namespace SplineTrajectory
             b_acc << 0, 0, 2, 6 * t1;
             b_jerk << 0, 0, 0, 6;
             b_snap.setZero();
+            b_crackle.setZero();
         }
 
         double getEnergy() const
@@ -1335,7 +1337,8 @@ namespace SplineTrajectory
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap)
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
         {
             double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1;
 
@@ -1344,6 +1347,7 @@ namespace SplineTrajectory
             b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3;
             b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2;
             b_snap << 0, 0, 0, 0, 24, 120 * t1;
+            b_crackle << 0, 0, 0, 0, 0, 120;
         }
 
         double getEnergy() const
@@ -2299,7 +2303,8 @@ namespace SplineTrajectory
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap)
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
+                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
         {
             double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1, t6 = t5 * t1, t7 = t6 * t1;
 
@@ -2308,6 +2313,7 @@ namespace SplineTrajectory
             b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3, 30 * t4, 42 * t5;
             b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2, 120 * t3, 210 * t4;
             b_snap << 0, 0, 0, 0, 24, 120 * t1, 360 * t2, 840 * t3;
+            b_crackle << 0, 0, 0, 0, 0, 120, 720 * t1, 2520 * t2;
         }
 
         double getEnergy() const

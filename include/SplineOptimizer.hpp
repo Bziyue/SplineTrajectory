@@ -60,24 +60,27 @@ namespace SplineTrajectory
     struct SpatialCostProtocol
     {
         /**
-         * @param t    Relative time inside the segment [0, T]
-         * @param p    Position vector (dim)
-         * @param v    Velocity vector (dim)
-         * @param a    Acceleration vector (dim)
-         * @param j    Jerk vector (dim)
-         * @param s    Snap vector (dim)
-         * @param gp   [Output] Gradient w.r.t Position
-         * @param gv   [Output] Gradient w.r.t Velocity
-         * @param ga   [Output] Gradient w.r.t Acceleration
-         * @param gj   [Output] Gradient w.r.t Jerk
-         * @param gs   [Output] Gradient w.r.t Snap
-         * @return     Scalar cost value to be accumulated
+         * @param t         Relative time inside the segment [0, T]
+         * @param t_global  Global time from start of trajectory    
+         * @param i         Segment index
+         * @param p         Position vector (dim)
+         * @param v         Velocity vector (dim)
+         * @param a         Acceleration vector (dim)
+         * @param j         Jerk vector (dim)
+         * @param s         Snap vector (dim)
+         * @param gp        [Output] Gradient w.r.t Position
+         * @param gv        [Output] Gradient w.r.t Velocity
+         * @param ga        [Output] Gradient w.r.t Acceleration
+         * @param gj        [Output] Gradient w.r.t Jerk
+         * @param gs        [Output] Gradient w.r.t Snap
+         * @param gt        [Output] Gradient w.r.t Explicit Time (e.g. dynamic obstacles)
+         * @return          Scalar cost value to be accumulated
          */
-        double operator()(double t,
+        double operator()(double t, double t_global, int i,
                           const Eigen::VectorXd &p, const Eigen::VectorXd &v,
                           const Eigen::VectorXd &a, const Eigen::VectorXd &j, const Eigen::VectorXd &s,
                           Eigen::VectorXd &gp, Eigen::VectorXd &gv, Eigen::VectorXd &ga,
-                          Eigen::VectorXd &gj, Eigen::VectorXd &gs) const;
+                          Eigen::VectorXd &gj, Eigen::VectorXd &gs, double &gt) const;
     };
 
     /**
@@ -143,7 +146,8 @@ namespace SplineTrajectory
         template <typename T, typename VecT>
         struct HasSpatialCostInterface<T, VecT, void_t<
             decltype(static_cast<double>(std::declval<T>()(
-                std::declval<double>(),                  // t
+                std::declval<double>(),                  // t (relative)
+                std::declval<double>(),                  // t_global
                 std::declval<int>(),                     // segment_index
                 std::declval<const VecT &>(),            // p
                 std::declval<const VecT &>(),            // v
@@ -154,7 +158,8 @@ namespace SplineTrajectory
                 std::declval<VecT &>(),                  // gv
                 std::declval<VecT &>(),                  // ga
                 std::declval<VecT &>(),                  // gj
-                std::declval<VecT &>()                   // gs
+                std::declval<VecT &>(),                  // gs
+                std::declval<double &>()                 // gt
             )))
         >> : std::true_type {};
     }
@@ -236,7 +241,7 @@ namespace SplineTrajectory
 
     template <int DIM,
               typename SplineType = QuinticSplineND<DIM>,
-              typename TimeMap = IdentityTimeMap,
+              typename TimeMap = QuadInvTimeMap,
               typename SpatialMap = IdentitySpatialMap<DIM>>
     class SplineOptimizer
     {
@@ -274,6 +279,8 @@ namespace SplineTrajectory
             typename SplineType::Gradients grads;
             typename SplineType::Gradients energy_grads;
 
+            Eigen::VectorXd explicit_time_grad_buffer;
+
             void resize(int num_segments)
             {
                 if (static_cast<int>(cache_times.size()) != num_segments)
@@ -282,6 +289,7 @@ namespace SplineTrajectory
                     cache_waypoints.resize(num_segments + 1);
                     cache_gdT.resize(num_segments);
                     cache_gdC.resize(num_segments * SplineType::COEFF_NUM, DIM);
+                    explicit_time_grad_buffer.resize(num_segments);
                 }
             }
         };
@@ -297,7 +305,7 @@ namespace SplineTrajectory
         int opt_dim_ = 0;
 
         double rho_energy_ = 0.0;
-        double integral_step_ = 0.05;
+        int integral_num_steps_ = 16;
 
         SpatialMap spatial_map_;
 
@@ -315,7 +323,7 @@ namespace SplineTrajectory
               num_segments_(other.num_segments_),
               opt_dim_(other.opt_dim_),
               rho_energy_(other.rho_energy_),
-              integral_step_(other.integral_step_),
+              integral_num_steps_(other.integral_num_steps_),
               spatial_map_(other.spatial_map_) // Copy map
         {
             if (other.internal_ws_)
@@ -334,7 +342,7 @@ namespace SplineTrajectory
                 num_segments_ = other.num_segments_;
                 opt_dim_ = other.opt_dim_;
                 rho_energy_ = other.rho_energy_;
-                integral_step_ = other.integral_step_;
+                integral_num_steps_ = other.integral_num_steps_;
                 spatial_map_ = other.spatial_map_;
                 if (other.internal_ws_)
                     internal_ws_ = std::unique_ptr<Workspace>(new Workspace(*other.internal_ws_));
@@ -391,7 +399,7 @@ namespace SplineTrajectory
 
         void setOptimizationFlags(const OptimizationFlags &flags) { flags_ = flags; }
         void setEnergeWeights(double rho_energy) { rho_energy_ = rho_energy; }
-        void setIntegrationStep(double step) { integral_step_ = step; }
+        void setIntegralNumSteps(int steps) { integral_num_steps_ = steps; }
 
         int getDimension() const { return calculateDimension(); }
 
@@ -521,7 +529,7 @@ namespace SplineTrajectory
             }
 
             ws.cache_gdC.setZero(); 
-            calculateIntegralCost(ws, ws.cache_gdC, total_cost, std::forward<SpatialCostFunc>(spatial_cost_func));
+            calculateIntegralCost(ws, ws.cache_gdC, ws.cache_gdT, total_cost, std::forward<SpatialCostFunc>(spatial_cost_func));
 
             ws.spline.propagateGrad(ws.cache_gdC, ws.cache_gdT, ws.grads);
 
@@ -670,49 +678,81 @@ namespace SplineTrajectory
         }
 
         template <typename SpatialFunc>
-        void calculateIntegralCost(const Workspace &ws, MatrixType &gdC, double &cost, SpatialFunc &&spatial_cost) const
+        void calculateIntegralCost(const Workspace &ws, MatrixType &gdC, Eigen::VectorXd &gdT, double &cost, SpatialFunc &&spatial_cost) const
         {
             const auto &coeffs = ws.spline.getTrajectory().getCoefficients();
-            Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s;
+            Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s, b_c;
+
+            ws.explicit_time_grad_buffer.setZero();
+
+            double current_segment_start_time = start_time_;
+
+            int K = integral_num_steps_;
+            double inv_K = 1.0 / K;
 
             for (int i = 0; i < num_segments_; ++i)
             {
                 double T = ws.cache_times[i];
-                if (T < 1e-6)
-                    continue;
-
-                int n_steps = std::ceil(T / integral_step_);
-                double dt = T / n_steps;
+        
+                double dt = T * inv_K;
                 int base_row = i * SplineType::COEFF_NUM;
                 auto block = coeffs.block(base_row, 0, SplineType::COEFF_NUM, DIM);
 
-                for (int k = 0; k <= n_steps; ++k)
+                for (int k = 0; k <= K; ++k)
                 {
-                    double weight = (k == 0 || k == n_steps) ? 0.5 * dt : dt;
-                    double t = k * dt; // t is relative time in segment
-                    SplineType::computeBasisFunctions(t, b_p, b_v, b_a, b_j, b_s);
+                    double alpha = (double)k * inv_K;
+                    double t = alpha * T; 
+
+                    double weight_trap = (k == 0 || k == K) ? 0.5 : 1.0;
+                    double common_weight = weight_trap * dt;
+
+                    double t_global = current_segment_start_time + t;
+
+                    SplineType::computeBasisFunctions(t, b_p, b_v, b_a, b_j, b_s, b_c);
 
                     VectorType p = (b_p * block).transpose();
                     VectorType v = (b_v * block).transpose();
                     VectorType a = (b_a * block).transpose();
                     VectorType j = (b_j * block).transpose();
                     VectorType s = (b_s * block).transpose();
+                    VectorType c = (b_c * block).transpose();
 
                     VectorType gp = VectorType::Zero(), gv = VectorType::Zero(), ga = VectorType::Zero(),
                                gj = VectorType::Zero(), gs = VectorType::Zero();
 
-                    double c_val = spatial_cost(t, i, p, v, a, j, s, gp, gv, ga, gj, gs);
+                    double gt = 0.0;  
 
-                    if (c_val > 0)
+                    double c_val = spatial_cost(t, t_global, i, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
+
+                    if (std::abs(c_val) > 1e-12)
                     {
-                        cost += c_val * weight;
+                        cost += c_val * common_weight;
+
                         for (int r = 0; r < SplineType::COEFF_NUM; ++r)
                         {
                             VectorType g = gp * b_p(r) + gv * b_v(r) + ga * b_a(r) + gj * b_j(r) + gs * b_s(r);
-                            gdC.row(base_row + r) += g.transpose() * weight;
+                            gdC.row(base_row + r) += g.transpose() * common_weight;
                         }
+
+                        gdT(i) += c_val * weight_trap * inv_K;
+
+                        double drift_grad = gp.dot(v) + gv.dot(a) + ga.dot(j) + gj.dot(s) + gs.dot(c); 
+                        gdT(i) += drift_grad * alpha * common_weight;
+
+                        gdT(i) += gt * alpha * common_weight;
+
+                        ws.explicit_time_grad_buffer(i) += gt * common_weight;
                     }
                 }
+
+                current_segment_start_time += T;
+            }
+
+            double accumulator = 0.0;
+            for (int i = num_segments_ - 1; i > 0; --i)
+            {
+                accumulator += ws.explicit_time_grad_buffer(i);
+                gdT(i - 1) += accumulator;
             }
         }
     };
