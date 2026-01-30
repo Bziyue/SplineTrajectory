@@ -54,11 +54,11 @@ namespace SplineTrajectory
     };
 
     /**
-     * @brief SpatialCostFunc Protocol
+     * @brief IntegralCostFunc Protocol
      * Functor to compute trajectory integral cost.
      * Returns the scalar cost value.
      */
-    struct SpatialCostProtocol
+    struct IntegralCostProtocol
     {
         /**
          * @param t         Relative time inside the segment [0, T]
@@ -170,10 +170,10 @@ namespace SplineTrajectory
         >> : std::true_type {};
 
         template <typename T, typename VecT, typename = void>
-        struct HasSpatialCostInterface : std::false_type {};
+        struct HasIntegralCostInterface : std::false_type {};
 
         template <typename T, typename VecT>
-        struct HasSpatialCostInterface<T, VecT, void_t<
+        struct HasIntegralCostInterface<T, VecT, void_t<
             decltype(static_cast<double>(std::declval<T>()(
                 std::declval<double>(),                  // t (relative)
                 std::declval<double>(),                  // t_global
@@ -501,16 +501,16 @@ namespace SplineTrajectory
         /**
          * @brief Thread-safe evaluate. Requires user to provide a Workspace.
          */
-        template <typename TimeCostFunc, typename WaypointsCostFunc, typename SpatialCostFunc>
+        template <typename TimeCostFunc, typename WaypointsCostFunc, typename IntegralCostFunc>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
                         TimeCostFunc &&time_cost_func, 
                         WaypointsCostFunc &&waypoints_cost_func, 
-                        SpatialCostFunc &&spatial_cost_func,
+                        IntegralCostFunc &&integral_cost_func,
                         Workspace &ws) const
         {
             using TCF = typename std::decay<TimeCostFunc>::type;
             using WCF = typename std::decay<WaypointsCostFunc>::type; 
-            using SCF = typename std::decay<SpatialCostFunc>::type;
+            using SCF = typename std::decay<IntegralCostFunc>::type;
 
             static_assert(TypeTraits::HasTimeCostInterface<TCF>::value,
                           "\n[SplineOptimizer Error] 'TimeCostFunc' signature mismatch.\n"
@@ -520,8 +520,8 @@ namespace SplineTrajectory
                           "\n[SplineOptimizer Error] 'WaypointsCostFunc' signature mismatch.\n"
                           "Required: double operator()(const WaypointsType& qs, MatrixXd &grad_q)\n");
 
-            static_assert(TypeTraits::HasSpatialCostInterface<SCF, VectorType>::value,
-                          "\n[SplineOptimizer Error] 'SpatialCostFunc' signature mismatch.\n");
+            static_assert(TypeTraits::HasIntegralCostInterface<SCF, VectorType>::value,
+                          "\n[SplineOptimizer Error] 'IntegralCostFunc' signature mismatch.\n");
 
             ws.resize(num_segments_);
             grad_out.setZero(x.size());
@@ -564,7 +564,7 @@ namespace SplineTrajectory
             ws.cache_gdT += ws.user_gdT_buffer;
 
             ws.cache_gdC.setZero(); 
-            calculateIntegralCost(ws, ws.cache_gdC, ws.cache_gdT, total_cost, std::forward<SpatialCostFunc>(spatial_cost_func));
+            calculateIntegralCost(ws, ws.cache_gdC, ws.cache_gdT, total_cost, std::forward<IntegralCostFunc>(integral_cost_func));
 
             ws.spline.propagateGrad(ws.cache_gdC, ws.cache_gdT, ws.grads);
 
@@ -640,25 +640,25 @@ namespace SplineTrajectory
             return total_cost;
         }
 
-        template <typename TimeCostFunc, typename SpatialCostFunc>
+        template <typename TimeCostFunc, typename IntegralCostFunc>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
                         TimeCostFunc &&time_cost_func, 
-                        SpatialCostFunc &&spatial_cost_func,
+                        IntegralCostFunc &&integral_cost_func,
                         Workspace &ws) const
         {
             return evaluate(x, grad_out,
                             std::forward<TimeCostFunc>(time_cost_func),
                             VoidWaypointsCost(), 
-                            std::forward<SpatialCostFunc>(spatial_cost_func),
+                            std::forward<IntegralCostFunc>(integral_cost_func),
                             ws);
         }
 
         /**
          * @brief Convenience evaluate. Uses internal workspace.
          */
-        template <typename TimeCostFunc, typename SpatialCostFunc>
+        template <typename TimeCostFunc, typename IntegralCostFunc>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
-                        TimeCostFunc &&time_cost_func, SpatialCostFunc &&spatial_cost_func) const
+                        TimeCostFunc &&time_cost_func, IntegralCostFunc &&integral_cost_func) const
         {
             if (!internal_ws_)
             {
@@ -666,7 +666,7 @@ namespace SplineTrajectory
             }
             return evaluate(x, grad_out,
                             std::forward<TimeCostFunc>(time_cost_func),
-                            std::forward<SpatialCostFunc>(spatial_cost_func),
+                            std::forward<IntegralCostFunc>(integral_cost_func),
                             *internal_ws_);
         }
 
@@ -697,9 +697,9 @@ namespace SplineTrajectory
             }
         };
 
-        template <typename TFunc, typename WFunc, typename SFunc>
+        template <typename TFunc, typename WFunc, typename IFunc>
         GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
-                            TFunc &&tf, WFunc &&wf, SFunc &&sf, 
+                            TFunc &&tf, WFunc &&wf, IFunc &&ifc, 
                             Workspace &ws,
                             double eps = 1e-6,
                             double tol = 1e-4)
@@ -707,7 +707,7 @@ namespace SplineTrajectory
             GradientCheckResult res;
             
             res.analytical.resize(x.size());
-            evaluate(x, res.analytical, tf, wf, sf, ws);
+            evaluate(x, res.analytical, tf, wf, ifc, ws);
 
             res.numerical.resize(x.size());
             Eigen::VectorXd dummy_grad(x.size());
@@ -719,17 +719,17 @@ namespace SplineTrajectory
                 double old_val = x_temp(i);
                 
                 x_temp(i) = old_val + eps;
-                double c_p = evaluate(x_temp, dummy_grad, tf, wf, sf, ws);
+                double c_p = evaluate(x_temp, dummy_grad, tf, wf, ifc, ws);
                 
                 x_temp(i) = old_val - eps;
-                double c_m = evaluate(x_temp, dummy_grad, tf, wf, sf, ws);
+                double c_m = evaluate(x_temp, dummy_grad, tf, wf, ifc, ws);
                 
                 x_temp(i) = old_val;
 
                 res.numerical(i) = (c_p - c_m) / (2 * eps);
             }
 
-            evaluate(x, res.analytical, tf, wf, sf, ws);
+            evaluate(x, res.analytical, tf, wf, ifc, ws);
 
             Eigen::VectorXd diff = res.analytical - res.numerical;
             res.error_norm = diff.norm();
@@ -742,9 +742,9 @@ namespace SplineTrajectory
             return res;
         }
 
-        template <typename TFunc, typename SFunc>
+        template <typename TFunc, typename IFunc>
         GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
-                            TFunc &&tf, SFunc &&sf, 
+                            TFunc &&tf, IFunc &&ifc, 
                             Workspace &ws,
                             double eps = 1e-6,
                             double tol = 1e-4)
@@ -752,15 +752,15 @@ namespace SplineTrajectory
             return checkGradients(x, 
                                   std::forward<TFunc>(tf), 
                                   VoidWaypointsCost(),
-                                  std::forward<SFunc>(sf), 
+                                  std::forward<IFunc>(ifc), 
                                   ws,
                                   eps,
                                   tol);
         }
 
-        template <typename TFunc, typename SFunc>
+        template <typename TFunc, typename IFunc>
         GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
-                                           TFunc &&tf, SFunc &&sf,
+                                           TFunc &&tf, IFunc &&ifc,
                                            double eps = 1e-6,
                                            double tol = 1e-4)
         {
@@ -771,7 +771,7 @@ namespace SplineTrajectory
             return checkGradients(x, 
                                   std::forward<TFunc>(tf), 
                                   VoidWaypointsCost(), 
-                                  std::forward<SFunc>(sf), 
+                                  std::forward<IFunc>(ifc), 
                                   *internal_ws_,
                                   eps,
                                   tol);
@@ -798,8 +798,8 @@ namespace SplineTrajectory
             return dim;
         }
 
-        template <typename SpatialFunc>
-        void calculateIntegralCost(const Workspace &ws, MatrixType &gdC, Eigen::VectorXd &gdT, double &cost, SpatialFunc &&spatial_cost) const
+        template <typename IntegralFunc>
+        void calculateIntegralCost(Workspace &ws, MatrixType &gdC, Eigen::VectorXd &gdT, double &cost, IntegralFunc &&integral_cost) const
         {
             const auto &coeffs = ws.spline.getTrajectory().getCoefficients();
             Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s, b_c;
@@ -843,7 +843,7 @@ namespace SplineTrajectory
 
                     double gt = 0.0;  
 
-                    double c_val = spatial_cost(t, t_global, i, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
+                    double c_val = integral_cost(t, t_global, i, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
 
                     if (std::abs(c_val) > 1e-12)
                     {
