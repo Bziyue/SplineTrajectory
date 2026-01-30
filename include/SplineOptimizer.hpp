@@ -1,7 +1,8 @@
-#ifndef Spline_OPTIMIZER_HPP
-#define Spline_OPTIMIZER_HPP
+#ifndef SPLINE_OPTIMIZER_HPP
+#define SPLINE_OPTIMIZER_HPP
 
 #include "SplineTrajectory.hpp"
+#include <algorithm>
 #include <vector>
 #include <cmath>
 #include <iostream>
@@ -85,17 +86,34 @@ namespace SplineTrajectory
 
     /**
      * @brief TimeCostFunc Protocol
-     * Functor to compute cost based on segment duration.
-     * Returns the cost value.
+     * Functor to compute cost based on ALL segment durations.
+     * Allows for global time constraints (e.g., total time).
      */
     struct TimeCostProtocol
     {
         /**
-         * @param T    Physical duration of the segment
-         * @param grad [Output] Gradient of cost w.r.t T (dL/dT)
-         * @return     Cost value
+         * @param Ts    Physical durations of all segments (std::vector<double>)
+         * @param grad  [Output] Gradient of cost w.r.t each T (Eigen::VectorXd ref)
+         * @return      Cost value
          */
-        double operator()(double T, double &grad) const;
+        double operator()(const std::vector<double>& Ts, Eigen::VectorXd &grad) const;
+    };
+
+    /**
+     * @brief WaypointsCostProtocol
+     * Functor to compute cost based on DISCRETE waypoints (q).
+     * This is separate from the integral cost along the continuous curve.
+     */
+    struct WaypointsCostProtocol
+    {
+        /**
+         * @param waypoints  The full list of waypoints [q0, q1, ... qN] (Physical space)
+         * @param grad_q     [Output] Gradient w.r.t each waypoint (Matrix: (N+1) x DIM)
+         * Rows correspond to q0, q1, ... qN
+         * @return           Cost value
+         */
+        double operator()(const SplineVector<Eigen::Matrix<double, Eigen::Dynamic, 1>> &waypoints, 
+                          Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &grad_q) const;
     };
 #endif
 
@@ -135,8 +153,19 @@ namespace SplineTrajectory
         template <typename T>
         struct HasTimeCostInterface<T, void_t<
             decltype(static_cast<double>(std::declval<T>()(
-                std::declval<double>(),   // T
-                std::declval<double &>()  // grad ref
+                std::declval<const std::vector<double>&>(), // All times
+                std::declval<Eigen::VectorXd &>()           // Gradient vector
+            )))
+        >> : std::true_type {};
+
+        template <typename T, typename WaypointsType, typename = void>
+        struct HasWaypointsCostInterface : std::false_type {};
+
+        template <typename T, typename WaypointsType>
+        struct HasWaypointsCostInterface<T, WaypointsType, void_t<
+            decltype(static_cast<double>(std::declval<T>()(
+                std::declval<const WaypointsType &>(),                // Waypoints
+                std::declval<Eigen::Matrix<double, -1, -1> &>()       // Gradient Matrix (Dynamic)
             )))
         >> : std::true_type {};
 
@@ -227,6 +256,15 @@ namespace SplineTrajectory
         }
     };
 
+    struct VoidWaypointsCost
+    {
+        template <typename WaypointsType, typename GradMatrixType>
+        double operator()(const WaypointsType & /*waypoints*/, GradMatrixType & /*grad_q*/) const
+        {
+            return 0.0;
+        }
+    };
+
     struct OptimizationFlags
     {
         bool start_p = false;
@@ -275,6 +313,7 @@ namespace SplineTrajectory
 
             Eigen::VectorXd cache_gdT;
             MatrixType cache_gdC;
+            Eigen::VectorXd user_gdT_buffer;
 
             typename SplineType::Gradients grads;
             typename SplineType::Gradients energy_grads;
@@ -288,6 +327,7 @@ namespace SplineTrajectory
                     cache_times.resize(num_segments);
                     cache_waypoints.resize(num_segments + 1);
                     cache_gdT.resize(num_segments);
+                    user_gdT_buffer.resize(num_segments);
                     cache_gdC.resize(num_segments * SplineType::COEFF_NUM, DIM);
                     explicit_time_grad_buffer.resize(num_segments);
                 }
@@ -398,7 +438,7 @@ namespace SplineTrajectory
         }
 
         void setOptimizationFlags(const OptimizationFlags &flags) { flags_ = flags; }
-        void setEnergeWeights(double rho_energy) { rho_energy_ = rho_energy; }
+        void setEnergyWeights(double rho_energy) { rho_energy_ = rho_energy; }
         void setIntegralNumSteps(int steps) { integral_num_steps_ = steps; }
 
         int getDimension() const { return calculateDimension(); }
@@ -461,21 +501,27 @@ namespace SplineTrajectory
         /**
          * @brief Thread-safe evaluate. Requires user to provide a Workspace.
          */
-        template <typename TimeCostFunc, typename SpatialCostFunc>
+        template <typename TimeCostFunc, typename WaypointsCostFunc, typename SpatialCostFunc>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
-                        TimeCostFunc &&time_cost_func, SpatialCostFunc &&spatial_cost_func,
+                        TimeCostFunc &&time_cost_func, 
+                        WaypointsCostFunc &&waypoints_cost_func, 
+                        SpatialCostFunc &&spatial_cost_func,
                         Workspace &ws) const
         {
             using TCF = typename std::decay<TimeCostFunc>::type;
+            using WCF = typename std::decay<WaypointsCostFunc>::type; 
             using SCF = typename std::decay<SpatialCostFunc>::type;
 
             static_assert(TypeTraits::HasTimeCostInterface<TCF>::value,
-                          "\n[SplineOptimizer Error] The provided 'TimeCostFunc' does not satisfy the required interface.\n"
-                          "Signature required: double operator()(double T, double &grad)\n");
+                          "\n[SplineOptimizer Error] 'TimeCostFunc' signature mismatch.\n"
+                          "Required: double operator()(const vector<double>& Ts, VectorXd &grad)\n");
+
+            static_assert(TypeTraits::HasWaypointsCostInterface<WCF, WaypointsType>::value,
+                          "\n[SplineOptimizer Error] 'WaypointsCostFunc' signature mismatch.\n"
+                          "Required: double operator()(const WaypointsType& qs, MatrixXd &grad_q)\n");
 
             static_assert(TypeTraits::HasSpatialCostInterface<SCF, VectorType>::value,
-                          "\n[SplineOptimizer Error] The provided 'SpatialCostFunc' does not satisfy the required interface.\n"
-                          "Signature required: double operator()(double t, int seg_idx, const VectorXd& p, ..., VectorXd &gp, ...)\n");
+                          "\n[SplineOptimizer Error] 'SpatialCostFunc' signature mismatch.\n");
 
             ws.resize(num_segments_);
             grad_out.setZero(x.size());
@@ -500,38 +546,41 @@ namespace SplineTrajectory
             auto pull_vec = [&](bool flag, VectorType &target)
             { if(flag) { target = x.template segment<DIM>(offset); offset += DIM; } };
 
-            // Note: If start_p/end_p are enabled, we might need mapping too. 
-            // Assuming boundary points are fixed in physical space or handled by user if optimization flag is true.
-            // For now, keeping original logic for boundary flags as they are usually pure physical constraints.
             pull_vec(flags_.start_p, ws.cache_waypoints[0]);
             pull_vec(flags_.start_v, current_bc.start_velocity);
-            if constexpr (SplineType::ORDER >= 5)
-                pull_vec(flags_.start_a, current_bc.start_acceleration);
-            if constexpr (SplineType::ORDER >= 7)
-                pull_vec(flags_.start_j, current_bc.start_jerk);
+            if constexpr (SplineType::ORDER >= 5) pull_vec(flags_.start_a, current_bc.start_acceleration);
+            if constexpr (SplineType::ORDER >= 7) pull_vec(flags_.start_j, current_bc.start_jerk);
 
             pull_vec(flags_.end_p, ws.cache_waypoints[num_segments_]);
             pull_vec(flags_.end_v, current_bc.end_velocity);
-            if constexpr (SplineType::ORDER >= 5)
-                pull_vec(flags_.end_a, current_bc.end_acceleration);
-            if constexpr (SplineType::ORDER >= 7)
-                pull_vec(flags_.end_j, current_bc.end_jerk);
+            if constexpr (SplineType::ORDER >= 5) pull_vec(flags_.end_a, current_bc.end_acceleration);
+            if constexpr (SplineType::ORDER >= 7) pull_vec(flags_.end_j, current_bc.end_jerk);
 
             ws.spline.update(ws.cache_times, ws.cache_waypoints, start_time_, current_bc);
 
+            ws.user_gdT_buffer.setZero();
             ws.cache_gdT.setZero();
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                double g = 0;
-                double c = time_cost_func(ws.cache_times[i], g);
-                total_cost += c;
-                ws.cache_gdT(i) += g;
-            }
+            total_cost += time_cost_func(ws.cache_times, ws.user_gdT_buffer);
+            ws.cache_gdT += ws.user_gdT_buffer;
 
             ws.cache_gdC.setZero(); 
             calculateIntegralCost(ws, ws.cache_gdC, ws.cache_gdT, total_cost, std::forward<SpatialCostFunc>(spatial_cost_func));
 
             ws.spline.propagateGrad(ws.cache_gdC, ws.cache_gdT, ws.grads);
+
+            {
+                Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> discrete_grad_q;
+                discrete_grad_q.setZero(num_segments_ + 1, DIM);
+
+                double dw_cost = waypoints_cost_func(ws.cache_waypoints, discrete_grad_q);
+                total_cost += dw_cost;
+                
+                ws.grads.start.p += discrete_grad_q.row(0);
+                if (n_inner > 0) {
+                    ws.grads.inner_points += discrete_grad_q.block(1, 0, n_inner, DIM);
+                }
+                ws.grads.end.p += discrete_grad_q.row(num_segments_);
+            }
 
             if (rho_energy_ > 0)
             {
@@ -546,30 +595,26 @@ namespace SplineTrajectory
 
                 ws.grads.start.p += rho_energy_ * ws.energy_grads.start.p;
                 ws.grads.start.v += rho_energy_ * ws.energy_grads.start.v;
-                if constexpr (SplineType::ORDER >= 5)
-                    ws.grads.start.a += rho_energy_ * ws.energy_grads.start.a;
-                if constexpr (SplineType::ORDER >= 7)
-                    ws.grads.start.j += rho_energy_ * ws.energy_grads.start.j;
+                if constexpr (SplineType::ORDER >= 5) ws.grads.start.a += rho_energy_ * ws.energy_grads.start.a;
+                if constexpr (SplineType::ORDER >= 7) ws.grads.start.j += rho_energy_ * ws.energy_grads.start.j;
 
                 ws.grads.end.p += rho_energy_ * ws.energy_grads.end.p;
                 ws.grads.end.v += rho_energy_ * ws.energy_grads.end.v;
-                if constexpr (SplineType::ORDER >= 5)
-                    ws.grads.end.a += rho_energy_ * ws.energy_grads.end.a;
-                if constexpr (SplineType::ORDER >= 7)
-                    ws.grads.end.j += rho_energy_ * ws.energy_grads.end.j;
+                if constexpr (SplineType::ORDER >= 5) ws.grads.end.a += rho_energy_ * ws.energy_grads.end.a;
+                if constexpr (SplineType::ORDER >= 7) ws.grads.end.j += rho_energy_ * ws.energy_grads.end.j;
             }
 
             offset = 0;
+            
             for (int i = 0; i < num_segments_; ++i)
             {
-                double tau = x(offset); // original unconstrained var
+                double tau = x(offset);
                 double T = ws.cache_times[i];
-                double gradT = ws.grads.times(i);
+                double gradT = ws.grads.times(i); 
                 grad_out(offset) = TimeMap::backward(tau, T, gradT);
                 offset++;
             }
 
-            // 2. Inner Waypoints (Spatial Map Backward)
             for (int i = 0; i < n_inner; ++i)
             {
                 VectorType xi = x.template segment<DIM>(offset); 
@@ -584,19 +629,28 @@ namespace SplineTrajectory
 
             push_grad(flags_.start_p, ws.grads.start.p);
             push_grad(flags_.start_v, ws.grads.start.v);
-            if constexpr (SplineType::ORDER >= 5)
-                push_grad(flags_.start_a, ws.grads.start.a);
-            if constexpr (SplineType::ORDER >= 7)
-                push_grad(flags_.start_j, ws.grads.start.j);
+            if constexpr (SplineType::ORDER >= 5) push_grad(flags_.start_a, ws.grads.start.a);
+            if constexpr (SplineType::ORDER >= 7) push_grad(flags_.start_j, ws.grads.start.j);
 
             push_grad(flags_.end_p, ws.grads.end.p);
             push_grad(flags_.end_v, ws.grads.end.v);
-            if constexpr (SplineType::ORDER >= 5)
-                push_grad(flags_.end_a, ws.grads.end.a);
-            if constexpr (SplineType::ORDER >= 7)
-                push_grad(flags_.end_j, ws.grads.end.j);
+            if constexpr (SplineType::ORDER >= 5) push_grad(flags_.end_a, ws.grads.end.a);
+            if constexpr (SplineType::ORDER >= 7) push_grad(flags_.end_j, ws.grads.end.j);
 
             return total_cost;
+        }
+
+        template <typename TimeCostFunc, typename SpatialCostFunc>
+        double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
+                        TimeCostFunc &&time_cost_func, 
+                        SpatialCostFunc &&spatial_cost_func,
+                        Workspace &ws) const
+        {
+            return evaluate(x, grad_out,
+                            std::forward<TimeCostFunc>(time_cost_func),
+                            VoidWaypointsCost(), 
+                            std::forward<SpatialCostFunc>(spatial_cost_func),
+                            ws);
         }
 
         /**
@@ -616,6 +670,8 @@ namespace SplineTrajectory
                             *internal_ws_);
         }
 
+       
+
         const SplineType *getOptimalSpline() const
         {
             if (internal_ws_)
@@ -623,37 +679,102 @@ namespace SplineTrajectory
             return nullptr;
         }
 
-        template <typename TFunc, typename SFunc>
-        bool checkGradients(const Eigen::VectorXd &x, TFunc &&tf, SFunc &&sf)
+        struct GradientCheckResult
         {
-            std::cout << "[SplineOptimizer] Checking Gradients..." << std::endl;
-            Eigen::VectorXd analytical_grad(x.size());
-            evaluate(x, analytical_grad, tf, sf);
+            bool valid = false;          
+            double error_norm = 0.0;      
+            double rel_error = 0.0;       
+            Eigen::VectorXd analytical;   
+            Eigen::VectorXd numerical;   
+            
+            std::string makeReport() const {
+                std::stringstream ss;
+                if (valid) 
+                    ss << "Gradient Check PASSED! Norm: " << error_norm << "\n";
+                else
+                    ss << "Gradient Check FAILED! Norm: " << error_norm << "\n";
+                return ss.str();
+            }
+        };
 
-            Eigen::VectorXd num_grad(x.size());
-            Eigen::VectorXd x_p = x, x_m = x;
-            double eps = 1e-6;
+        template <typename TFunc, typename WFunc, typename SFunc>
+        GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
+                            TFunc &&tf, WFunc &&wf, SFunc &&sf, 
+                            Workspace &ws,
+                            double eps = 1e-6,
+                            double tol = 1e-4)
+        {
+            GradientCheckResult res;
+            
+            res.analytical.resize(x.size());
+            evaluate(x, res.analytical, tf, wf, sf, ws);
+
+            res.numerical.resize(x.size());
+            Eigen::VectorXd dummy_grad(x.size());
+
+            Eigen::VectorXd x_temp = x;
 
             for (int i = 0; i < x.size(); ++i)
             {
-                x_p(i) += eps;
-                x_m(i) -= eps;
-                double c_p = evaluate(x_p, num_grad, tf, sf);
-                double c_m = evaluate(x_m, num_grad, tf, sf);
-                num_grad(i) = (c_p - c_m) / (2 * eps);
-                x_p(i) = x(i);
-                x_m(i) = x(i);
+                double old_val = x_temp(i);
+                
+                x_temp(i) = old_val + eps;
+                double c_p = evaluate(x_temp, dummy_grad, tf, wf, sf, ws);
+                
+                x_temp(i) = old_val - eps;
+                double c_m = evaluate(x_temp, dummy_grad, tf, wf, sf, ws);
+                
+                x_temp(i) = old_val;
+
+                res.numerical(i) = (c_p - c_m) / (2 * eps);
             }
 
-            double error = (analytical_grad - num_grad).norm();
-            std::cout << "Gradient Error Norm: " << error << std::endl;
-            if (error > 1e-4)
+            evaluate(x, res.analytical, tf, wf, sf, ws);
+
+            Eigen::VectorXd diff = res.analytical - res.numerical;
+            res.error_norm = diff.norm();
+
+            double grad_norm = res.analytical.norm();
+            res.rel_error = (grad_norm > 1e-9) ? (res.error_norm / grad_norm) : res.error_norm;
+
+            res.valid = (res.error_norm < tol);
+
+            return res;
+        }
+
+        template <typename TFunc, typename SFunc>
+        GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
+                            TFunc &&tf, SFunc &&sf, 
+                            Workspace &ws,
+                            double eps = 1e-6,
+                            double tol = 1e-4)
+        {
+            return checkGradients(x, 
+                                  std::forward<TFunc>(tf), 
+                                  VoidWaypointsCost(),
+                                  std::forward<SFunc>(sf), 
+                                  ws,
+                                  eps,
+                                  tol);
+        }
+
+        template <typename TFunc, typename SFunc>
+        GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
+                                           TFunc &&tf, SFunc &&sf,
+                                           double eps = 1e-6,
+                                           double tol = 1e-4)
+        {
+            if (!internal_ws_)
             {
-                std::cout << "Analytical: " << analytical_grad.transpose() << "\n";
-                std::cout << "Numerical:  " << num_grad.transpose() << "\n";
-                return false;
+                internal_ws_ = std::unique_ptr<Workspace>(new Workspace());
             }
-            return true;
+            return checkGradients(x, 
+                                  std::forward<TFunc>(tf), 
+                                  VoidWaypointsCost(), 
+                                  std::forward<SFunc>(sf), 
+                                  *internal_ws_,
+                                  eps,
+                                  tol);
         }
 
     private:
