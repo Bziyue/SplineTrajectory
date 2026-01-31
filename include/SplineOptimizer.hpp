@@ -28,12 +28,12 @@ namespace SplineTrajectory
     struct TimeMapProtocol
     {
         // Convert unconstrained variable 'tau' to physical time 'T'
-        static double toTime(double tau);
+        double toTime(double tau) const;
         // Convert physical time 'T' to unconstrained variable 'tau'
-        static double toTau(double T);
+        double toTau(double T) const;
         // Compute gradient w.r.t tau given gradient w.r.t T (Chain Rule)
         // Returns: dCost/dtau = (dCost/dT) * (dT/dtau)
-        static double backward(double tau, double T, double gradT);
+        double backward(double tau, double T, double gradT) const;
     };
 
     /**
@@ -128,9 +128,9 @@ namespace SplineTrajectory
 
         template <typename T>
         struct HasTimeMapInterface<T, void_t<
-            decltype(static_cast<double>(T::toTime(std::declval<double>()))),
-            decltype(static_cast<double>(T::toTau(std::declval<double>()))),
-            decltype(static_cast<double>(T::backward(std::declval<double>(), std::declval<double>(), std::declval<double>())))
+            decltype(static_cast<double>(std::declval<T>().toTime(std::declval<double>()))),
+            decltype(static_cast<double>(std::declval<T>().toTau(std::declval<double>()))),
+            decltype(static_cast<double>(std::declval<T>().backward(std::declval<double>(), std::declval<double>(), std::declval<double>())))
         >> : std::true_type {};
 
         // --- SpatialMap Traits ---
@@ -195,29 +195,29 @@ namespace SplineTrajectory
 
     struct IdentityTimeMap
     {
-        static double toTime(double tau) { return tau; }
-        static double toTau(double T) { return T; }
+        double toTime(double tau) const { return tau; }
+        double toTau(double T) const { return T; }
         // T = tau => dT/dtau = 1 => grad_tau = gradT * 1
-        static double backward(double tau, double T, double gradT) { return gradT; }
+        double backward(double tau, double T, double gradT) const { return gradT; }
     };
 
     struct QuadInvTimeMap
     {
-        static double toTime(double tau)
+        double toTime(double tau) const
         {
-            return tau > 0 
+            return tau > 0
                 ? ((0.5 * tau + 1.0) * tau + 1.0)
                 : (1.0 / ((0.5 * tau - 1.0) * tau + 1.0));
         }
 
-        static double toTau(double T)
+        double toTau(double T) const
         {
             return T > 1.0
                    ? (std::sqrt(2.0 * T - 1.0) - 1.0)
                    : (1.0 - std::sqrt(2.0 / T - 1.0));
         }
 
-        static double backward(double tau, double T, double gradT)
+        double backward(double tau, double T, double gradT) const
         {
             if (tau > 0)
             {
@@ -225,7 +225,7 @@ namespace SplineTrajectory
             }
             else
             {
-                double den = (0.5 * tau - 1.0) * tau + 1.0; 
+                double den = (0.5 * tau - 1.0) * tau + 1.0;
                 return gradT * (1.0 - tau) / (den * den);
             }
         }
@@ -285,10 +285,10 @@ namespace SplineTrajectory
     {
         static_assert(TypeTraits::HasTimeMapInterface<TimeMap>::value,
                       "\n[SplineOptimizer Error] The provided 'TimeMap' type does not satisfy the required interface.\n"
-                      "It must implement static methods:\n"
-                      "  static double toTime(double tau);\n"
-                      "  static double toTau(double T);\n"
-                      "  static double backward(double tau, double T, double gradT);\n");
+                      "It must implement const member methods:\n"
+                      "  double toTime(double tau) const;\n"
+                      "  double toTau(double T) const;\n"
+                      "  double backward(double tau, double T, double gradT) const;\n");
 
         static_assert(TypeTraits::HasSpatialMapInterface<SpatialMap, DIM>::value,
                       "\n[SplineOptimizer Error] The provided 'SpatialMap' type does not satisfy the required interface.\n"
@@ -319,6 +319,7 @@ namespace SplineTrajectory
             typename SplineType::Gradients energy_grads;
 
             Eigen::VectorXd explicit_time_grad_buffer;
+            MatrixType discrete_grad_q_buffer;
 
             void resize(int num_segments)
             {
@@ -330,12 +331,13 @@ namespace SplineTrajectory
                     user_gdT_buffer.resize(num_segments);
                     cache_gdC.resize(num_segments * SplineType::COEFF_NUM, DIM);
                     explicit_time_grad_buffer.resize(num_segments);
+                    discrete_grad_q_buffer.resize(num_segments + 1, DIM);
                 }
             }
         };
 
     private:
-        std::vector<double> ref_times_; 
+        std::vector<double> ref_times_;
         WaypointsType ref_waypoints_;
         BoundaryConditions<DIM> ref_bc_;
         double start_time_ = 0.0;
@@ -347,12 +349,20 @@ namespace SplineTrajectory
         double rho_energy_ = 0.0;
         int integral_num_steps_ = 16;
 
-        SpatialMap spatial_map_;
+        TimeMap default_time_map_;
+        SpatialMap default_spatial_map_;
+
+        const TimeMap* active_time_map_ = nullptr;
+        const SpatialMap* active_spatial_map_ = nullptr;
 
         mutable std::unique_ptr<Workspace> internal_ws_;
 
     public:
-        SplineOptimizer() = default;
+        SplineOptimizer()
+        {
+            active_time_map_ = &default_time_map_;
+            active_spatial_map_ = &default_spatial_map_;
+        }
 
         SplineOptimizer(const SplineOptimizer &other)
             : ref_times_(other.ref_times_),
@@ -364,8 +374,16 @@ namespace SplineTrajectory
               opt_dim_(other.opt_dim_),
               rho_energy_(other.rho_energy_),
               integral_num_steps_(other.integral_num_steps_),
-              spatial_map_(other.spatial_map_) // Copy map
+              default_time_map_(other.default_time_map_),
+              default_spatial_map_(other.default_spatial_map_)
         {
+            active_time_map_ = (other.active_time_map_ == &other.default_time_map_)
+                              ? &default_time_map_
+                              : other.active_time_map_;
+            active_spatial_map_ = (other.active_spatial_map_ == &other.default_spatial_map_)
+                                  ? &default_spatial_map_
+                                  : other.active_spatial_map_;
+
             if (other.internal_ws_)
                 internal_ws_ = std::unique_ptr<Workspace>(new Workspace(*other.internal_ws_));
         }
@@ -383,7 +401,16 @@ namespace SplineTrajectory
                 opt_dim_ = other.opt_dim_;
                 rho_energy_ = other.rho_energy_;
                 integral_num_steps_ = other.integral_num_steps_;
-                spatial_map_ = other.spatial_map_;
+                default_time_map_ = other.default_time_map_;
+                default_spatial_map_ = other.default_spatial_map_;
+
+                active_time_map_ = (other.active_time_map_ == &other.default_time_map_)
+                                  ? &default_time_map_
+                                  : other.active_time_map_;
+                active_spatial_map_ = (other.active_spatial_map_ == &other.default_spatial_map_)
+                                      ? &default_spatial_map_
+                                      : other.active_spatial_map_;
+
                 if (other.internal_ws_)
                     internal_ws_ = std::unique_ptr<Workspace>(new Workspace(*other.internal_ws_));
                 else
@@ -392,7 +419,25 @@ namespace SplineTrajectory
             return *this;
         }
 
-        void setSpatialMap(const SpatialMap& map) { spatial_map_ = map; }
+        /**
+         * @brief Set the TimeMap to use for time transformations.
+         * @param map Pointer to a TimeMap instance (can be nullptr to reset to default).
+         * The optimizer does not take ownership; the map must remain valid.
+         */
+        void setTimeMap(const TimeMap* map)
+        {
+            active_time_map_ = (map != nullptr) ? map : &default_time_map_;
+        }
+
+        /**
+         * @brief Set the SpatialMap to use for spatial transformations.
+         * @param map Pointer to a SpatialMap instance (can be nullptr to reset to default).
+         * The optimizer does not take ownership; the map must remain valid.
+         */
+        void setSpatialMap(const SpatialMap* map)
+        {
+            active_spatial_map_ = (map != nullptr) ? map : &default_spatial_map_;
+        }
 
         /**
          * @brief Initialize using Absolute Time Points.
@@ -454,11 +499,11 @@ namespace SplineTrajectory
             int offset = 0;
 
             for (double t : ref_times_)
-                x(offset++) = TimeMap::toTau(t);
+                x(offset++) = active_time_map_->toTau(t);
 
             for (int i = 1; i < num_segments_; ++i)
             {
-                x.segment<DIM>(offset) = spatial_map_.toUnconstrained(ref_waypoints_[i], i - 1);
+                x.segment<DIM>(offset) = active_spatial_map_->toUnconstrained(ref_waypoints_[i], i - 1);
                 offset += DIM;
             }
 
@@ -530,12 +575,12 @@ namespace SplineTrajectory
 
             int offset = 0;
             for (int i = 0; i < num_segments_; ++i)
-                ws.cache_times[i] = TimeMap::toTime(x(offset++));
+                ws.cache_times[i] = active_time_map_->toTime(x(offset++));
 
             for (int i = 1; i < num_segments_; ++i)
             {
                 VectorType xi = x.template segment<DIM>(offset);
-                ws.cache_waypoints[i] = spatial_map_.toPhysical(xi, i - 1);
+                ws.cache_waypoints[i] = active_spatial_map_->toPhysical(xi, i - 1);
                 offset += DIM;
             }
 
@@ -568,18 +613,18 @@ namespace SplineTrajectory
 
             ws.spline.propagateGrad(ws.cache_gdC, ws.cache_gdT, ws.grads);
 
+            if constexpr (!std::is_same_v<WCF, VoidWaypointsCost>)
             {
-                Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> discrete_grad_q;
-                discrete_grad_q.setZero(num_segments_ + 1, DIM);
+                ws.discrete_grad_q_buffer.setZero();
 
-                double dw_cost = waypoints_cost_func(ws.cache_waypoints, discrete_grad_q);
+                double dw_cost = waypoints_cost_func(ws.cache_waypoints, ws.discrete_grad_q_buffer);
                 total_cost += dw_cost;
-                
-                ws.grads.start.p += discrete_grad_q.row(0);
+
+                ws.grads.start.p += ws.discrete_grad_q_buffer.row(0);
                 if (n_inner > 0) {
-                    ws.grads.inner_points += discrete_grad_q.block(1, 0, n_inner, DIM);
+                    ws.grads.inner_points += ws.discrete_grad_q_buffer.block(1, 0, n_inner, DIM);
                 }
-                ws.grads.end.p += discrete_grad_q.row(num_segments_);
+                ws.grads.end.p += ws.discrete_grad_q_buffer.row(num_segments_);
             }
 
             if (rho_energy_ > 0)
@@ -605,22 +650,22 @@ namespace SplineTrajectory
             }
 
             offset = 0;
-            
+
             for (int i = 0; i < num_segments_; ++i)
             {
                 double tau = x(offset);
                 double T = ws.cache_times[i];
-                double gradT = ws.grads.times(i); 
-                grad_out(offset) = TimeMap::backward(tau, T, gradT);
+                double gradT = ws.grads.times(i);
+                grad_out(offset) = active_time_map_->backward(tau, T, gradT);
                 offset++;
             }
 
             for (int i = 0; i < n_inner; ++i)
             {
-                VectorType xi = x.template segment<DIM>(offset); 
+                VectorType xi = x.template segment<DIM>(offset);
                 VectorType grad_p = ws.grads.inner_points.row(i);
-                
-                grad_out.template segment<DIM>(offset) = spatial_map_.backwardGrad(xi, grad_p, i);
+
+                grad_out.template segment<DIM>(offset) = active_spatial_map_->backwardGrad(xi, grad_p, i);
                 offset += DIM;
             }
 
