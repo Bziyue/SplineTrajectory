@@ -40,15 +40,23 @@ namespace SplineTrajectory
      * @brief SpatialMap Interface Protocol [NEW]
      * Defines how the unconstrained variable (xi) maps to physical position (p).
      * Unlike TimeMap, this acts on an instance level to hold constraints (e.g., Polyhedrons).
+     *
+     * Global Absolute Indexing:
+     * - index = 0: The Start Point of the trajectory
+     * - index = 1 to N-1: The Inner Waypoints
+     * - index = N: The End Point of the trajectory
      */
     struct SpatialMapProtocol
     {
+        // Get dimension of unconstrained variable xi for the point at global 'index'
+        int getUnconstrainedDim(int index) const;
+
         // Forward: xi (unconstrained) -> p (physical)
         Eigen::VectorXd toPhysical(const Eigen::VectorXd& xi, int index) const;
-        
+
         // Backward: p (physical) -> xi (unconstrained), used for initial guess
         Eigen::VectorXd toUnconstrained(const Eigen::VectorXd& p, int index) const;
-        
+
         // Gradient: dCost/dxi = (dCost/dp) * (dp/dxi)
         Eigen::VectorXd backwardGrad(const Eigen::VectorXd& xi, const Eigen::VectorXd& grad_p, int index) const;
     };
@@ -139,10 +147,11 @@ namespace SplineTrajectory
 
         template <typename T, int DIM>
         struct HasSpatialMapInterface<T, DIM, void_t<
-            decltype(std::declval<T>().toPhysical(std::declval<Eigen::Matrix<double, DIM, 1>>(), std::declval<int>())),
-            decltype(std::declval<T>().toUnconstrained(std::declval<Eigen::Matrix<double, DIM, 1>>(), std::declval<int>())),
-            decltype(std::declval<T>().backwardGrad(std::declval<Eigen::Matrix<double, DIM, 1>>(), 
-                                                    std::declval<Eigen::Matrix<double, DIM, 1>>(), 
+            decltype(static_cast<int>(std::declval<T>().getUnconstrainedDim(std::declval<int>()))),
+            decltype(std::declval<T>().toPhysical(std::declval<Eigen::VectorXd>(), std::declval<int>())),
+            decltype(std::declval<T>().toUnconstrained(std::declval<Eigen::VectorXd>(), std::declval<int>())),
+            decltype(std::declval<T>().backwardGrad(std::declval<Eigen::VectorXd>(),
+                                                    std::declval<Eigen::VectorXd>(),
                                                     std::declval<int>()))
         >> : std::true_type {};
 
@@ -240,19 +249,21 @@ namespace SplineTrajectory
     {
         using VectorType = Eigen::Matrix<double, DIM, 1>;
 
-        VectorType toPhysical(const VectorType& xi, int index) const 
-        { 
-            return xi; 
+        int getUnconstrainedDim(int index) const { return DIM; }
+
+        VectorType toPhysical(const VectorType& xi, int index) const
+        {
+            return xi;
         }
 
-        VectorType toUnconstrained(const VectorType& p, int index) const 
-        { 
-            return p; 
+        VectorType toUnconstrained(const VectorType& p, int index) const
+        {
+            return p;
         }
 
-        VectorType backwardGrad(const VectorType& xi, const VectorType& grad_p, int index) const 
-        { 
-            return grad_p; 
+        VectorType backwardGrad(const VectorType& xi, const VectorType& grad_p, int index) const
+        {
+            return grad_p;
         }
     };
 
@@ -490,7 +501,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Generate initial guess x based on reference state.
-         * Applies 'toUnconstrained' mapping for inner waypoints.
+         * Applies 'toUnconstrained' mapping strictly following Start->Inner->End sequence.
          */
         Eigen::VectorXd generateInitialGuess() const
         {
@@ -501,44 +512,34 @@ namespace SplineTrajectory
             for (double t : ref_times_)
                 x(offset++) = active_time_map_->toTau(t);
 
+            auto push_spatial = [&](bool optimize_flag, int global_idx) {
+                if (optimize_flag) {
+                    int dof = active_spatial_map_->getUnconstrainedDim(global_idx);
+                    x.segment(offset, dof) = active_spatial_map_->toUnconstrained(ref_waypoints_[global_idx], global_idx);
+                    offset += dof;
+                }
+            };
+
+            push_spatial(flags_.start_p, 0);
+
             for (int i = 1; i < num_segments_; ++i)
             {
-                x.segment<DIM>(offset) = active_spatial_map_->toUnconstrained(ref_waypoints_[i], i - 1);
-                offset += DIM;
+                push_spatial(true, i);
             }
 
-            auto push_vec = [&](const VectorType &v)
-            { x.segment<DIM>(offset) = v; offset += DIM; };
+            push_spatial(flags_.end_p, num_segments_);
 
-            if (flags_.start_p)
-                push_vec(ref_waypoints_.front());
-            if (flags_.start_v)
-                push_vec(ref_bc_.start_velocity);
-            if constexpr (SplineType::ORDER >= 5)
-            {
-                if (flags_.start_a)
-                    push_vec(ref_bc_.start_acceleration);
-            }
-            if constexpr (SplineType::ORDER >= 7)
-            {
-                if (flags_.start_j)
-                    push_vec(ref_bc_.start_jerk);
-            }
+            auto push_deriv = [&](bool flag, const VectorType &v) { 
+                if(flag) { x.segment<DIM>(offset) = v; offset += DIM; } 
+            };
 
-            if (flags_.end_p)
-                push_vec(ref_waypoints_.back());
-            if (flags_.end_v)
-                push_vec(ref_bc_.end_velocity);
-            if constexpr (SplineType::ORDER >= 5)
-            {
-                if (flags_.end_a)
-                    push_vec(ref_bc_.end_acceleration);
-            }
-            if constexpr (SplineType::ORDER >= 7)
-            {
-                if (flags_.end_j)
-                    push_vec(ref_bc_.end_jerk);
-            }
+            push_deriv(flags_.start_v, ref_bc_.start_velocity);
+            if constexpr (SplineType::ORDER >= 5) push_deriv(flags_.start_a, ref_bc_.start_acceleration);
+            if constexpr (SplineType::ORDER >= 7) push_deriv(flags_.start_j, ref_bc_.start_jerk);
+
+            push_deriv(flags_.end_v, ref_bc_.end_velocity);
+            if constexpr (SplineType::ORDER >= 5) push_deriv(flags_.end_a, ref_bc_.end_acceleration);
+            if constexpr (SplineType::ORDER >= 7) push_deriv(flags_.end_j, ref_bc_.end_jerk);
 
             return x;
         }
@@ -548,13 +549,13 @@ namespace SplineTrajectory
          */
         template <typename TimeCostFunc, typename WaypointsCostFunc, typename IntegralCostFunc>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
-                        TimeCostFunc &&time_cost_func, 
-                        WaypointsCostFunc &&waypoints_cost_func, 
+                        TimeCostFunc &&time_cost_func,
+                        WaypointsCostFunc &&waypoints_cost_func,
                         IntegralCostFunc &&integral_cost_func,
                         Workspace &ws) const
         {
             using TCF = typename std::decay<TimeCostFunc>::type;
-            using WCF = typename std::decay<WaypointsCostFunc>::type; 
+            using WCF = typename std::decay<WaypointsCostFunc>::type;
             using SCF = typename std::decay<IntegralCostFunc>::type;
 
             static_assert(TypeTraits::HasTimeCostInterface<TCF>::value,
@@ -574,32 +575,41 @@ namespace SplineTrajectory
             int n_inner = std::max(0, num_segments_ - 1);
 
             int offset = 0;
+
             for (int i = 0; i < num_segments_; ++i)
                 ws.cache_times[i] = active_time_map_->toTime(x(offset++));
 
-            for (int i = 1; i < num_segments_; ++i)
-            {
-                VectorType xi = x.template segment<DIM>(offset);
-                ws.cache_waypoints[i] = active_spatial_map_->toPhysical(xi, i - 1);
-                offset += DIM;
+            auto process_point_forward = [&](bool optimize_flag, int global_idx) {
+                if (optimize_flag) {
+                    int dof = active_spatial_map_->getUnconstrainedDim(global_idx);
+                    Eigen::VectorXd xi = x.segment(offset, dof);
+                    ws.cache_waypoints[global_idx] = active_spatial_map_->toPhysical(xi, global_idx);
+                    offset += dof;
+                } else {
+                    ws.cache_waypoints[global_idx] = ref_waypoints_[global_idx];
+                }
+            };
+
+            process_point_forward(flags_.start_p, 0);
+
+            for (int i = 1; i < num_segments_; ++i) {
+                process_point_forward(true, i);
             }
 
+            process_point_forward(flags_.end_p, num_segments_);
+
             BoundaryConditions<DIM> current_bc = ref_bc_;
-            ws.cache_waypoints[0] = ref_waypoints_[0];
-            ws.cache_waypoints[num_segments_] = ref_waypoints_[num_segments_];
+            auto pull_deriv = [&](bool flag, VectorType &target) { 
+                if(flag) { target = x.template segment<DIM>(offset); offset += DIM; } 
+            };
 
-            auto pull_vec = [&](bool flag, VectorType &target)
-            { if(flag) { target = x.template segment<DIM>(offset); offset += DIM; } };
+            pull_deriv(flags_.start_v, current_bc.start_velocity);
+            if constexpr (SplineType::ORDER >= 5) pull_deriv(flags_.start_a, current_bc.start_acceleration);
+            if constexpr (SplineType::ORDER >= 7) pull_deriv(flags_.start_j, current_bc.start_jerk);
 
-            pull_vec(flags_.start_p, ws.cache_waypoints[0]);
-            pull_vec(flags_.start_v, current_bc.start_velocity);
-            if constexpr (SplineType::ORDER >= 5) pull_vec(flags_.start_a, current_bc.start_acceleration);
-            if constexpr (SplineType::ORDER >= 7) pull_vec(flags_.start_j, current_bc.start_jerk);
-
-            pull_vec(flags_.end_p, ws.cache_waypoints[num_segments_]);
-            pull_vec(flags_.end_v, current_bc.end_velocity);
-            if constexpr (SplineType::ORDER >= 5) pull_vec(flags_.end_a, current_bc.end_acceleration);
-            if constexpr (SplineType::ORDER >= 7) pull_vec(flags_.end_j, current_bc.end_jerk);
+            pull_deriv(flags_.end_v, current_bc.end_velocity);
+            if constexpr (SplineType::ORDER >= 5) pull_deriv(flags_.end_a, current_bc.end_acceleration);
+            if constexpr (SplineType::ORDER >= 7) pull_deriv(flags_.end_j, current_bc.end_jerk);
 
             ws.spline.update(ws.cache_times, ws.cache_waypoints, start_time_, current_bc);
 
@@ -608,7 +618,7 @@ namespace SplineTrajectory
             total_cost += time_cost_func(ws.cache_times, ws.user_gdT_buffer);
             ws.cache_gdT += ws.user_gdT_buffer;
 
-            ws.cache_gdC.setZero(); 
+            ws.cache_gdC.setZero();
             calculateIntegralCost(ws, ws.cache_gdC, ws.cache_gdT, total_cost, std::forward<IntegralCostFunc>(integral_cost_func));
 
             ws.spline.propagateGrad(ws.cache_gdC, ws.cache_gdT, ws.grads);
@@ -660,24 +670,42 @@ namespace SplineTrajectory
                 offset++;
             }
 
-            for (int i = 0; i < n_inner; ++i)
-            {
-                VectorType xi = x.template segment<DIM>(offset);
-                VectorType grad_p = ws.grads.inner_points.row(i);
+            auto process_point_backward = [&](bool optimize_flag, int global_idx) {
+                if (optimize_flag) {
+                    int dof = active_spatial_map_->getUnconstrainedDim(global_idx);
+                    Eigen::VectorXd xi = x.segment(offset, dof);
 
-                grad_out.template segment<DIM>(offset) = active_spatial_map_->backwardGrad(xi, grad_p, i);
-                offset += DIM;
+                    Eigen::VectorXd grad_p_phys;
+                    if (global_idx == 0) {
+                        grad_p_phys = ws.grads.start.p;
+                    } else if (global_idx == num_segments_) {
+                        grad_p_phys = ws.grads.end.p;
+                    } else {
+                        grad_p_phys = ws.grads.inner_points.row(global_idx - 1);
+                    }
+
+                    // Chain Rule: dCost/dxi = dCost/dp * dp/dxi
+                    grad_out.segment(offset, dof) = active_spatial_map_->backwardGrad(xi, grad_p_phys, global_idx);
+                    offset += dof;
+                }
+            };
+
+            process_point_backward(flags_.start_p, 0);
+
+            for (int i = 1; i < num_segments_; ++i) {
+                process_point_backward(true, i);
             }
 
-            auto push_grad = [&](bool flag, const VectorType &g)
-            { if(flag) { grad_out.template segment<DIM>(offset) = g; offset += DIM; } };
+            process_point_backward(flags_.end_p, num_segments_);
 
-            push_grad(flags_.start_p, ws.grads.start.p);
+            auto push_grad = [&](bool flag, const VectorType &g) { 
+                if(flag) { grad_out.template segment<DIM>(offset) = g; offset += DIM; } 
+            };
+
             push_grad(flags_.start_v, ws.grads.start.v);
             if constexpr (SplineType::ORDER >= 5) push_grad(flags_.start_a, ws.grads.start.a);
             if constexpr (SplineType::ORDER >= 7) push_grad(flags_.start_j, ws.grads.start.j);
 
-            push_grad(flags_.end_p, ws.grads.end.p);
             push_grad(flags_.end_v, ws.grads.end.v);
             if constexpr (SplineType::ORDER >= 5) push_grad(flags_.end_a, ws.grads.end.a);
             if constexpr (SplineType::ORDER >= 7) push_grad(flags_.end_j, ws.grads.end.j);
@@ -825,21 +853,35 @@ namespace SplineTrajectory
     private:
         int calculateDimension() const
         {
-            int dim = num_segments_ + std::max(0, num_segments_ - 1) * DIM;
-            auto check = [&](bool f)
-            { if(f) dim += DIM; };
-            check(flags_.start_p);
-            check(flags_.start_v);
-            if constexpr (SplineType::ORDER >= 5)
-                check(flags_.start_a);
-            if constexpr (SplineType::ORDER >= 7)
-                check(flags_.start_j);
-            check(flags_.end_p);
-            check(flags_.end_v);
-            if constexpr (SplineType::ORDER >= 5)
-                check(flags_.end_a);
-            if constexpr (SplineType::ORDER >= 7)
-                check(flags_.end_j);
+            int dim = 0;
+
+            dim += num_segments_;
+
+            auto add_spatial_dim = [&](bool optimize_flag, int global_idx) {
+                if (optimize_flag) {
+                    dim += active_spatial_map_->getUnconstrainedDim(global_idx);
+                }
+            };
+
+            add_spatial_dim(flags_.start_p, 0);
+
+            for (int i = 1; i < num_segments_; ++i)
+            {
+                dim += active_spatial_map_->getUnconstrainedDim(i);
+            }
+
+            add_spatial_dim(flags_.end_p, num_segments_);
+
+            auto add_deriv_dim = [&](bool flag) { if(flag) dim += DIM; };
+            
+            add_deriv_dim(flags_.start_v);
+            if constexpr (SplineType::ORDER >= 5) add_deriv_dim(flags_.start_a);
+            if constexpr (SplineType::ORDER >= 7) add_deriv_dim(flags_.start_j);
+            
+            add_deriv_dim(flags_.end_v);
+            if constexpr (SplineType::ORDER >= 5) add_deriv_dim(flags_.end_a);
+            if constexpr (SplineType::ORDER >= 7) add_deriv_dim(flags_.end_j);
+
             return dim;
         }
 
