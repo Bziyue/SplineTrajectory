@@ -427,6 +427,19 @@ namespace SplineTrajectory
         
         mutable std::string last_error_message_;
         
+        /**
+         * @brief Helper method to retrieve or create the internal workspace.
+         * @return Pointer to the internal workspace.
+         */
+        Workspace* getOrCreateInternalWorkspace() const
+        {
+            if (!internal_ws_)
+            {
+                internal_ws_ = std::make_unique<Workspace>();
+            }
+            return internal_ws_.get();
+        }
+        
         static constexpr double MIN_VALID_DURATION = 1e-3; // 1 ms
 
     public:
@@ -729,8 +742,9 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Thread-safe evaluate. Requires user to provide a Workspace.
-         * Supports custom Executor for parallel execution (defaults to SerialExecutor).
+         * @brief Primary evaluate: 3 cost functions with optional Workspace and Executor.
+         * @param ws Workspace pointer (default nullptr to use internal workspace).
+         * @param executor Executor instance (default SerialExecutor).
          */
         template <typename TimeCostFunc, typename WaypointsCostFunc, typename IntegralCostFunc, 
                   typename Executor = SerialExecutor>
@@ -738,7 +752,7 @@ namespace SplineTrajectory
                         TimeCostFunc &&time_cost_func,
                         WaypointsCostFunc &&waypoints_cost_func,
                         IntegralCostFunc &&integral_cost_func,
-                        Workspace &ws,
+                        Workspace *ws = nullptr,
                         const Executor& executor = Executor()) const
         {
             using TCF = typename std::decay<TimeCostFunc>::type;
@@ -762,7 +776,8 @@ namespace SplineTrajectory
                           "  void operator()(int start, int end, Func&& f) const;\n"
                           "where 'f' is a callable accepting an 'int' index.\n");
 
-            ws.resize(num_segments_);
+            Workspace& ws_ref = (ws != nullptr) ? *ws : *getOrCreateInternalWorkspace();
+            ws_ref.resize(num_segments_);
             grad_out.setZero(x.size());
             double total_cost = 0.0;
             int n_inner = std::max(0, num_segments_ - 1);
@@ -770,16 +785,16 @@ namespace SplineTrajectory
             int offset = 0;
 
             for (int i = 0; i < num_segments_; ++i)
-                ws.cache_times[i] = active_time_map_->toTime(x(offset++));
+                ws_ref.cache_times[i] = active_time_map_->toTime(x(offset++));
 
             auto process_point_forward = [&](bool optimize_flag, int global_idx) {
                 if (optimize_flag) {
                     int dof = active_spatial_map_->getUnconstrainedDim(global_idx);
                     Eigen::VectorXd xi = x.segment(offset, dof);
-                    ws.cache_waypoints[global_idx] = active_spatial_map_->toPhysical(xi, global_idx);
+                    ws_ref.cache_waypoints[global_idx] = active_spatial_map_->toPhysical(xi, global_idx);
                     offset += dof;
                 } else {
-                    ws.cache_waypoints[global_idx] = ref_waypoints_[global_idx];
+                    ws_ref.cache_waypoints[global_idx] = ref_waypoints_[global_idx];
                 }
             };
 
@@ -804,54 +819,54 @@ namespace SplineTrajectory
             if constexpr (SplineType::ORDER >= 5) pull_deriv(flags_.end_a, current_bc.end_acceleration);
             if constexpr (SplineType::ORDER >= 7) pull_deriv(flags_.end_j, current_bc.end_jerk);
 
-            ws.spline.update(ws.cache_times, ws.cache_waypoints, start_time_, current_bc);
+            ws_ref.spline.update(ws_ref.cache_times, ws_ref.cache_waypoints, start_time_, current_bc);
 
-            ws.user_gdT_buffer.setZero();
-            ws.cache_gdT.setZero();
-            total_cost += time_cost_func(ws.cache_times, ws.user_gdT_buffer);
-            ws.cache_gdT += ws.user_gdT_buffer;
+            ws_ref.user_gdT_buffer.setZero();
+            ws_ref.cache_gdT.setZero();
+            total_cost += time_cost_func(ws_ref.cache_times, ws_ref.user_gdT_buffer);
+            ws_ref.cache_gdT += ws_ref.user_gdT_buffer;
 
-            ws.cache_gdC.setZero();
-            calculateIntegralCost(ws, ws.cache_gdC, ws.cache_gdT, total_cost, 
+            ws_ref.cache_gdC.setZero();
+            calculateIntegralCost(ws_ref, ws_ref.cache_gdC, ws_ref.cache_gdT, total_cost, 
                                   std::forward<IntegralCostFunc>(integral_cost_func),
                                   executor);
 
-            ws.spline.propagateGrad(ws.cache_gdC, ws.cache_gdT, ws.grads);
+            ws_ref.spline.propagateGrad(ws_ref.cache_gdC, ws_ref.cache_gdT, ws_ref.grads);
 
             if constexpr (!std::is_same_v<WCF, VoidWaypointsCost>)
             {
-                ws.discrete_grad_q_buffer.setZero();
+                ws_ref.discrete_grad_q_buffer.setZero();
 
-                double dw_cost = waypoints_cost_func(ws.cache_waypoints, ws.discrete_grad_q_buffer);
+                double dw_cost = waypoints_cost_func(ws_ref.cache_waypoints, ws_ref.discrete_grad_q_buffer);
                 total_cost += dw_cost;
 
-                ws.grads.start.p += ws.discrete_grad_q_buffer.row(0);
+                ws_ref.grads.start.p += ws_ref.discrete_grad_q_buffer.row(0);
                 if (n_inner > 0) {
-                    ws.grads.inner_points += ws.discrete_grad_q_buffer.block(1, 0, n_inner, DIM);
+                    ws_ref.grads.inner_points += ws_ref.discrete_grad_q_buffer.block(1, 0, n_inner, DIM);
                 }
-                ws.grads.end.p += ws.discrete_grad_q_buffer.row(num_segments_);
+                ws_ref.grads.end.p += ws_ref.discrete_grad_q_buffer.row(num_segments_);
             }
 
             if (rho_energy_ > 0)
             {
-                double energy = ws.spline.getEnergy();
+                double energy = ws_ref.spline.getEnergy();
                 total_cost += rho_energy_ * energy;
 
-                ws.spline.getEnergyGrad(ws.energy_grads);
+                ws_ref.spline.getEnergyGrad(ws_ref.energy_grads);
 
-                ws.grads.times += rho_energy_ * ws.energy_grads.times;
+                ws_ref.grads.times += rho_energy_ * ws_ref.energy_grads.times;
                 if (n_inner > 0)
-                    ws.grads.inner_points += rho_energy_ * ws.energy_grads.inner_points;
+                    ws_ref.grads.inner_points += rho_energy_ * ws_ref.energy_grads.inner_points;
 
-                ws.grads.start.p += rho_energy_ * ws.energy_grads.start.p;
-                ws.grads.start.v += rho_energy_ * ws.energy_grads.start.v;
-                if constexpr (SplineType::ORDER >= 5) ws.grads.start.a += rho_energy_ * ws.energy_grads.start.a;
-                if constexpr (SplineType::ORDER >= 7) ws.grads.start.j += rho_energy_ * ws.energy_grads.start.j;
+                ws_ref.grads.start.p += rho_energy_ * ws_ref.energy_grads.start.p;
+                ws_ref.grads.start.v += rho_energy_ * ws_ref.energy_grads.start.v;
+                if constexpr (SplineType::ORDER >= 5) ws_ref.grads.start.a += rho_energy_ * ws_ref.energy_grads.start.a;
+                if constexpr (SplineType::ORDER >= 7) ws_ref.grads.start.j += rho_energy_ * ws_ref.energy_grads.start.j;
 
-                ws.grads.end.p += rho_energy_ * ws.energy_grads.end.p;
-                ws.grads.end.v += rho_energy_ * ws.energy_grads.end.v;
-                if constexpr (SplineType::ORDER >= 5) ws.grads.end.a += rho_energy_ * ws.energy_grads.end.a;
-                if constexpr (SplineType::ORDER >= 7) ws.grads.end.j += rho_energy_ * ws.energy_grads.end.j;
+                ws_ref.grads.end.p += rho_energy_ * ws_ref.energy_grads.end.p;
+                ws_ref.grads.end.v += rho_energy_ * ws_ref.energy_grads.end.v;
+                if constexpr (SplineType::ORDER >= 5) ws_ref.grads.end.a += rho_energy_ * ws_ref.energy_grads.end.a;
+                if constexpr (SplineType::ORDER >= 7) ws_ref.grads.end.j += rho_energy_ * ws_ref.energy_grads.end.j;
             }
 
             offset = 0;
@@ -859,8 +874,8 @@ namespace SplineTrajectory
             for (int i = 0; i < num_segments_; ++i)
             {
                 double tau = x(offset);
-                double T = ws.cache_times[i];
-                double gradT = ws.grads.times(i);
+                double T = ws_ref.cache_times[i];
+                double gradT = ws_ref.grads.times(i);
                 grad_out(offset) = active_time_map_->backward(tau, T, gradT);
                 offset++;
             }
@@ -872,11 +887,11 @@ namespace SplineTrajectory
 
                     Eigen::VectorXd grad_p_phys;
                     if (global_idx == 0) {
-                        grad_p_phys = ws.grads.start.p;
+                        grad_p_phys = ws_ref.grads.start.p;
                     } else if (global_idx == num_segments_) {
-                        grad_p_phys = ws.grads.end.p;
+                        grad_p_phys = ws_ref.grads.end.p;
                     } else {
-                        grad_p_phys = ws.grads.inner_points.row(global_idx - 1);
+                        grad_p_phys = ws_ref.grads.inner_points.row(global_idx - 1);
                     }
 
                     // Chain Rule: dCost/dxi = dCost/dp * dp/dxi
@@ -897,22 +912,26 @@ namespace SplineTrajectory
                 if(flag) { grad_out.template segment<DIM>(offset) = g; offset += DIM; } 
             };
 
-            push_grad(flags_.start_v, ws.grads.start.v);
-            if constexpr (SplineType::ORDER >= 5) push_grad(flags_.start_a, ws.grads.start.a);
-            if constexpr (SplineType::ORDER >= 7) push_grad(flags_.start_j, ws.grads.start.j);
+            push_grad(flags_.start_v, ws_ref.grads.start.v);
+            if constexpr (SplineType::ORDER >= 5) push_grad(flags_.start_a, ws_ref.grads.start.a);
+            if constexpr (SplineType::ORDER >= 7) push_grad(flags_.start_j, ws_ref.grads.start.j);
 
-            push_grad(flags_.end_v, ws.grads.end.v);
-            if constexpr (SplineType::ORDER >= 5) push_grad(flags_.end_a, ws.grads.end.a);
-            if constexpr (SplineType::ORDER >= 7) push_grad(flags_.end_j, ws.grads.end.j);
+            push_grad(flags_.end_v, ws_ref.grads.end.v);
+            if constexpr (SplineType::ORDER >= 5) push_grad(flags_.end_a, ws_ref.grads.end.a);
+            if constexpr (SplineType::ORDER >= 7) push_grad(flags_.end_j, ws_ref.grads.end.j);
 
             return total_cost;
         }
 
+        /**
+         * @brief Secondary evaluate: 2 cost functions (no waypoints cost).
+         * Forwards to primary evaluate with VoidWaypointsCost.
+         */
         template <typename TimeCostFunc, typename IntegralCostFunc, typename Executor = SerialExecutor>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
                         TimeCostFunc &&time_cost_func, 
                         IntegralCostFunc &&integral_cost_func,
-                        Workspace &ws,
+                        Workspace *ws = nullptr,
                         const Executor& executor = Executor()) const
         {
             return evaluate(x, grad_out,
@@ -922,24 +941,7 @@ namespace SplineTrajectory
                             ws, executor);
         }
 
-        /**
-         * @brief Convenience evaluate. Uses internal workspace.
-         */
-        template <typename TimeCostFunc, typename IntegralCostFunc>
-        double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
-                        TimeCostFunc &&time_cost_func, IntegralCostFunc &&integral_cost_func) const
-        {
-            if (!internal_ws_)
-            {
-                internal_ws_ = std::unique_ptr<Workspace>(new Workspace());
-            }
-            return evaluate(x, grad_out,
-                            std::forward<TimeCostFunc>(time_cost_func),
-                            std::forward<IntegralCostFunc>(integral_cost_func),
-                            *internal_ws_);
-        }
 
-       
 
         const SplineType *getOptimalSpline() const
         {
@@ -966,17 +968,23 @@ namespace SplineTrajectory
             }
         };
 
+        /**
+         * @brief Primary checkGradients: 3 cost functions with optional Workspace.
+         * @param ws Workspace pointer (default nullptr to use internal workspace).
+         */
         template <typename TFunc, typename WFunc, typename IFunc>
         GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
                             TFunc &&tf, WFunc &&wf, IFunc &&ifc, 
-                            Workspace &ws,
+                            Workspace *ws = nullptr,
                             double eps = 1e-6,
                             double tol = 1e-4)
         {
             GradientCheckResult res;
             
+            Workspace& ws_ref = (ws != nullptr) ? *ws : *getOrCreateInternalWorkspace();
+            
             res.analytical.resize(x.size());
-            evaluate(x, res.analytical, tf, wf, ifc, ws);
+            evaluate(x, res.analytical, tf, wf, ifc, &ws_ref);
 
             res.numerical.resize(x.size());
             Eigen::VectorXd dummy_grad(x.size());
@@ -988,17 +996,17 @@ namespace SplineTrajectory
                 double old_val = x_temp(i);
                 
                 x_temp(i) = old_val + eps;
-                double c_p = evaluate(x_temp, dummy_grad, tf, wf, ifc, ws);
+                double c_p = evaluate(x_temp, dummy_grad, tf, wf, ifc, &ws_ref);
                 
                 x_temp(i) = old_val - eps;
-                double c_m = evaluate(x_temp, dummy_grad, tf, wf, ifc, ws);
+                double c_m = evaluate(x_temp, dummy_grad, tf, wf, ifc, &ws_ref);
                 
                 x_temp(i) = old_val;
 
                 res.numerical(i) = (c_p - c_m) / (2 * eps);
             }
 
-            evaluate(x, res.analytical, tf, wf, ifc, ws);
+            evaluate(x, res.analytical, tf, wf, ifc, &ws_ref);
 
             Eigen::VectorXd diff = res.analytical - res.numerical;
             res.error_norm = diff.norm();
@@ -1011,10 +1019,14 @@ namespace SplineTrajectory
             return res;
         }
 
+        /**
+         * @brief Secondary checkGradients: 2 cost functions (no waypoints cost).
+         * Forwards to primary checkGradients with VoidWaypointsCost.
+         */
         template <typename TFunc, typename IFunc>
         GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
                             TFunc &&tf, IFunc &&ifc, 
-                            Workspace &ws,
+                            Workspace *ws = nullptr,
                             double eps = 1e-6,
                             double tol = 1e-4)
         {
@@ -1027,24 +1039,6 @@ namespace SplineTrajectory
                                   tol);
         }
 
-        template <typename TFunc, typename IFunc>
-        GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
-                                           TFunc &&tf, IFunc &&ifc,
-                                           double eps = 1e-6,
-                                           double tol = 1e-4)
-        {
-            if (!internal_ws_)
-            {
-                internal_ws_ = std::unique_ptr<Workspace>(new Workspace());
-            }
-            return checkGradients(x, 
-                                  std::forward<TFunc>(tf), 
-                                  VoidWaypointsCost(), 
-                                  std::forward<IFunc>(ifc), 
-                                  *internal_ws_,
-                                  eps,
-                                  tol);
-        }
 
     private:
         /**
