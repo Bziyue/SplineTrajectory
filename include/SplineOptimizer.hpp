@@ -1148,11 +1148,13 @@ namespace SplineTrajectory
 
                     segment_costs[i] += c_val * common_weight;
 
-                    for (int r = 0; r < SplineType::COEFF_NUM; ++r)
-                    {
-                        VectorType g = gp * b_p(r) + gv * b_v(r) + ga * b_a(r) + gj * b_j(r) + gs * b_s(r);
-                        gdC.row(base_row + r) += g.transpose() * common_weight;
-                    }
+                    gdC.block(base_row, 0, SplineType::COEFF_NUM, DIM) += (
+                        b_p.transpose() * gp.transpose() + 
+                        b_v.transpose() * gv.transpose() + 
+                        b_a.transpose() * ga.transpose() + 
+                        b_j.transpose() * gj.transpose() + 
+                        b_s.transpose() * gs.transpose()
+                    ) * common_weight;
 
                     gdT(i) += c_val * weight_trap * inv_K;
 
