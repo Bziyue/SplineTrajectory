@@ -526,6 +526,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Initialize using Absolute Time Points.
+         * Converts time points to segments.
          * @return true if the initial state is valid, false otherwise.
          */
         bool setInitState(const std::vector<double> &t_points,
@@ -541,28 +542,14 @@ namespace SplineTrajectory
                 return false;
             }
 
-            start_time_ = t_points.front();
-
-            ref_times_.clear();
-            ref_times_.reserve(t_points.size() - 1);
+            std::vector<double> time_segments;
+            time_segments.reserve(t_points.size() - 1);
             for (size_t i = 1; i < t_points.size(); ++i)
             {
-                double dt = t_points[i] - t_points[i - 1];
-                ref_times_.push_back(dt);
+                time_segments.push_back(t_points[i] - t_points[i - 1]);
             }
 
-            ref_waypoints_ = waypoints;
-            ref_bc_ = bc;
-            num_segments_ = static_cast<int>(ref_times_.size());
-
-            is_valid_ = checkValidity();
-            
-            if (is_valid_) {
-                if (internal_ws_)
-                    internal_ws_->resize(num_segments_);
-            }
-
-            return is_valid_;
+            return setInitState(time_segments, waypoints, t_points.front(), bc);
         }
 
         /**
@@ -893,7 +880,6 @@ namespace SplineTrajectory
                     int dof = active_spatial_map_->getUnconstrainedDim(i);
                     Eigen::VectorXd xi = x.segment(offset, dof);
 
-                    // Extract physical gradient
                     Eigen::VectorXd grad_p_phys;
                     if (i == 0) {
                         grad_p_phys = ws_ref.grads.start.p;
