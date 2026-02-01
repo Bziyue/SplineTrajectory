@@ -1070,13 +1070,14 @@ namespace SplineTrajectory
                     double t_global = current_segment_start_time + t;
 
                     SplineType::computeBasisFunctions(t, b_p, b_v, b_a, b_j, b_s, b_c);
-
-                    VectorType p = (b_p * block).transpose();
-                    VectorType v = (b_v * block).transpose();
-                    VectorType a = (b_a * block).transpose();
-                    VectorType j = (b_j * block).transpose();
-                    VectorType s = (b_s * block).transpose();
-                    VectorType c = (b_c * block).transpose();
+                    
+                    VectorType p, v, a, j, s, c;
+                    p.transpose().noalias() = b_p * block;
+                    v.transpose().noalias() = b_v * block;
+                    a.transpose().noalias() = b_a * block;
+                    j.transpose().noalias() = b_j * block;
+                    s.transpose().noalias() = b_s * block;
+                    c.transpose().noalias() = b_c * block;
 
                     VectorType gp = VectorType::Zero(), gv = VectorType::Zero(), ga = VectorType::Zero(),
                                gj = VectorType::Zero(), gs = VectorType::Zero();
