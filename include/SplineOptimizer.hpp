@@ -9,7 +9,8 @@
 #include <iomanip>
 #include <memory>
 #include <type_traits> 
-#include <utility>     
+#include <utility>   
+#include <sstream>  
 
 namespace SplineTrajectory
 {
@@ -355,10 +356,10 @@ namespace SplineTrajectory
 
         OptimizationFlags flags_;
         int num_segments_ = 0;
-        int opt_dim_ = 0;
+        bool is_valid_ = false;
 
         double rho_energy_ = 0.0;
-        int integral_num_steps_ = 16;
+        int integral_num_steps_ = 64;
 
         TimeMap default_time_map_;
         SpatialMap default_spatial_map_;
@@ -367,6 +368,10 @@ namespace SplineTrajectory
         const SpatialMap* active_spatial_map_ = nullptr;
 
         mutable std::unique_ptr<Workspace> internal_ws_;
+        
+        mutable std::string last_error_message_;
+        
+        static constexpr double MIN_VALID_DURATION = 1e-3; // 1 ms
 
     public:
         SplineOptimizer()
@@ -382,7 +387,7 @@ namespace SplineTrajectory
               start_time_(other.start_time_),
               flags_(other.flags_),
               num_segments_(other.num_segments_),
-              opt_dim_(other.opt_dim_),
+              is_valid_(other.is_valid_),
               rho_energy_(other.rho_energy_),
               integral_num_steps_(other.integral_num_steps_),
               default_time_map_(other.default_time_map_),
@@ -409,7 +414,7 @@ namespace SplineTrajectory
                 start_time_ = other.start_time_;
                 flags_ = other.flags_;
                 num_segments_ = other.num_segments_;
-                opt_dim_ = other.opt_dim_;
+                is_valid_ = other.is_valid_;
                 rho_energy_ = other.rho_energy_;
                 integral_num_steps_ = other.integral_num_steps_;
                 default_time_map_ = other.default_time_map_;
@@ -452,11 +457,21 @@ namespace SplineTrajectory
 
         /**
          * @brief Initialize using Absolute Time Points.
+         * @return true if the initial state is valid, false otherwise.
          */
-        void setInitState(const std::vector<double> &t_points,
+        bool setInitState(const std::vector<double> &t_points,
                           const WaypointsType &waypoints,
                           const BoundaryConditions<DIM> &bc)
         {
+            last_error_message_.clear();
+            
+            if (t_points.empty())
+            {
+                last_error_message_ = "Input time points vector is empty";
+                is_valid_ = false;
+                return false;
+            }
+
             start_time_ = t_points.front();
 
             ref_times_.clear();
@@ -471,31 +486,144 @@ namespace SplineTrajectory
             ref_bc_ = bc;
             num_segments_ = static_cast<int>(ref_times_.size());
 
-            if (internal_ws_)
-                internal_ws_->resize(num_segments_);
+            is_valid_ = checkValidity();
+            
+            if (is_valid_) {
+                if (internal_ws_)
+                    internal_ws_->resize(num_segments_);
+            }
+
+            return is_valid_;
         }
 
         /**
          * @brief Initialize using Time Segments (Durations).
+         * @return true if the initial state is valid, false otherwise.
          */
-        void setInitState(const std::vector<double> &time_segments,
+        bool setInitState(const std::vector<double> &time_segments,
                           const WaypointsType &waypoints,
                           double start_time,
                           const BoundaryConditions<DIM> &bc)
         {
+            last_error_message_.clear();
+            
             start_time_ = start_time;
             ref_times_ = time_segments;
             ref_waypoints_ = waypoints;
             ref_bc_ = bc;
             num_segments_ = static_cast<int>(ref_times_.size());
 
-            if (internal_ws_)
-                internal_ws_->resize(num_segments_);
+            is_valid_ = checkValidity();
+            
+            if (is_valid_) {
+                if (internal_ws_)
+                    internal_ws_->resize(num_segments_);
+            }
+
+            return is_valid_;
         }
 
         void setOptimizationFlags(const OptimizationFlags &flags) { flags_ = flags; }
         void setEnergyWeights(double rho_energy) { rho_energy_ = rho_energy; }
         void setIntegralNumSteps(int steps) { integral_num_steps_ = steps; }
+
+        /**
+         * @brief Check if the current optimization state is valid.
+         * @return true if valid, false otherwise.
+         */
+        bool isValid() const { return is_valid_; }
+
+        /**
+         * @brief Convertible to bool to check validity.
+         */
+        operator bool() const { return is_valid_; }
+        
+        /**
+         * @brief Get the last error message from validation checks.
+         * @return Error message string (empty if no error).
+         */
+        std::string getLastError() const { return last_error_message_; }
+
+        /**
+         * @brief Perform a thorough validity check on segments, times, waypoints and BCs.
+         * Aggregates ALL errors instead of stopping at the first one.
+         * @param msg_out Optional output pointer to receive detailed error message.
+         * @return true if valid, false otherwise.
+         */
+        bool checkValidity(std::string* msg_out = nullptr) const
+        {
+            std::vector<std::string> errors;
+            
+            if (num_segments_ <= 0) {
+                errors.push_back("Invalid segment count: num_segments_ <= 0");
+            }
+            
+            if (ref_times_.size() != static_cast<size_t>(num_segments_)) {
+                errors.push_back("Size mismatch: ref_times_.size() = " + std::to_string(ref_times_.size()) + 
+                                 " != num_segments_ = " + std::to_string(num_segments_));
+            }
+            
+            if (ref_waypoints_.size() != static_cast<size_t>(num_segments_ + 1)) {
+                errors.push_back("Size mismatch: ref_waypoints_.size() = " + std::to_string(ref_waypoints_.size()) + 
+                                 " != num_segments_ + 1 = " + std::to_string(num_segments_ + 1));
+            }
+            
+            if (!std::isfinite(start_time_)) {
+                errors.push_back("Start time is not finite (NaN or Inf)");
+            }
+            
+            for (size_t i = 0; i < ref_times_.size(); ++i) {
+                double t = ref_times_[i];
+                if (!std::isfinite(t)) {
+                    errors.push_back("Time segment [" + std::to_string(i) + "] is not finite: " + std::to_string(t));
+                } else if (t < MIN_VALID_DURATION) {
+                    errors.push_back("Time segment [" + std::to_string(i) + "] is too small: " + 
+                                     std::to_string(t) + " < " + std::to_string(MIN_VALID_DURATION));
+                }
+            }
+            
+            for (size_t i = 0; i < ref_waypoints_.size(); ++i) {
+                if (!ref_waypoints_[i].array().isFinite().all()) {
+                    errors.push_back("Waypoint [" + std::to_string(i) + "] contains NaN or Inf");
+                }
+            }
+            
+            if (!ref_bc_.start_velocity.array().isFinite().all()) {
+                errors.push_back("Start velocity contains NaN or Inf");
+            }
+            if (!ref_bc_.end_velocity.array().isFinite().all()) {
+                errors.push_back("End velocity contains NaN or Inf");
+            }
+            
+            if constexpr (SplineType::ORDER >= 5) {
+                if (!ref_bc_.start_acceleration.array().isFinite().all()) {
+                    errors.push_back("Start acceleration contains NaN or Inf");
+                }
+                if (!ref_bc_.end_acceleration.array().isFinite().all()) {
+                    errors.push_back("End acceleration contains NaN or Inf");
+                }
+            }
+            
+            if constexpr (SplineType::ORDER >= 7) {
+                if (!ref_bc_.start_jerk.array().isFinite().all()) {
+                    errors.push_back("Start jerk contains NaN or Inf");
+                }
+                if (!ref_bc_.end_jerk.array().isFinite().all()) {
+                    errors.push_back("End jerk contains NaN or Inf");
+                }
+            }
+            
+            if (!errors.empty()) {
+                reportError(msg_out, errors);
+                return false;
+            }
+            
+            if (msg_out) {
+                msg_out->clear();
+            }
+            
+            return true;
+        }
 
         int getDimension() const { return calculateDimension(); }
 
@@ -851,6 +979,31 @@ namespace SplineTrajectory
         }
 
     private:
+        /**
+         * @brief Helper to safely format and report error messages.
+         * Aggregates multiple error strings into a single message.
+         * @param out Optional output pointer to store error message
+         * @param errors Vector of individual error messages
+         */
+        void reportError(std::string* out, const std::vector<std::string>& errors) const
+        {
+            if (errors.empty()) return;
+            
+            std::stringstream ss;
+            ss << "[SplineOptimizer Validation Failed] Found " << errors.size() << " error(s):\n";
+            for (size_t i = 0; i < errors.size(); ++i) {
+                ss << "  [" << (i + 1) << "] " << errors[i] << "\n";
+            }
+            
+            std::string msg = ss.str();
+            
+            last_error_message_ = msg;
+            
+            if (out) {
+                *out = msg;
+            }
+        }
+        
         int calculateDimension() const
         {
             int dim = 0;
@@ -932,25 +1085,24 @@ namespace SplineTrajectory
 
                     double c_val = integral_cost(t, t_global, i, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
 
-                    if (std::abs(c_val) > 1e-12)
+                    
+                    cost += c_val * common_weight;
+
+                    for (int r = 0; r < SplineType::COEFF_NUM; ++r)
                     {
-                        cost += c_val * common_weight;
-
-                        for (int r = 0; r < SplineType::COEFF_NUM; ++r)
-                        {
-                            VectorType g = gp * b_p(r) + gv * b_v(r) + ga * b_a(r) + gj * b_j(r) + gs * b_s(r);
-                            gdC.row(base_row + r) += g.transpose() * common_weight;
-                        }
-
-                        gdT(i) += c_val * weight_trap * inv_K;
-
-                        double drift_grad = gp.dot(v) + gv.dot(a) + ga.dot(j) + gj.dot(s) + gs.dot(c); 
-                        gdT(i) += drift_grad * alpha * common_weight;
-
-                        gdT(i) += gt * alpha * common_weight;
-
-                        ws.explicit_time_grad_buffer(i) += gt * common_weight;
+                        VectorType g = gp * b_p(r) + gv * b_v(r) + ga * b_a(r) + gj * b_j(r) + gs * b_s(r);
+                        gdC.row(base_row + r) += g.transpose() * common_weight;
                     }
+
+                    gdT(i) += c_val * weight_trap * inv_K;
+
+                    double drift_grad = gp.dot(v) + gv.dot(a) + ga.dot(j) + gj.dot(s) + gs.dot(c); 
+                    gdT(i) += drift_grad * alpha * common_weight;
+
+                    gdT(i) += gt * alpha * common_weight;
+
+                    ws.explicit_time_grad_buffer(i) += gt * common_weight;
+                    
                 }
 
                 current_segment_start_time += T;
