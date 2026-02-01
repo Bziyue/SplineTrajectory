@@ -156,6 +156,18 @@ namespace SplineTrajectory
                                                     std::declval<int>()))
         >> : std::true_type {};
 
+        template <typename T, typename = void>
+        struct HasExecutorInterface : std::false_type {};
+
+        template <typename T>
+        struct HasExecutorInterface<T, void_t<
+            decltype(std::declval<T>()(
+                std::declval<int>(),       
+                std::declval<int>(),       
+                std::declval<void(*)(int)>()                  
+            ))
+        >> : std::true_type {};
+
         // --- Cost Func Traits ---
         template <typename T, typename = void>
         struct HasTimeCostInterface : std::false_type {};
@@ -202,6 +214,50 @@ namespace SplineTrajectory
             )))
         >> : std::true_type {};
     }
+
+    /**
+     * @brief SerialExecutor
+     * Runs the loop sequentially on the current thread.
+     * Default executor, zero overhead, no dependencies.
+     */
+    struct SerialExecutor
+    {
+        template <typename Func>
+        void operator()(int start, int end, Func &&f) const
+        {
+            for (int i = start; i < end; ++i)
+            {
+                f(i);
+            }
+        }
+    };
+
+    /**
+     * @brief OpenMPExecutor
+     * Runs the loop in parallel using OpenMP.
+     * Requires compilation with -fopenmp. 
+     * If compiled without OpenMP, falls back to serial execution automatically.
+     */
+    struct OpenMPExecutor
+    {
+        template <typename Func>
+        void operator()(int start, int end, Func &&f) const
+        {
+#if defined(_OPENMP)
+            #pragma omp parallel for schedule(static)
+            for (int i = start; i < end; ++i)
+            {
+                f(i);
+            }
+#else
+            // Fallback if OpenMP is not available
+            for (int i = start; i < end; ++i)
+            {
+                f(i);
+            }
+#endif
+        }
+    };
 
     struct IdentityTimeMap
     {
@@ -674,13 +730,16 @@ namespace SplineTrajectory
 
         /**
          * @brief Thread-safe evaluate. Requires user to provide a Workspace.
+         * Supports custom Executor for parallel execution (defaults to SerialExecutor).
          */
-        template <typename TimeCostFunc, typename WaypointsCostFunc, typename IntegralCostFunc>
+        template <typename TimeCostFunc, typename WaypointsCostFunc, typename IntegralCostFunc, 
+                  typename Executor = SerialExecutor>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
                         TimeCostFunc &&time_cost_func,
                         WaypointsCostFunc &&waypoints_cost_func,
                         IntegralCostFunc &&integral_cost_func,
-                        Workspace &ws) const
+                        Workspace &ws,
+                        const Executor& executor = Executor()) const
         {
             using TCF = typename std::decay<TimeCostFunc>::type;
             using WCF = typename std::decay<WaypointsCostFunc>::type;
@@ -696,6 +755,12 @@ namespace SplineTrajectory
 
             static_assert(TypeTraits::HasIntegralCostInterface<SCF, VectorType>::value,
                           "\n[SplineOptimizer Error] 'IntegralCostFunc' signature mismatch.\n");
+
+            static_assert(TypeTraits::HasExecutorInterface<Executor>::value,
+                          "\n[SplineOptimizer Error] 'Executor' signature mismatch.\n"
+                          "The Executor must implement:\n"
+                          "  void operator()(int start, int end, Func&& f) const;\n"
+                          "where 'f' is a callable accepting an 'int' index.\n");
 
             ws.resize(num_segments_);
             grad_out.setZero(x.size());
@@ -747,7 +812,9 @@ namespace SplineTrajectory
             ws.cache_gdT += ws.user_gdT_buffer;
 
             ws.cache_gdC.setZero();
-            calculateIntegralCost(ws, ws.cache_gdC, ws.cache_gdT, total_cost, std::forward<IntegralCostFunc>(integral_cost_func));
+            calculateIntegralCost(ws, ws.cache_gdC, ws.cache_gdT, total_cost, 
+                                  std::forward<IntegralCostFunc>(integral_cost_func),
+                                  executor);
 
             ws.spline.propagateGrad(ws.cache_gdC, ws.cache_gdT, ws.grads);
 
@@ -841,17 +908,18 @@ namespace SplineTrajectory
             return total_cost;
         }
 
-        template <typename TimeCostFunc, typename IntegralCostFunc>
+        template <typename TimeCostFunc, typename IntegralCostFunc, typename Executor = SerialExecutor>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
                         TimeCostFunc &&time_cost_func, 
                         IntegralCostFunc &&integral_cost_func,
-                        Workspace &ws) const
+                        Workspace &ws,
+                        const Executor& executor = Executor()) const
         {
             return evaluate(x, grad_out,
                             std::forward<TimeCostFunc>(time_cost_func),
                             VoidWaypointsCost(), 
                             std::forward<IntegralCostFunc>(integral_cost_func),
-                            ws);
+                            ws, executor);
         }
 
         /**
@@ -1038,31 +1106,39 @@ namespace SplineTrajectory
             return dim;
         }
 
-        template <typename IntegralFunc>
-        void calculateIntegralCost(Workspace &ws, MatrixType &gdC, Eigen::VectorXd &gdT, double &cost, IntegralFunc &&integral_cost) const
+        template <typename IntegralFunc, typename Executor>
+        void calculateIntegralCost(Workspace &ws, MatrixType &gdC, Eigen::VectorXd &gdT, double &cost, 
+                                   IntegralFunc &&integral_cost, const Executor& executor) const
         {
             const auto &coeffs = ws.spline.getTrajectory().getCoefficients();
-            Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s, b_c;
+            
+            std::vector<double> segment_start_times(num_segments_);
+            double running_time = start_time_;
+            for(int i = 0; i < num_segments_; ++i) {
+                segment_start_times[i] = running_time;
+                running_time += ws.cache_times[i];
+            }
+
+            std::vector<double> segment_costs(num_segments_, 0.0);
 
             ws.explicit_time_grad_buffer.setZero();
 
-            double current_segment_start_time = start_time_;
-
             int K = integral_num_steps_;
             double inv_K = 1.0 / K;
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
+            
+            executor(0, num_segments_, [&](int i) {
                 double T = ws.cache_times[i];
-        
                 double dt = T * inv_K;
                 int base_row = i * SplineType::COEFF_NUM;
                 auto block = coeffs.block(base_row, 0, SplineType::COEFF_NUM, DIM);
+                
+                Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s, b_c;
+                double current_segment_start_time = segment_start_times[i];
 
                 for (int k = 0; k <= K; ++k)
                 {
                     double alpha = (double)k * inv_K;
-                    double t = alpha * T; 
+                    double t = alpha * T;
 
                     double weight_trap = (k == 0 || k == K) ? 0.5 : 1.0;
                     double common_weight = weight_trap * dt;
@@ -1082,12 +1158,11 @@ namespace SplineTrajectory
                     VectorType gp = VectorType::Zero(), gv = VectorType::Zero(), ga = VectorType::Zero(),
                                gj = VectorType::Zero(), gs = VectorType::Zero();
 
-                    double gt = 0.0;  
+                    double gt = 0.0;
 
                     double c_val = integral_cost(t, t_global, i, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
 
-                    
-                    cost += c_val * common_weight;
+                    segment_costs[i] += c_val * common_weight;
 
                     for (int r = 0; r < SplineType::COEFF_NUM; ++r)
                     {
@@ -1097,16 +1172,17 @@ namespace SplineTrajectory
 
                     gdT(i) += c_val * weight_trap * inv_K;
 
-                    double drift_grad = gp.dot(v) + gv.dot(a) + ga.dot(j) + gj.dot(s) + gs.dot(c); 
+                    double drift_grad = gp.dot(v) + gv.dot(a) + ga.dot(j) + gj.dot(s) + gs.dot(c);
                     gdT(i) += drift_grad * alpha * common_weight;
 
                     gdT(i) += gt * alpha * common_weight;
 
                     ws.explicit_time_grad_buffer(i) += gt * common_weight;
-                    
                 }
+            });
 
-                current_segment_start_time += T;
+            for(int i = 0; i < num_segments_; ++i) {
+                cost += segment_costs[i];
             }
 
             double accumulator = 0.0;
