@@ -82,6 +82,7 @@ namespace SplineTrajectory
     {
     public:
         using VectorType = Eigen::Matrix<double, DIM, 1>;
+        using RowVectorType = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -151,7 +152,7 @@ namespace SplineTrajectory
                 for (int k = derivative_order; k < order; ++k)
                 {
                     double factor = PPolyND::computeDerivativeFactor(k, derivative_order);
-                    result.noalias() += (factor * t_power) * coeffs.row(base_row + k);
+                    result.noalias() += (factor * t_power) * coeffs.row(base_row + k).transpose();
                     t_power *= t;
                 }
                 return result;
@@ -372,7 +373,7 @@ namespace SplineTrajectory
                 {
                     int orig_k = k + derivative_order;
                     double coeff_factor = computeDerivativeFactor(orig_k, derivative_order);
-                    VectorType orig_coeff = coefficients_.row(seg * num_coeffs_ + orig_k);
+                    RowVectorType orig_coeff = coefficients_.row(seg * num_coeffs_ + orig_k);
                     new_coeffs.row(seg * new_order + k) = coeff_factor * orig_coeff;
                 }
             }
@@ -1699,8 +1700,8 @@ namespace SplineTrajectory
                 add_grad_d(i, grad_v_curr, grad_a_curr);
                 add_grad_d(i + 1, grad_v_next, grad_a_next);
 
-                const RowVectorType P_curr = spatial_points_.row(i);
-                const RowVectorType P_next = spatial_points_.row(i + 1);
+                const RowVectorType &P_curr = spatial_points_.row(i);
+                const RowVectorType &P_next = spatial_points_.row(i + 1);
                 const RowVectorType &V_curr = internal_vel_.row(i);
                 const RowVectorType &V_next = internal_vel_.row(i + 1);
                 const RowVectorType &A_curr = internal_acc_.row(i);
@@ -1815,12 +1816,12 @@ namespace SplineTrajectory
             }
 
             startGrads.p = start_p.transpose();
-            startGrads.v = raw_start_grad.row(0);
-            startGrads.a = raw_start_grad.row(1);
+            startGrads.v = raw_start_grad.row(0).transpose();
+            startGrads.a = raw_start_grad.row(1).transpose();
 
             endGrads.p = end_p.transpose();
-            endGrads.v = raw_end_grad.row(0);
-            endGrads.a = raw_end_grad.row(1);
+            endGrads.v = raw_end_grad.row(0).transpose();
+            endGrads.a = raw_end_grad.row(1).transpose();
         }
         void convertTimePointsToSegments(const std::vector<double> &t_points)
         {
@@ -2858,14 +2859,14 @@ namespace SplineTrajectory
             }
 
             startGrads.p = start_p.transpose();
-            startGrads.v = raw_start_grad.row(0);
-            startGrads.a = raw_start_grad.row(1);
-            startGrads.j = raw_start_grad.row(2);
+            startGrads.v = raw_start_grad.row(0).transpose();
+            startGrads.a = raw_start_grad.row(1).transpose();
+            startGrads.j = raw_start_grad.row(2).transpose();
 
             endGrads.p = end_p.transpose();
-            endGrads.v = raw_end_grad.row(0);
-            endGrads.a = raw_end_grad.row(1);
-            endGrads.j = raw_end_grad.row(2);
+            endGrads.v = raw_end_grad.row(0).transpose();
+            endGrads.a = raw_end_grad.row(1).transpose();
+            endGrads.j = raw_end_grad.row(2).transpose();
         }
         void convertTimePointsToSegments(const std::vector<double> &t_points)
         {
