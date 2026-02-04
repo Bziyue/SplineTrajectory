@@ -1114,8 +1114,16 @@ namespace SplineTrajectory
                 double T = ws.cache_times[i];
                 double dt = T * inv_K;
                 int base_row = i * SplineType::COEFF_NUM;
-                auto block = coeffs.block(base_row, 0, SplineType::COEFF_NUM, DIM);
                 
+                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM> coeff_block = coeffs.block(base_row, 0, SplineType::COEFF_NUM, DIM);
+                
+                double local_acc_cost = 0.0;
+                double local_acc_gdT = 0.0;
+                double local_acc_explicit_time_grad = 0.0;
+
+                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM> local_acc_gdC;
+                local_acc_gdC.setZero();
+
                 Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s, b_c;
                 double current_segment_start_time = segment_start_times[i];
 
@@ -1132,23 +1140,21 @@ namespace SplineTrajectory
                     SplineType::computeBasisFunctions(t, b_p, b_v, b_a, b_j, b_s, b_c);
                     
                     VectorType p, v, a, j, s, c;
-                    p.transpose().noalias() = b_p * block;
-                    v.transpose().noalias() = b_v * block;
-                    a.transpose().noalias() = b_a * block;
-                    j.transpose().noalias() = b_j * block;
-                    s.transpose().noalias() = b_s * block;
-                    c.transpose().noalias() = b_c * block;
+                    p.transpose().noalias() = b_p * coeff_block;
+                    v.transpose().noalias() = b_v * coeff_block;
+                    a.transpose().noalias() = b_a * coeff_block;
+                    j.transpose().noalias() = b_j * coeff_block;
+                    s.transpose().noalias() = b_s * coeff_block;
+                    c.transpose().noalias() = b_c * coeff_block;
 
-                    VectorType gp = VectorType::Zero(), gv = VectorType::Zero(), ga = VectorType::Zero(),
-                               gj = VectorType::Zero(), gs = VectorType::Zero();
-
+                    VectorType gp, gv, ga, gj, gs;
                     double gt = 0.0;
 
                     double c_val = integral_cost(t, t_global, i, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
 
-                    segment_costs[i] += c_val * common_weight;
+                    local_acc_cost += c_val * common_weight;
 
-                    gdC.block(base_row, 0, SplineType::COEFF_NUM, DIM) += (
+                    local_acc_gdC.noalias() += (
                         b_p.transpose() * gp.transpose() + 
                         b_v.transpose() * gv.transpose() + 
                         b_a.transpose() * ga.transpose() + 
@@ -1156,15 +1162,21 @@ namespace SplineTrajectory
                         b_s.transpose() * gs.transpose()
                     ) * common_weight;
 
-                    gdT(i) += c_val * weight_trap * inv_K;
+                    local_acc_gdT += c_val * weight_trap * inv_K;
 
                     double drift_grad = gp.dot(v) + gv.dot(a) + ga.dot(j) + gj.dot(s) + gs.dot(c);
-                    gdT(i) += drift_grad * alpha * common_weight;
+                    local_acc_gdT += drift_grad * alpha * common_weight;
 
-                    gdT(i) += gt * alpha * common_weight;
-
-                    ws.explicit_time_grad_buffer(i) += gt * common_weight;
+                    local_acc_gdT += gt * alpha * common_weight;
+                    local_acc_explicit_time_grad += gt * common_weight;
                 }
+
+                segment_costs[i] = local_acc_cost;
+                
+                gdT(i) += local_acc_gdT;
+                ws.explicit_time_grad_buffer(i) += local_acc_explicit_time_grad;
+                
+                gdC.block(base_row, 0, SplineType::COEFF_NUM, DIM) += local_acc_gdC;
             });
 
             for(int i = 0; i < num_segments_; ++i) {
