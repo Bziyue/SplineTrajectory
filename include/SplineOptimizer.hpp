@@ -1115,13 +1115,15 @@ namespace SplineTrajectory
                 double dt = T * inv_K;
                 int base_row = i * SplineType::COEFF_NUM;
                 
-                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM> coeff_block = coeffs.block(base_row, 0, SplineType::COEFF_NUM, DIM);
+                constexpr int LocalOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor; 
+                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM, LocalOptions> coeff_block = 
+                     coeffs.template block<SplineType::COEFF_NUM, DIM>(base_row, 0); 
                 
                 double local_acc_cost = 0.0;
                 double local_acc_gdT = 0.0;
                 double local_acc_explicit_time_grad = 0.0;
 
-                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM> local_acc_gdC;
+                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM, LocalOptions> local_acc_gdC;
                 local_acc_gdC.setZero();
 
                 Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s, b_c;
@@ -1147,7 +1149,11 @@ namespace SplineTrajectory
                     s.transpose().noalias() = b_s * coeff_block;
                     c.transpose().noalias() = b_c * coeff_block;
 
-                    VectorType gp, gv, ga, gj, gs;
+                    VectorType gp = VectorType::Zero();
+                    VectorType gv = VectorType::Zero();
+                    VectorType ga = VectorType::Zero();
+                    VectorType gj = VectorType::Zero();
+                    VectorType gs = VectorType::Zero();
                     double gt = 0.0;
 
                     double c_val = integral_cost(t, t_global, i, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
