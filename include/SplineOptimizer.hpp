@@ -832,11 +832,11 @@ namespace SplineTrajectory
                 double dw_cost = waypoints_cost_func(ws_ref.cache_waypoints, ws_ref.discrete_grad_q_buffer);
                 total_cost += dw_cost;
 
-                ws_ref.grads.start.p += ws_ref.discrete_grad_q_buffer.row(0);
+                ws_ref.grads.start.p += ws_ref.discrete_grad_q_buffer.row(0).transpose();
                 if (n_inner > 0) {
                     ws_ref.grads.inner_points += ws_ref.discrete_grad_q_buffer.block(1, 0, n_inner, DIM);
                 }
-                ws_ref.grads.end.p += ws_ref.discrete_grad_q_buffer.row(num_segments_);
+                ws_ref.grads.end.p += ws_ref.discrete_grad_q_buffer.row(num_segments_).transpose();
             }
 
             if (rho_energy_ > 0)
@@ -886,7 +886,7 @@ namespace SplineTrajectory
                     } else if (i == num_segments_) {
                         grad_p_phys = ws_ref.grads.end.p;
                     } else {
-                        grad_p_phys = ws_ref.grads.inner_points.row(i - 1);
+                        grad_p_phys = ws_ref.grads.inner_points.row(i - 1).transpose();
                     }
 
                     // Chain Rule: dCost/dxi = dCost/dp * dp/dxi
