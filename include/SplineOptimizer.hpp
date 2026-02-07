@@ -1115,15 +1115,14 @@ namespace SplineTrajectory
                 double dt = T * inv_K;
                 int base_row = i * SplineType::COEFF_NUM;
                 
-                constexpr int LocalOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor; 
-                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM, LocalOptions> coeff_block = 
+                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM> coeff_block = 
                      coeffs.template block<SplineType::COEFF_NUM, DIM>(base_row, 0); 
                 
                 double local_acc_cost = 0.0;
                 double local_acc_gdT = 0.0;
                 double local_acc_explicit_time_grad = 0.0;
 
-                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM, LocalOptions> local_acc_gdC;
+                Eigen::Matrix<double, SplineType::COEFF_NUM, DIM> local_acc_gdC;
                 local_acc_gdC.setZero();
 
                 Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s, b_c;
@@ -1182,7 +1181,7 @@ namespace SplineTrajectory
                 gdT(i) += local_acc_gdT;
                 ws.explicit_time_grad_buffer(i) += local_acc_explicit_time_grad;
                 
-                gdC.block(base_row, 0, SplineType::COEFF_NUM, DIM) += local_acc_gdC;
+                gdC.template block(base_row, 0, SplineType::COEFF_NUM, DIM) += local_acc_gdC;
             });
 
             for(int i = 0; i < num_segments_; ++i) {
