@@ -1613,7 +1613,7 @@ namespace SplineTrajectory
                                    BoundaryStateGrads &endGrads)
         {
             const int n = num_segments_;
-            const int n_pts = static_cast<int>(spatial_points_.size());
+            const int n_pts = static_cast<int>(spatial_points_.rows());
 
             if (n > 1)
             {
@@ -2610,7 +2610,7 @@ namespace SplineTrajectory
                                    BoundaryStateGrads &endGrads)
         {
             const int n = num_segments_;
-            const int n_pts = static_cast<int>(spatial_points_.size());
+            const int n_pts = static_cast<int>(spatial_points_.rows());
 
             if (n > 1)
             {
