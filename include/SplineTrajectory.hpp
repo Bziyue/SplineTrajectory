@@ -1768,32 +1768,76 @@ namespace SplineTrajectory
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    const int seg_idx = i;
-                    const double T = time_segments_[seg_idx];
-
-                    const int coeff_offset = seg_idx * 6;
-                    const RowVectorType c4 = coeffs_.row(coeff_offset + 4);
-                    const RowVectorType c5 = coeffs_.row(coeff_offset + 5);
-
-                    const RowVectorType Snap_at_T = 24.0 * c4 + 120.0 * c5 * T;
-                    const RowVectorType Crackle_at_T = 120.0 * c5;
-
                     const RowVectorType lam_snap = ws_lambda_.row(2 * i);
                     const RowVectorType lam_jerk = ws_lambda_.row(2 * i + 1);
 
-                    gradByTimes(seg_idx) += (lam_snap.dot(Crackle_at_T) + lam_jerk.dot(Snap_at_T));
+                    const int m = i + 1;
+                    const auto &tp_L = time_powers_[m - 1];
+                    const auto &tp_R = time_powers_[m];
 
-                    const int k = i + 2;
-                    const auto &tp_L = time_powers_[k - 2];
-                    const auto &tp_R = time_powers_[k - 1];
+                    const RowVectorType &P_prev = spatial_points_.row(m - 1);
+                    const RowVectorType &P_curr = spatial_points_.row(m);
+                    const RowVectorType &P_next = spatial_points_.row(m + 1);
 
-                    double dr4_dp_next = 360.0 * tp_R.h5_inv;
-                    double dr4_dp_curr = -360.0 * (tp_R.h5_inv + tp_L.h5_inv);
-                    double dr4_dp_prev = 360.0 * tp_L.h5_inv;
+                    const RowVectorType &V_prev = internal_vel_.row(m - 1);
+                    const RowVectorType &V_curr = internal_vel_.row(m);
+                    const RowVectorType &V_next = internal_vel_.row(m + 1);
 
-                    double dr3_dp_next = 60.0 * tp_R.h4_inv;
-                    double dr3_dp_curr = -60.0 * (tp_R.h4_inv + tp_L.h4_inv);
-                    double dr3_dp_prev = 60.0 * tp_L.h4_inv;
+                    const RowVectorType &A_prev = internal_acc_.row(m - 1);
+                    const RowVectorType &A_curr = internal_acc_.row(m);
+                    const RowVectorType &A_next = internal_acc_.row(m + 1);
+
+                    const RowVectorType drhs0_dhL = -1440.0 * (P_prev - P_curr) * tp_L.h5_inv;
+                    const RowVectorType drhs1_dhL = 180.0 * (P_curr - P_prev) * tp_L.h4_inv;
+
+                    const double dD00_dhL = 576.0 * tp_L.h4_inv;
+                    const double dD01_dhL = -72.0 * tp_L.h3_inv;
+                    const double dD10_dhL = 72.0 * tp_L.h3_inv;
+                    const double dD11_dhL = -9.0 * tp_L.h2_inv;
+
+                    const double dL00_dhL = 504.0 * tp_L.h4_inv;
+                    const double dL01_dhL = 48.0 * tp_L.h3_inv;
+                    const double dL10_dhL = 48.0 * tp_L.h3_inv;
+                    const double dL11_dhL = 3.0 * tp_L.h2_inv;
+
+                    RowVectorType rhs0_L = drhs0_dhL -
+                                           (dD00_dhL * V_curr + dD01_dhL * A_curr +
+                                            dL00_dhL * V_prev + dL01_dhL * A_prev);
+                    RowVectorType rhs1_L = drhs1_dhL -
+                                           (dD10_dhL * V_curr + dD11_dhL * A_curr +
+                                            dL10_dhL * V_prev + dL11_dhL * A_prev);
+
+                    gradByTimes(m - 1) += lam_snap.dot(rhs0_L) + lam_jerk.dot(rhs1_L);
+
+                    const RowVectorType drhs0_dhR = -1440.0 * (P_curr - P_next) * tp_R.h5_inv;
+                    const RowVectorType drhs1_dhR = -180.0 * (P_next - P_curr) * tp_R.h4_inv;
+
+                    const double dD00_dhR = 576.0 * tp_R.h4_inv;
+                    const double dD01_dhR = 72.0 * tp_R.h3_inv;
+                    const double dD10_dhR = -72.0 * tp_R.h3_inv;
+                    const double dD11_dhR = -9.0 * tp_R.h2_inv;
+
+                    const double dU00_dhR = 504.0 * tp_R.h4_inv;
+                    const double dU01_dhR = -48.0 * tp_R.h3_inv;
+                    const double dU10_dhR = -48.0 * tp_R.h3_inv;
+                    const double dU11_dhR = 3.0 * tp_R.h2_inv;
+
+                    RowVectorType rhs0_R = drhs0_dhR -
+                                           (dD00_dhR * V_curr + dD01_dhR * A_curr +
+                                            dU00_dhR * V_next + dU01_dhR * A_next);
+                    RowVectorType rhs1_R = drhs1_dhR -
+                                           (dD10_dhR * V_curr + dD11_dhR * A_curr +
+                                            dU10_dhR * V_next + dU11_dhR * A_next);
+
+                    gradByTimes(m) += lam_snap.dot(rhs0_R) + lam_jerk.dot(rhs1_R);
+
+                    double dr4_dp_next = -360.0 * tp_R.h4_inv;
+                    double dr4_dp_curr = 360.0 * (tp_R.h4_inv - tp_L.h4_inv);
+                    double dr4_dp_prev = 360.0 * tp_L.h4_inv;
+
+                    double dr3_dp_next = 60.0 * tp_R.h3_inv;
+                    double dr3_dp_curr = -60.0 * (tp_R.h3_inv + tp_L.h3_inv);
+                    double dr3_dp_prev = 60.0 * tp_L.h3_inv;
 
                     RowVectorType grad_P_next = lam_snap * dr4_dp_next + lam_jerk * dr3_dp_next;
                     RowVectorType grad_P_curr = lam_snap * dr4_dp_curr + lam_jerk * dr3_dp_curr;
