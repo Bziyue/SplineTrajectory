@@ -735,20 +735,19 @@ void testSeptic(int N, int BENCH_ITERS)
 
     t2 = high_resolution_clock::now();
     for(int i=0; i<BENCH_ITERS; ++i) {
-        gdC_spline = septic_spline.getEnergyPartialGradByCoeffs();
-        gdT_spline = septic_spline.getEnergyPartialGradByTimes();
-        auto grads = septic_spline.propagateGrad(gdC_spline, gdT_spline);
-        gradT_spline_out = grads.times;
-        // Reconstruct full point gradients from propagated results
-        gradP_spline_full.resize(N + 1, 3);
-        gradP_spline_full.row(0) = grads.start.p.transpose();
-        if (N > 1) {
-            gradP_spline_full.block(1, 0, N - 1, 3) = grads.inner_points;
-        }
-        gradP_spline_full.row(N) = grads.end.p.transpose();
-        grads_ref = grads;
+        septic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
+        septic_spline.getEnergyPartialGradByTimes(gdT_spline);
+        septic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
     }
     double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
+
+    gradT_spline_out = grads_ref.times;
+    gradP_spline_full.resize(N + 1, 3);
+    gradP_spline_full.row(0) = grads_ref.start.p.transpose();
+    if (N > 1) {
+        gradP_spline_full.block(1, 0, N - 1, 3) = grads_ref.inner_points;
+    }
+    gradP_spline_full.row(N) = grads_ref.end.p.transpose();
 
     printTime("MINCO S4 Grad Prop", t_grad_minco);
     printTime("Spline7 Grad Prop", t_grad_spline);
