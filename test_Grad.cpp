@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <random>
 #include <chrono>
+#include <algorithm>
+#include <numeric>
 #include <Eigen/Dense>
 
 
@@ -14,6 +16,49 @@
 
 using namespace std;
 using namespace std::chrono;
+
+struct BenchmarkStats
+{
+    double mean_us = 0.0;
+    double std_us = 0.0;
+    double min_us = 0.0;
+};
+
+template <typename Func>
+BenchmarkStats runBenchmark(const Func &func, int iters, int repeats = 7, int warmup_iters = 200)
+{
+    for (int i = 0; i < warmup_iters; ++i)
+    {
+        func();
+    }
+
+    vector<double> samples_us;
+    samples_us.reserve(repeats);
+    for (int r = 0; r < repeats; ++r)
+    {
+        const auto t0 = high_resolution_clock::now();
+        for (int i = 0; i < iters; ++i)
+        {
+            func();
+        }
+        const double avg_us =
+            duration_cast<microseconds>(high_resolution_clock::now() - t0).count() / static_cast<double>(iters);
+        samples_us.push_back(avg_us);
+    }
+
+    BenchmarkStats stats;
+    stats.mean_us = accumulate(samples_us.begin(), samples_us.end(), 0.0) / static_cast<double>(samples_us.size());
+    stats.min_us = *min_element(samples_us.begin(), samples_us.end());
+
+    double var = 0.0;
+    for (const double x : samples_us)
+    {
+        const double d = x - stats.mean_us;
+        var += d * d;
+    }
+    stats.std_us = sqrt(var / static_cast<double>(samples_us.size()));
+    return stats;
+}
 
 void printHeader(const string &title)
 {
@@ -40,6 +85,15 @@ void printTime(const string &name, double time_avg_us)
 {
     cout << std::left << std::setw(35) << name << ": " 
          << "\033[33m" << std::fixed << std::setprecision(3) << time_avg_us << " us\033[0m" << endl;
+}
+
+void printTimeStats(const string &name, const BenchmarkStats &stats)
+{
+    cout << std::left << std::setw(35) << name << ": "
+         << "\033[33m" << std::fixed << std::setprecision(3) << stats.mean_us
+         << " us\033[0m"
+         << " (std: " << std::setprecision(3) << stats.std_us
+         << ", min: " << std::setprecision(3) << stats.min_us << ")" << endl;
 }
 
 void generateRandomData(int N,
@@ -168,6 +222,7 @@ void testCubic(int N, int BENCH_ITERS)
     // Setup objects
     minco::MINCO_S2NU minco_s2;
     minco_s2.setConditions(headPV, tailPV, N);
+    const Eigen::Map<const Eigen::VectorXd> times_map(times.data(), N);
     
     SplineTrajectory::BoundaryConditions<3> bc;
     bc.start_velocity = headPV.col(1);
@@ -177,20 +232,15 @@ void testCubic(int N, int BENCH_ITERS)
     // 1. Performance Benchmark: Generation
     printSubHeader("Performance: Trajectory Generation");
     
-    auto t1 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
-        minco_s2.setParameters(inner_points, Eigen::Map<Eigen::VectorXd>(times.data(), N));
-    }
-    double t_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
-
-    auto t2 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
+    const auto gen_minco_stats = runBenchmark([&]() {
+        minco_s2.setParameters(inner_points, times_map);
+    }, BENCH_ITERS);
+    const auto gen_spline_stats = runBenchmark([&]() {
         cubic_spline.update(times, all_points, 0.0, bc);
-    }
-    double t_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
+    }, BENCH_ITERS);
 
-    printTime("MINCO S2 Gen Time", t_minco);
-    printTime("Spline3 Gen Time", t_spline);
+    printTimeStats("MINCO S2 Gen Time", gen_minco_stats);
+    printTimeStats("Spline3 Gen Time", gen_spline_stats);
 
     // 2. Consistency Check: Energy & Coeffs
     printSubHeader("Consistency: MINCO vs Spline");
@@ -209,34 +259,46 @@ void testCubic(int N, int BENCH_ITERS)
     SplineTrajectory::CubicSpline3D::MatrixType gradP_spline_full;
     Eigen::VectorXd gradT_spline_out;
 
-    // MINCO Grad
-    t1 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
+    // Propagation-only benchmark: partial gradients are fixed outside loop.
+    minco_s2.getEnergyPartialGradByCoeffs(gdC_minco);
+    minco_s2.getEnergyPartialGradByTimes(gdT_minco);
+    gdC_spline = cubic_spline.getEnergyPartialGradByCoeffs();
+    gdT_spline = cubic_spline.getEnergyPartialGradByTimes();
+    SplineTrajectory::CubicSpline3D::Gradients grads_ref;
+
+    const auto grad_minco_stats = runBenchmark([&]() {
+        minco_s2.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
+    }, BENCH_ITERS);
+    const auto grad_spline_stats = runBenchmark([&]() {
+        cubic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
+    }, BENCH_ITERS);
+
+    gradT_spline_out = grads_ref.times;
+    gradP_spline_full.resize(N + 1, 3);
+    gradP_spline_full.row(0) = grads_ref.start.p.transpose();
+    if (N > 1) {
+        gradP_spline_full.block(1, 0, N - 1, 3) = grads_ref.inner_points;
+    }
+    gradP_spline_full.row(N) = grads_ref.end.p.transpose();
+
+    printTimeStats("MINCO S2 Grad Prop (only)", grad_minco_stats);
+    printTimeStats("Spline3 Grad Prop (only)", grad_spline_stats);
+
+    printSubHeader("Performance: Optimization Step (Build + Partial Grad + Grad Prop)");
+    const auto step_minco_stats = runBenchmark([&]() {
+        minco_s2.setParameters(inner_points, times_map);
         minco_s2.getEnergyPartialGradByCoeffs(gdC_minco);
         minco_s2.getEnergyPartialGradByTimes(gdT_minco);
         minco_s2.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
-    }
-    double t_grad_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
-
-    // Spline Grad
-    t2 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
+    }, BENCH_ITERS);
+    const auto step_spline_stats = runBenchmark([&]() {
+        cubic_spline.update(times, all_points, 0.0, bc);
         gdC_spline = cubic_spline.getEnergyPartialGradByCoeffs();
         gdT_spline = cubic_spline.getEnergyPartialGradByTimes();
-        auto grads = cubic_spline.propagateGrad(gdC_spline, gdT_spline);
-        gradT_spline_out = grads.times;
-        // Reconstruct full point gradients from propagated results
-        gradP_spline_full.resize(N + 1, 3);
-        gradP_spline_full.row(0) = grads.start.p.transpose();
-        if (N > 1) {
-            gradP_spline_full.block(1, 0, N - 1, 3) = grads.inner_points;
-        }
-        gradP_spline_full.row(N) = grads.end.p.transpose();
-    }
-    double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
-
-    printTime("MINCO S2 Grad Prop", t_grad_minco);
-    printTime("Spline3 Grad Prop", t_grad_spline);
+        cubic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
+    }, BENCH_ITERS);
+    printTimeStats("MINCO S2 Opt Step", step_minco_stats);
+    printTimeStats("Spline3 Opt Step", step_spline_stats);
 
     // 4. Gradient Consistency Check
     printSubHeader("Consistency: Gradients");
@@ -254,8 +316,6 @@ void testCubic(int N, int BENCH_ITERS)
     auto direct_gradT = cubic_spline.getEnergyGradTimes();
     auto direct_gradP_inner = cubic_spline.getEnergyGradInnerPoints();
     auto direct_bc_grads = cubic_spline.getEnergyGradBoundary();
-    // Test reference overload
-    SplineTrajectory::CubicSpline3D::Gradients grads_ref;
     cubic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
     printCheck("Reference overload", 0.0);
 
@@ -408,6 +468,7 @@ void testQuintic(int N, int BENCH_ITERS)
     // Setup objects
     minco::MINCO_S3NU minco_s3;
     minco_s3.setConditions(headPVA, tailPVA, N);
+    const Eigen::Map<const Eigen::VectorXd> times_map(times.data(), N);
 
     min_jerk::JerkOpt jerk_opt;
     jerk_opt.reset(headPVA, tailPVA, N);
@@ -420,27 +481,19 @@ void testQuintic(int N, int BENCH_ITERS)
     // 1. Performance Benchmark: Generation
     printSubHeader("Performance: Trajectory Generation");
     
-    auto t1 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
-        minco_s3.setParameters(inner_points, Eigen::Map<Eigen::VectorXd>(times.data(), N));
-    }
-    double t_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
-
-    auto t2 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
+    const auto gen_minco_stats = runBenchmark([&]() {
+        minco_s3.setParameters(inner_points, times_map);
+    }, BENCH_ITERS);
+    const auto gen_spline_stats = runBenchmark([&]() {
         quintic_spline.update(times, all_points, 0.0, bc);
-    }
-    double t_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
+    }, BENCH_ITERS);
+    const auto gen_ref_stats = runBenchmark([&]() {
+        jerk_opt.generate(inner_points, times_map);
+    }, BENCH_ITERS);
 
-    auto t3 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
-        jerk_opt.generate(inner_points, Eigen::Map<Eigen::VectorXd>(times.data(), N));
-    }
-    double t_ref = duration_cast<microseconds>(high_resolution_clock::now() - t3).count() / (double)BENCH_ITERS;
-
-    printTime("MINCO S3 Gen Time", t_minco);
-    printTime("Ref(Jerk) Gen Time", t_ref);
-    printTime("Spline5 Gen Time", t_spline);
+    printTimeStats("MINCO S3 Gen Time", gen_minco_stats);
+    printTimeStats("Ref(Jerk) Gen Time", gen_ref_stats);
+    printTimeStats("Spline5 Gen Time", gen_spline_stats);
 
     // 2. Consistency Check: Energy & Coeffs (vs MINCO)
     printSubHeader("Consistency: MINCO vs Spline");
@@ -461,33 +514,44 @@ void testQuintic(int N, int BENCH_ITERS)
 
     SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
 
-    t1 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
+    minco_s3.getEnergyPartialGradByCoeffs(gdC_minco);
+    minco_s3.getEnergyPartialGradByTimes(gdT_minco);
+    gdC_spline = quintic_spline.getEnergyPartialGradByCoeffs();
+    gdT_spline = quintic_spline.getEnergyPartialGradByTimes();
+
+    const auto grad_minco_stats = runBenchmark([&]() {
+        minco_s3.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
+    }, BENCH_ITERS);
+    const auto grad_spline_stats = runBenchmark([&]() {
+        quintic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
+    }, BENCH_ITERS);
+
+    gradT_spline_out = grads_ref.times;
+    gradP_spline_full.resize(N + 1, 3);
+    gradP_spline_full.row(0) = grads_ref.start.p.transpose();
+    if (N > 1) {
+        gradP_spline_full.block(1, 0, N - 1, 3) = grads_ref.inner_points;
+    }
+    gradP_spline_full.row(N) = grads_ref.end.p.transpose();
+
+    printTimeStats("MINCO S3 Grad Prop (only)", grad_minco_stats);
+    printTimeStats("Spline5 Grad Prop (only)", grad_spline_stats);
+
+    printSubHeader("Performance: Optimization Step (Build + Partial Grad + Grad Prop)");
+    const auto step_minco_stats = runBenchmark([&]() {
+        minco_s3.setParameters(inner_points, times_map);
         minco_s3.getEnergyPartialGradByCoeffs(gdC_minco);
         minco_s3.getEnergyPartialGradByTimes(gdT_minco);
         minco_s3.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
-    }
-    double t_grad_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
-
-    t2 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
+    }, BENCH_ITERS);
+    const auto step_spline_stats = runBenchmark([&]() {
+        quintic_spline.update(times, all_points, 0.0, bc);
         gdC_spline = quintic_spline.getEnergyPartialGradByCoeffs();
         gdT_spline = quintic_spline.getEnergyPartialGradByTimes();
-        auto grads = quintic_spline.propagateGrad(gdC_spline, gdT_spline);
-        gradT_spline_out = grads.times;
-        // Reconstruct full point gradients from propagated results
-        gradP_spline_full.resize(N + 1, 3);
-        gradP_spline_full.row(0) = grads.start.p.transpose();
-        if (N > 1) {
-            gradP_spline_full.block(1, 0, N - 1, 3) = grads.inner_points;
-        }
-        gradP_spline_full.row(N) = grads.end.p.transpose();
-        grads_ref = grads;
-    }
-    double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
-
-    printTime("MINCO S3 Grad Prop", t_grad_minco);
-    printTime("Spline5 Grad Prop", t_grad_spline);
+        quintic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
+    }, BENCH_ITERS);
+    printTimeStats("MINCO S3 Opt Step", step_minco_stats);
+    printTimeStats("Spline5 Opt Step", step_spline_stats);
 
     // 4. Gradient Consistency Check (vs MINCO)
     printSubHeader("Consistency: Gradients vs MINCO");
@@ -672,6 +736,7 @@ void testSeptic(int N, int BENCH_ITERS)
     // Setup objects
     minco::MINCO_S4NU minco_s4;
     minco_s4.setConditions(headPVAJ, tailPVAJ, N);
+    const Eigen::Map<const Eigen::VectorXd> times_map(times.data(), N);
 
     min_snap::SnapOpt snap_opt;
     snap_opt.reset(headPVAJ, tailPVAJ, N);
@@ -684,27 +749,19 @@ void testSeptic(int N, int BENCH_ITERS)
     // 1. Performance Benchmark: Generation
     printSubHeader("Performance: Trajectory Generation");
     
-    auto t1 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
-        minco_s4.setParameters(inner_points, Eigen::Map<Eigen::VectorXd>(times.data(), N));
-    }
-    double t_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
-
-    auto t2 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
+    const auto gen_minco_stats = runBenchmark([&]() {
+        minco_s4.setParameters(inner_points, times_map);
+    }, BENCH_ITERS);
+    const auto gen_spline_stats = runBenchmark([&]() {
         septic_spline.update(times, all_points, 0.0, bc);
-    }
-    double t_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
+    }, BENCH_ITERS);
+    const auto gen_ref_stats = runBenchmark([&]() {
+        snap_opt.generate(inner_points, times_map);
+    }, BENCH_ITERS);
 
-    auto t3 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
-        snap_opt.generate(inner_points, Eigen::Map<Eigen::VectorXd>(times.data(), N));
-    }
-    double t_ref = duration_cast<microseconds>(high_resolution_clock::now() - t3).count() / (double)BENCH_ITERS;
-
-    printTime("MINCO S4 Gen Time", t_minco);
-    printTime("Ref(Snap) Gen Time", t_ref);
-    printTime("Spline7 Gen Time", t_spline);
+    printTimeStats("MINCO S4 Gen Time", gen_minco_stats);
+    printTimeStats("Ref(Snap) Gen Time", gen_ref_stats);
+    printTimeStats("Spline7 Gen Time", gen_spline_stats);
 
     // 2. Consistency Check: Energy & Coeffs (vs MINCO)
     printSubHeader("Consistency: MINCO vs Spline");
@@ -725,21 +782,17 @@ void testSeptic(int N, int BENCH_ITERS)
 
     SplineTrajectory::SepticSpline3D::Gradients grads_ref;
 
-    t1 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
-        minco_s4.getEnergyPartialGradByCoeffs(gdC_minco);
-        minco_s4.getEnergyPartialGradByTimes(gdT_minco);
-        minco_s4.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
-    }
-    double t_grad_minco = duration_cast<microseconds>(high_resolution_clock::now() - t1).count() / (double)BENCH_ITERS;
+    minco_s4.getEnergyPartialGradByCoeffs(gdC_minco);
+    minco_s4.getEnergyPartialGradByTimes(gdT_minco);
+    septic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
+    septic_spline.getEnergyPartialGradByTimes(gdT_spline);
 
-    t2 = high_resolution_clock::now();
-    for(int i=0; i<BENCH_ITERS; ++i) {
-        septic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
-        septic_spline.getEnergyPartialGradByTimes(gdT_spline);
+    const auto grad_minco_stats = runBenchmark([&]() {
+        minco_s4.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
+    }, BENCH_ITERS);
+    const auto grad_spline_stats = runBenchmark([&]() {
         septic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
-    }
-    double t_grad_spline = duration_cast<microseconds>(high_resolution_clock::now() - t2).count() / (double)BENCH_ITERS;
+    }, BENCH_ITERS);
 
     gradT_spline_out = grads_ref.times;
     gradP_spline_full.resize(N + 1, 3);
@@ -749,8 +802,24 @@ void testSeptic(int N, int BENCH_ITERS)
     }
     gradP_spline_full.row(N) = grads_ref.end.p.transpose();
 
-    printTime("MINCO S4 Grad Prop", t_grad_minco);
-    printTime("Spline7 Grad Prop", t_grad_spline);
+    printTimeStats("MINCO S4 Grad Prop (only)", grad_minco_stats);
+    printTimeStats("Spline7 Grad Prop (only)", grad_spline_stats);
+
+    printSubHeader("Performance: Optimization Step (Build + Partial Grad + Grad Prop)");
+    const auto step_minco_stats = runBenchmark([&]() {
+        minco_s4.setParameters(inner_points, times_map);
+        minco_s4.getEnergyPartialGradByCoeffs(gdC_minco);
+        minco_s4.getEnergyPartialGradByTimes(gdT_minco);
+        minco_s4.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
+    }, BENCH_ITERS);
+    const auto step_spline_stats = runBenchmark([&]() {
+        septic_spline.update(times, all_points, 0.0, bc);
+        septic_spline.getEnergyPartialGradByCoeffs(gdC_spline);
+        septic_spline.getEnergyPartialGradByTimes(gdT_spline);
+        septic_spline.propagateGrad(gdC_spline, gdT_spline, grads_ref);
+    }, BENCH_ITERS);
+    printTimeStats("MINCO S4 Opt Step", step_minco_stats);
+    printTimeStats("Spline7 Opt Step", step_spline_stats);
 
     // 4. Gradient Consistency Check (vs MINCO)
     printSubHeader("Consistency: Gradients vs MINCO");
