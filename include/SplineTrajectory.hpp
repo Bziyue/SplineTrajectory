@@ -2867,13 +2867,9 @@ namespace SplineTrajectory
                     const RowVectorType &J_curr = internal_jerk_.row(m);
                     const RowVectorType &J_next = internal_jerk_.row(m + 1);
 
-                    const auto lam_3 = ws_lambda_.row(3 * i);
-                    const auto lam_4 = ws_lambda_.row(3 * i + 1);
-                    const auto lam_5 = ws_lambda_.row(3 * i + 2);
-
-                    const RowVectorType drhs0_dhL = -3360.0 * (P_curr - P_prev) * tp_L.h5_inv;
-                    const RowVectorType drhs1_dhL = -50400.0 * (P_curr - P_prev) * tp_L.h6_inv;
-                    const RowVectorType drhs2_dhL = -302400.0 * (P_curr - P_prev) * tp_L.h7_inv;
+                    const RowVectorType lam_3 = ws_lambda_.row(3 * i);
+                    const RowVectorType lam_4 = ws_lambda_.row(3 * i + 1);
+                    const RowVectorType lam_5 = ws_lambda_.row(3 * i + 2);
 
                     const double dD00_dhL = -1440.0 * tp_L.h4_inv;
                     const double dD01_dhL = 240.0 * tp_L.h3_inv;
@@ -2895,19 +2891,6 @@ namespace SplineTrajectory
                     const double dL21_dhL = -18720.0 * tp_L.h5_inv;
                     const double dL22_dhL = -1080.0 * tp_L.h4_inv;
 
-                    RowVectorType rhs0_L = drhs0_dhL - (dD00_dhL * V_curr + dD01_dhL * A_curr + dD02_dhL * J_curr +
-                                                        dL00_dhL * V_prev + dL01_dhL * A_prev + dL02_dhL * J_prev);
-                    RowVectorType rhs1_L = drhs1_dhL - (dD10_dhL * V_curr + dD11_dhL * A_curr + dD12_dhL * J_curr +
-                                                        dL10_dhL * V_prev + dL11_dhL * A_prev + dL12_dhL * J_prev);
-                    RowVectorType rhs2_L = drhs2_dhL - (dD20_dhL * V_curr + dD21_dhL * A_curr + dD22_dhL * J_curr +
-                                                        dL20_dhL * V_prev + dL21_dhL * A_prev + dL22_dhL * J_prev);
-
-                    gradByTimes(m - 1) += lam_3.dot(rhs0_L) + lam_4.dot(rhs1_L) + lam_5.dot(rhs2_L);
-
-                    const RowVectorType drhs0_dhR = -3360.0 * (P_next - P_curr) * tp_R.h5_inv;
-                    const RowVectorType drhs1_dhR = -50400.0 * (P_curr - P_next) * tp_R.h6_inv;
-                    const RowVectorType drhs2_dhR = -302400.0 * (P_next - P_curr) * tp_R.h7_inv;
-
                     const double dD00_dhR = -1440.0 * tp_R.h4_inv;
                     const double dD01_dhR = -240.0 * tp_R.h3_inv;
                     const double dD02_dhR = -16.0 * tp_R.h2_inv;
@@ -2927,15 +2910,49 @@ namespace SplineTrajectory
                     const double dU20_dhR = -122400.0 * tp_R.h6_inv;
                     const double dU21_dhR = 18720.0 * tp_R.h5_inv;
                     const double dU22_dhR = -1080.0 * tp_R.h4_inv;
+                    double grad_hL = 0.0;
+                    double grad_hR = 0.0;
+                    for (int j = 0; j < DIM; ++j)
+                    {
+                        const double p_prev = P_prev(j);
+                        const double p_curr = P_curr(j);
+                        const double p_next = P_next(j);
+                        const double v_prev = V_prev(j);
+                        const double v_curr = V_curr(j);
+                        const double v_next = V_next(j);
+                        const double a_prev = A_prev(j);
+                        const double a_curr = A_curr(j);
+                        const double a_next = A_next(j);
+                        const double j_prev = J_prev(j);
+                        const double j_curr = J_curr(j);
+                        const double j_next = J_next(j);
 
-                    RowVectorType rhs0_R = drhs0_dhR - (dD00_dhR * V_curr + dD01_dhR * A_curr + dD02_dhR * J_curr +
-                                                        dU00_dhR * V_next + dU01_dhR * A_next + dU02_dhR * J_next);
-                    RowVectorType rhs1_R = drhs1_dhR - (dD10_dhR * V_curr + dD11_dhR * A_curr + dD12_dhR * J_curr +
-                                                        dU10_dhR * V_next + dU11_dhR * A_next + dU12_dhR * J_next);
-                    RowVectorType rhs2_R = drhs2_dhR - (dD20_dhR * V_curr + dD21_dhR * A_curr + dD22_dhR * J_curr +
-                                                        dU20_dhR * V_next + dU21_dhR * A_next + dU22_dhR * J_next);
+                        const double rhs0_L = -3360.0 * (p_curr - p_prev) * tp_L.h5_inv -
+                                              (dD00_dhL * v_curr + dD01_dhL * a_curr + dD02_dhL * j_curr +
+                                               dL00_dhL * v_prev + dL01_dhL * a_prev + dL02_dhL * j_prev);
+                        const double rhs1_L = -50400.0 * (p_curr - p_prev) * tp_L.h6_inv -
+                                              (dD10_dhL * v_curr + dD11_dhL * a_curr + dD12_dhL * j_curr +
+                                               dL10_dhL * v_prev + dL11_dhL * a_prev + dL12_dhL * j_prev);
+                        const double rhs2_L = -302400.0 * (p_curr - p_prev) * tp_L.h7_inv -
+                                              (dD20_dhL * v_curr + dD21_dhL * a_curr + dD22_dhL * j_curr +
+                                               dL20_dhL * v_prev + dL21_dhL * a_prev + dL22_dhL * j_prev);
 
-                    gradByTimes(m) += lam_3.dot(rhs0_R) + lam_4.dot(rhs1_R) + lam_5.dot(rhs2_R);
+                        const double rhs0_R = -3360.0 * (p_next - p_curr) * tp_R.h5_inv -
+                                              (dD00_dhR * v_curr + dD01_dhR * a_curr + dD02_dhR * j_curr +
+                                               dU00_dhR * v_next + dU01_dhR * a_next + dU02_dhR * j_next);
+                        const double rhs1_R = -50400.0 * (p_curr - p_next) * tp_R.h6_inv -
+                                              (dD10_dhR * v_curr + dD11_dhR * a_curr + dD12_dhR * j_curr +
+                                               dU10_dhR * v_next + dU11_dhR * a_next + dU12_dhR * j_next);
+                        const double rhs2_R = -302400.0 * (p_next - p_curr) * tp_R.h7_inv -
+                                              (dD20_dhR * v_curr + dD21_dhR * a_curr + dD22_dhR * j_curr +
+                                               dU20_dhR * v_next + dU21_dhR * a_next + dU22_dhR * j_next);
+
+                        grad_hL += lam_3(j) * rhs0_L + lam_4(j) * rhs1_L + lam_5(j) * rhs2_L;
+                        grad_hR += lam_3(j) * rhs0_R + lam_4(j) * rhs1_R + lam_5(j) * rhs2_R;
+                    }
+
+                    gradByTimes(m - 1) += grad_hL;
+                    gradByTimes(m) += grad_hR;
 
                     double dr3_dp_next = 840.0 * tp_R.h4_inv;
                     double dr4_dp_next = -10080.0 * tp_R.h5_inv;
