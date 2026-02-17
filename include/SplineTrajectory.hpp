@@ -2231,6 +2231,7 @@ namespace SplineTrajectory
         MatrixType ws_rhs_mod_;
         MatrixType ws_solution_;
         MatrixType ws_lambda_;
+        MatrixType ws_point_grad_;
         Eigen::Matrix<double, Eigen::Dynamic, 3 * DIM, Eigen::RowMajor> ws_gd_internal_;
 
         MatrixType internal_vel_;
@@ -2671,37 +2672,12 @@ namespace SplineTrajectory
             const int n = num_segments_;
             const int n_pts = static_cast<int>(spatial_points_.rows());
 
-            if (n > 1)
-            {
-                innerPointsGrad = MatrixType::Zero(n_pts - 2, DIM);
-            }
-            else
-            {
-                innerPointsGrad.resize(0, DIM);
-            }
-
             gradByTimes = partialGradByTimes;
             startGrads = BoundaryStateGrads();
             endGrads = BoundaryStateGrads();
 
-            RowVectorType start_p = RowVectorType::Zero();
-            RowVectorType end_p = RowVectorType::Zero();
-
-            auto add_point_grad = [&](int idx, const RowVectorType &delta)
-            {
-                if (idx == 0)
-                {
-                    start_p += delta;
-                }
-                else if (idx == n)
-                {
-                    end_p += delta;
-                }
-                else if (idx > 0 && idx < n && innerPointsGrad.rows() > 0)
-                {
-                    innerPointsGrad.row(idx - 1) += delta;
-                }
-            };
+            ws_point_grad_.resize(n_pts, DIM);
+            ws_point_grad_.setZero();
 
             ws_gd_internal_.resize(n_pts, 3 * DIM);
             ws_gd_internal_.setZero();
@@ -2727,7 +2703,7 @@ namespace SplineTrajectory
                 const RowVectorType &gc6 = partialGradByCoeffs.row(coeff_idx + 6);
                 const RowVectorType &gc7 = partialGradByCoeffs.row(coeff_idx + 7);
 
-                add_point_grad(i, gc0);
+                ws_point_grad_.row(i) += gc0;
 
                 double k_P4 = -(210.0 * tp.h4_inv) / 6.0;
                 double k_P5 = (168.0 * tp.h5_inv) / 2.0;
@@ -2735,8 +2711,8 @@ namespace SplineTrajectory
                 double k_P7 = (120.0 * tp.h7_inv) / 6.0;
 
                 RowVectorType sum_grad_P = gc4 * k_P4 + gc5 * k_P5 + gc6 * k_P6 + gc7 * k_P7;
-                add_point_grad(i, sum_grad_P);
-                add_point_grad(i + 1, -sum_grad_P);
+                ws_point_grad_.row(i) += sum_grad_P;
+                ws_point_grad_.row(i + 1) -= sum_grad_P;
 
                 add_grad_d(i, gc1, 0.5 * gc2, (1.0 / 6.0) * gc3);
 
@@ -2783,34 +2759,46 @@ namespace SplineTrajectory
                     const RowVectorType &J_curr = internal_jerk_.row(i);
                     const RowVectorType &J_next = internal_jerk_.row(i + 1);
 
-                    RowVectorType dP = P_curr - P_next;
+                    double h8_inv = tp.h7_inv * tp.h_inv;
+                    double dot_dc4 = 0.0;
+                    double dot_dc5 = 0.0;
+                    double dot_dc6 = 0.0;
+                    double dot_dc7 = 0.0;
 
-                    RowVectorType dc4_dh = ((840.0 * dP * tp.h5_inv) +
-                                            (360.0 * V_curr * tp.h4_inv) + (270.0 * V_next * tp.h4_inv) +
-                                            (60.0 * A_curr * tp.h3_inv) - (30.0 * A_next * tp.h3_inv) +
-                                            (4.0 * J_curr * tp.h2_inv) + (J_next * tp.h2_inv)) /
+                    for (int j = 0; j < DIM; ++j)
+                    {
+                        const double dPj = P_curr(j) - P_next(j);
+                        const double dc4 = ((840.0 * dPj * tp.h5_inv) +
+                                            (360.0 * V_curr(j) * tp.h4_inv) + (270.0 * V_next(j) * tp.h4_inv) +
+                                            (60.0 * A_curr(j) * tp.h3_inv) - (30.0 * A_next(j) * tp.h3_inv) +
+                                            (4.0 * J_curr(j) * tp.h2_inv) + (J_next(j) * tp.h2_inv)) /
                                            6.0;
 
-                    RowVectorType dc5_dh = ((-840.0 * dP * tp.h6_inv) -
-                                            (360.0 * V_curr * tp.h5_inv) - (312.0 * V_next * tp.h5_inv) -
-                                            (60.0 * A_curr * tp.h4_inv) + (42.0 * A_next * tp.h4_inv) -
-                                            (4.0 * J_curr * tp.h3_inv) - (2.0 * J_next * tp.h3_inv)) /
+                        const double dc5 = ((-840.0 * dPj * tp.h6_inv) -
+                                            (360.0 * V_curr(j) * tp.h5_inv) - (312.0 * V_next(j) * tp.h5_inv) -
+                                            (60.0 * A_curr(j) * tp.h4_inv) + (42.0 * A_next(j) * tp.h4_inv) -
+                                            (4.0 * J_curr(j) * tp.h3_inv) - (2.0 * J_next(j) * tp.h3_inv)) /
                                            2.0;
 
-                    RowVectorType dc6_dh = ((2520.0 * dP * tp.h7_inv) +
-                                            (1080.0 * V_curr * tp.h6_inv) + (1020.0 * V_next * tp.h6_inv) +
-                                            (180.0 * A_curr * tp.h5_inv) - (156.0 * A_next * tp.h5_inv) +
-                                            (12.0 * J_curr * tp.h4_inv) + (9.0 * J_next * tp.h4_inv)) /
+                        const double dc6 = ((2520.0 * dPj * tp.h7_inv) +
+                                            (1080.0 * V_curr(j) * tp.h6_inv) + (1020.0 * V_next(j) * tp.h6_inv) +
+                                            (180.0 * A_curr(j) * tp.h5_inv) - (156.0 * A_next(j) * tp.h5_inv) +
+                                            (12.0 * J_curr(j) * tp.h4_inv) + (9.0 * J_next(j) * tp.h4_inv)) /
                                            6.0;
 
-                    double h8_inv = tp.h7_inv * tp.h_inv;
-                    RowVectorType dc7_dh = ((-840.0 * dP * h8_inv) -
-                                            (360.0 * V_curr * tp.h7_inv) - (360.0 * V_next * tp.h7_inv) -
-                                            (60.0 * A_curr * tp.h6_inv) + (60.0 * A_next * tp.h6_inv) -
-                                            (4.0 * J_curr * tp.h5_inv) - (4.0 * J_next * tp.h5_inv)) /
+                        const double dc7 = ((-840.0 * dPj * h8_inv) -
+                                            (360.0 * V_curr(j) * tp.h7_inv) - (360.0 * V_next(j) * tp.h7_inv) -
+                                            (60.0 * A_curr(j) * tp.h6_inv) + (60.0 * A_next(j) * tp.h6_inv) -
+                                            (4.0 * J_curr(j) * tp.h5_inv) - (4.0 * J_next(j) * tp.h5_inv)) /
                                            6.0;
 
-                    gradByTimes(i) += gc4.dot(dc4_dh) + gc5.dot(dc5_dh) + gc6.dot(dc6_dh) + gc7.dot(dc7_dh);
+                        dot_dc4 += gc4(j) * dc4;
+                        dot_dc5 += gc5(j) * dc5;
+                        dot_dc6 += gc6(j) * dc6;
+                        dot_dc7 += gc7(j) * dc7;
+                    }
+
+                    gradByTimes(i) += dot_dc4 + dot_dc5 + dot_dc6 + dot_dc7;
                 }
             }
 
@@ -2953,19 +2941,19 @@ namespace SplineTrajectory
                     double dr4_dp_next = -10080.0 * tp_R.h5_inv;
                     double dr5_dp_next = 50400.0 * tp_R.h6_inv;
                     RowVectorType grad_P_next = lam_3 * dr3_dp_next + lam_4 * dr4_dp_next + lam_5 * dr5_dp_next;
-                    add_point_grad(i + 2, grad_P_next);
+                    ws_point_grad_.row(i + 2) += grad_P_next;
 
                     double dr3_dp_curr = -840.0 * (tp_R.h4_inv - tp_L.h4_inv);
                     double dr4_dp_curr = 10080.0 * (tp_R.h5_inv + tp_L.h5_inv);
                     double dr5_dp_curr = -50400.0 * (tp_R.h6_inv - tp_L.h6_inv);
                     RowVectorType grad_P_curr = lam_3 * dr3_dp_curr + lam_4 * dr4_dp_curr + lam_5 * dr5_dp_curr;
-                    add_point_grad(i + 1, grad_P_curr);
+                    ws_point_grad_.row(i + 1) += grad_P_curr;
 
                     double dr3_dp_prev = -840.0 * tp_L.h4_inv;
                     double dr4_dp_prev = -10080.0 * tp_L.h5_inv;
                     double dr5_dp_prev = -50400.0 * tp_L.h6_inv;
                     RowVectorType grad_P_prev = lam_3 * dr3_dp_prev + lam_4 * dr4_dp_prev + lam_5 * dr5_dp_prev;
-                    add_point_grad(i, grad_P_prev);
+                    ws_point_grad_.row(i) += grad_P_prev;
                 }
 
                 Eigen::Matrix<double, 3, DIM> correction_start;
@@ -2981,12 +2969,22 @@ namespace SplineTrajectory
                 raw_end_grad -= correction_end;
             }
 
-            startGrads.p = start_p.transpose();
+            if (n > 1)
+            {
+                innerPointsGrad.resize(n_pts - 2, DIM);
+                innerPointsGrad = ws_point_grad_.middleRows(1, n_pts - 2);
+            }
+            else
+            {
+                innerPointsGrad.resize(0, DIM);
+            }
+
+            startGrads.p = ws_point_grad_.row(0).transpose();
             startGrads.v = raw_start_grad.row(0).transpose();
             startGrads.a = raw_start_grad.row(1).transpose();
             startGrads.j = raw_start_grad.row(2).transpose();
 
-            endGrads.p = end_p.transpose();
+            endGrads.p = ws_point_grad_.row(n).transpose();
             endGrads.v = raw_end_grad.row(0).transpose();
             endGrads.a = raw_end_grad.row(1).transpose();
             endGrads.j = raw_end_grad.row(2).transpose();
