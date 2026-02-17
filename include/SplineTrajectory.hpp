@@ -530,6 +530,7 @@ namespace SplineTrajectory
         Eigen::VectorXd cached_c_prime_;
         Eigen::VectorXd cached_inv_denoms_;
         MatrixType ws_lambda_;
+        MatrixType ws_point_grad_;
 
         struct TimePowers
         {
@@ -674,9 +675,8 @@ namespace SplineTrajectory
          *         Each row corresponds to one coefficient dimension.
          * @note This computes only the direct partial derivative, not the full gradient.
          */
-        MatrixType getEnergyPartialGradByCoeffs() const
+        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
         {
-            MatrixType gdC;
             gdC.resize(num_segments_ * 4, DIM);
             gdC.setZero();
 
@@ -693,6 +693,12 @@ namespace SplineTrajectory
 
                 gdC.row(i * 4 + 3) = 12.0 * c2 * T2 + 24.0 * c3 * T3;
             }
+        }
+
+        MatrixType getEnergyPartialGradByCoeffs() const
+        {
+            MatrixType gdC;
+            getEnergyPartialGradByCoeffs(gdC);
             return gdC;
         }
 
@@ -703,9 +709,8 @@ namespace SplineTrajectory
          *         Element i is the direct partial derivative w.r.t. T[i].
          * @note This computes only the explicit time dependency, not the full gradient.
          */
-        Eigen::VectorXd getEnergyPartialGradByTimes() const
+        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
         {
-            Eigen::VectorXd gdT;
             gdT.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
@@ -719,6 +724,12 @@ namespace SplineTrajectory
 
                 gdT(i) = acc_end.squaredNorm();
             }
+        }
+
+        Eigen::VectorXd getEnergyPartialGradByTimes() const
+        {
+            Eigen::VectorXd gdT;
+            getEnergyPartialGradByTimes(gdT);
             return gdT;
         }
 
@@ -874,60 +885,32 @@ namespace SplineTrajectory
                                    BoundaryStateGrads &endGrads)
         {
             const int n = num_segments_;
-            const int dim = DIM;
-
             const MatrixType &M = internal_derivatives_;
-
-            if (n > 1)
-            {
-                innerPointsGrad = MatrixType::Zero(n - 1, dim);
-            }
-            else
-            {
-                innerPointsGrad.resize(0, dim);
-            }
 
             gradByTimes = partialGradByTimes;
             startGrads = BoundaryStateGrads();
             endGrads = BoundaryStateGrads();
 
-            RowVectorType start_p = RowVectorType::Zero();
-            RowVectorType end_p = RowVectorType::Zero();
+            ws_point_grad_.resize(n + 1, DIM);
+            ws_point_grad_.setZero();
 
-            auto add_point_grad = [&](int idx, const RowVectorType &delta)
-            {
-                if (idx == 0)
-                {
-                    start_p += delta;
-                }
-                else if (idx == n)
-                {
-                    end_p += delta;
-                }
-                else if (idx > 0 && idx < n && innerPointsGrad.rows() > 0)
-                {
-                    innerPointsGrad.row(idx - 1) += delta;
-                }
-            };
-
-            ws_lambda_.resize(n + 1, dim);
+            ws_lambda_.resize(n + 1, DIM);
             ws_lambda_.setZero();
 
             for (int i = 0; i < n; ++i)
             {
                 const auto &tp = time_powers_[i];
-                double h_i = tp.h;
-                double h_inv = tp.h_inv;
-                double h2_inv = tp.h2_inv;
+                const double h_i = tp.h;
+                const double h_inv = tp.h_inv;
+                const double h2_inv = tp.h2_inv;
 
-                Eigen::Matrix<double, 1, dim> g_c0 = partialGradByCoeffs.row(i * 4 + 0);
-                Eigen::Matrix<double, 1, dim> g_c1 = partialGradByCoeffs.row(i * 4 + 1);
-                Eigen::Matrix<double, 1, dim> g_c2 = partialGradByCoeffs.row(i * 4 + 2);
-                Eigen::Matrix<double, 1, dim> g_c3 = partialGradByCoeffs.row(i * 4 + 3);
+                const RowVectorType g_c0 = partialGradByCoeffs.row(i * 4 + 0);
+                const RowVectorType g_c1 = partialGradByCoeffs.row(i * 4 + 1);
+                const RowVectorType g_c2 = partialGradByCoeffs.row(i * 4 + 2);
+                const RowVectorType g_c3 = partialGradByCoeffs.row(i * 4 + 3);
 
-                add_point_grad(i, g_c0);
-                add_point_grad(i, -g_c1 * h_inv);
-                add_point_grad(i + 1, g_c1 * h_inv);
+                ws_point_grad_.row(i) += g_c0 - g_c1 * h_inv;
+                ws_point_grad_.row(i + 1) += g_c1 * h_inv;
 
                 ws_lambda_.row(i) -= g_c1 * (h_i / 3.0);
                 ws_lambda_.row(i + 1) -= g_c1 * (h_i / 6.0);
@@ -935,8 +918,7 @@ namespace SplineTrajectory
                 ws_lambda_.row(i) -= g_c3 * (h_inv / 6.0);
                 ws_lambda_.row(i + 1) += g_c3 * (h_inv / 6.0);
 
-                VectorType dP = spatial_points_[i + 1] - spatial_points_[i];
-                const RowVectorType dP_row = dP.transpose();
+                const RowVectorType dP_row = (spatial_points_[i + 1] - spatial_points_[i]).transpose();
                 const RowVectorType term_dC1_dh = -dP_row * h2_inv - (2.0 * M.row(i) + M.row(i + 1)) / 6.0;
                 const RowVectorType term_dC3_dh = -(M.row(i + 1) - M.row(i)) * (h2_inv / 6.0);
 
@@ -949,14 +931,13 @@ namespace SplineTrajectory
             {
                 const auto &tp = time_powers_[k];
                 double h2_inv = tp.h2_inv;
-                VectorType dP = spatial_points_[k + 1] - spatial_points_[k];
-                const RowVectorType dP_row = dP.transpose();
+                const RowVectorType dP_row = (spatial_points_[k + 1] - spatial_points_[k]).transpose();
 
                 const RowVectorType common_term = ws_lambda_.row(k) - ws_lambda_.row(k + 1);
 
                 const RowVectorType grad_R_P = 6.0 * tp.h_inv * common_term;
-                add_point_grad(k + 1, grad_R_P);
-                add_point_grad(k, -grad_R_P);
+                ws_point_grad_.row(k + 1) += grad_R_P;
+                ws_point_grad_.row(k) -= grad_R_P;
 
                 const RowVectorType grad_R_h = -6.0 * dP_row * h2_inv;
                 gradByTimes(k) += common_term.dot(grad_R_h);
@@ -971,10 +952,20 @@ namespace SplineTrajectory
                 gradByTimes(k) -= ws_lambda_.row(k + 1).dot(term_k1);
             }
 
-            startGrads.p = start_p.transpose();
+            if (n > 1)
+            {
+                innerPointsGrad.resize(n - 1, DIM);
+                innerPointsGrad = ws_point_grad_.middleRows(1, n - 1);
+            }
+            else
+            {
+                innerPointsGrad.resize(0, DIM);
+            }
+
+            startGrads.p = ws_point_grad_.row(0).transpose();
             startGrads.v = -6.0 * ws_lambda_.row(0).transpose();
 
-            endGrads.p = end_p.transpose();
+            endGrads.p = ws_point_grad_.row(n).transpose();
             endGrads.v = 6.0 * ws_lambda_.row(n).transpose();
         }
 
@@ -1444,7 +1435,6 @@ namespace SplineTrajectory
         void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
         {
             gdT.resize(num_segments_);
-            gdT.setZero();
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -2471,7 +2461,6 @@ namespace SplineTrajectory
         void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
         {
             gdT.resize(num_segments_);
-            gdT.setZero();
 
             for (int i = 0; i < num_segments_; ++i)
             {
