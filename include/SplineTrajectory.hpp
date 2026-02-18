@@ -128,6 +128,37 @@ namespace SplineTrajectory
 
     namespace detail
     {
+        template <int DIM, typename WorkspaceType, typename... GradRows>
+        inline void accumulateDerivativeGrads(WorkspaceType &workspace, int row_idx, const GradRows &... grads)
+        {
+            int offset = 0;
+            ((workspace.row(row_idx).segment(offset, DIM) += grads, offset += DIM), ...);
+        }
+
+        template <int BLOCK_SIZE, int DIM, typename WorkspaceType>
+        inline Eigen::Matrix<double, BLOCK_SIZE, DIM> readDerivativeGradBlock(const WorkspaceType &workspace, int row_idx)
+        {
+            Eigen::Matrix<double, BLOCK_SIZE, DIM> block;
+            for (int i = 0; i < BLOCK_SIZE; ++i)
+            {
+                block.row(i) = workspace.row(row_idx).segment(i * DIM, DIM);
+            }
+            return block;
+        }
+
+        template <int BLOCK_SIZE, int DIM, typename WorkspaceType, typename MatrixType>
+        inline void packInteriorDerivativeGrads(const WorkspaceType &workspace, int num_blocks, MatrixType &lambda)
+        {
+            lambda.resize(num_blocks * BLOCK_SIZE, DIM);
+            for (int i = 0; i < num_blocks; ++i)
+            {
+                for (int j = 0; j < BLOCK_SIZE; ++j)
+                {
+                    lambda.row(BLOCK_SIZE * i + j) = workspace.row(i + 1).segment(j * DIM, DIM);
+                }
+            }
+        }
+
         template <int BLOCK_SIZE, int DIM>
         struct BlockOps
         {
@@ -968,6 +999,49 @@ namespace SplineTrajectory
                                             grads.inner_points, grads.times, grads.start, grads.end);
         }
 
+        template <typename BoundaryStateType>
+        void initPropagatedGradOutputs(const Eigen::VectorXd &partialGradByTimes,
+                                       MatrixType &innerPointsGrad,
+                                       Eigen::VectorXd &gradByTimes,
+                                       BoundaryStateType &startGrads,
+                                       BoundaryStateType &endGrads) const
+        {
+            gradByTimes = partialGradByTimes;
+            startGrads = BoundaryStateType();
+            endGrads = BoundaryStateType();
+
+            if (num_segments_ > 1)
+            {
+                innerPointsGrad.resize(num_segments_ - 1, DIM);
+                innerPointsGrad.setZero();
+            }
+            else
+            {
+                innerPointsGrad.resize(0, DIM);
+            }
+        }
+
+        template <typename BoundaryStateType>
+        inline void addPointGradContribution(int point_idx,
+                                             const RowVectorType &grad,
+                                             MatrixType &innerPointsGrad,
+                                             BoundaryStateType &startGrads,
+                                             BoundaryStateType &endGrads) const
+        {
+            if (point_idx == 0)
+            {
+                startGrads.p += grad.transpose();
+            }
+            else if (point_idx == num_segments_)
+            {
+                endGrads.p += grad.transpose();
+            }
+            else
+            {
+                innerPointsGrad.row(point_idx - 1) += grad;
+            }
+        }
+
         void convertTimePointsToSegments(const std::vector<double> &t_points)
         {
             start_time_ = t_points.front();
@@ -1453,34 +1527,13 @@ namespace SplineTrajectory
             const int n = num_segments_;
             const MatrixType &M = internal_derivatives_;
 
-            gradByTimes = partialGradByTimes;
-            startGrads = BoundaryStateGrads();
-            endGrads = BoundaryStateGrads();
-
-            if (n > 1)
-            {
-                innerPointsGrad.resize(n - 1, DIM);
-                innerPointsGrad.setZero();
-            }
-            else
-            {
-                innerPointsGrad.resize(0, DIM);
-            }
+            this->template initPropagatedGradOutputs<BoundaryStateGrads>(
+                partialGradByTimes, innerPointsGrad, gradByTimes, startGrads, endGrads);
 
             auto add_point_grad = [&](int idx, const RowVectorType &grad)
             {
-                if (idx == 0)
-                {
-                    startGrads.p += grad.transpose();
-                }
-                else if (idx == n)
-                {
-                    endGrads.p += grad.transpose();
-                }
-                else
-                {
-                    innerPointsGrad.row(idx - 1) += grad;
-                }
+                this->template addPointGradContribution<BoundaryStateGrads>(
+                    idx, grad, innerPointsGrad, startGrads, endGrads);
             };
 
             ws_lambda_.resize(n + 1, DIM);
@@ -1993,46 +2046,19 @@ namespace SplineTrajectory
                                    BoundaryStateGrads &endGrads)
         {
             const int n = num_segments_;
-            const int n_pts = static_cast<int>(spatial_points_.rows());
+            const int n_pts = n + 1;
 
-            gradByTimes = partialGradByTimes;
-            startGrads = BoundaryStateGrads();
-            endGrads = BoundaryStateGrads();
-
-            if (n > 1)
-            {
-                innerPointsGrad.resize(n_pts - 2, DIM);
-                innerPointsGrad.setZero();
-            }
-            else
-            {
-                innerPointsGrad.resize(0, DIM);
-            }
+            this->template initPropagatedGradOutputs<BoundaryStateGrads>(
+                partialGradByTimes, innerPointsGrad, gradByTimes, startGrads, endGrads);
 
             auto add_point_grad = [&](int idx, const RowVectorType &grad)
             {
-                if (idx == 0)
-                {
-                    startGrads.p += grad.transpose();
-                }
-                else if (idx == n)
-                {
-                    endGrads.p += grad.transpose();
-                }
-                else
-                {
-                    innerPointsGrad.row(idx - 1) += grad;
-                }
+                this->template addPointGradContribution<BoundaryStateGrads>(
+                    idx, grad, innerPointsGrad, startGrads, endGrads);
             };
 
             ws_gd_internal_.resize(n_pts, 2 * DIM);
             ws_gd_internal_.setZero();
-
-            auto add_grad_d = [&](int idx, const RowVectorType &d_vel, const RowVectorType &d_acc)
-            {
-                ws_gd_internal_.row(idx).segment(0, DIM) += d_vel;
-                ws_gd_internal_.row(idx).segment(DIM, DIM) += d_acc;
-            };
 
             for (int i = 0; i < n; ++i)
             {
@@ -2072,8 +2098,8 @@ namespace SplineTrajectory
                 grad_a_next += gc4 * (-1.0 * tp.h2_inv);
                 grad_a_next += gc5 * (0.5 * tp.h3_inv);
 
-                add_grad_d(i, grad_v_curr, grad_a_curr);
-                add_grad_d(i + 1, grad_v_next, grad_a_next);
+                detail::accumulateDerivativeGrads<DIM>(ws_gd_internal_, i, grad_v_curr, grad_a_curr);
+                detail::accumulateDerivativeGrads<DIM>(ws_gd_internal_, i + 1, grad_v_next, grad_a_next);
 
                 const RowVectorType &V_curr = internal_vel_.row(i);
                 const RowVectorType &V_next = internal_vel_.row(i + 1);
@@ -2097,24 +2123,15 @@ namespace SplineTrajectory
                 gradByTimes(i) += gc3.dot(dc3_dh) + gc4.dot(dc4_dh) + gc5.dot(dc5_dh);
             }
 
-            Eigen::Matrix<double, 2, DIM> raw_start_grad;
-            raw_start_grad.row(0) = ws_gd_internal_.row(0).segment(0, DIM);
-            raw_start_grad.row(1) = ws_gd_internal_.row(0).segment(DIM, DIM);
-
-            Eigen::Matrix<double, 2, DIM> raw_end_grad;
-            raw_end_grad.row(0) = ws_gd_internal_.row(n).segment(0, DIM);
-            raw_end_grad.row(1) = ws_gd_internal_.row(n).segment(DIM, DIM);
+            Eigen::Matrix<double, 2, DIM> raw_start_grad =
+                detail::readDerivativeGradBlock<2, DIM>(ws_gd_internal_, 0);
+            Eigen::Matrix<double, 2, DIM> raw_end_grad =
+                detail::readDerivativeGradBlock<2, DIM>(ws_gd_internal_, n);
 
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
-                ws_lambda_.resize(num_blocks * 2, DIM);
-
-                for (int i = 0; i < num_blocks; ++i)
-                {
-                    ws_lambda_.row(2 * i) = ws_gd_internal_.row(i + 1).segment(0, DIM);
-                    ws_lambda_.row(2 * i + 1) = ws_gd_internal_.row(i + 1).segment(DIM, DIM);
-                }
+                detail::packInteriorDerivativeGrads<2, DIM>(ws_gd_internal_, num_blocks, ws_lambda_);
 
                 BlockOps2::multiplyBlockTransposeNxD(D_inv_cache_, 0,
                                             ws_lambda_.template middleRows<2>(0),
@@ -2748,47 +2765,19 @@ namespace SplineTrajectory
                                    BoundaryStateGrads &endGrads)
         {
             const int n = num_segments_;
-            const int n_pts = static_cast<int>(spatial_points_.rows());
+            const int n_pts = n + 1;
 
-            gradByTimes = partialGradByTimes;
-            startGrads = BoundaryStateGrads();
-            endGrads = BoundaryStateGrads();
-
-            if (n > 1)
-            {
-                innerPointsGrad.resize(n_pts - 2, DIM);
-                innerPointsGrad.setZero();
-            }
-            else
-            {
-                innerPointsGrad.resize(0, DIM);
-            }
+            this->template initPropagatedGradOutputs<BoundaryStateGrads>(
+                partialGradByTimes, innerPointsGrad, gradByTimes, startGrads, endGrads);
 
             auto add_point_grad = [&](int idx, const RowVectorType &grad)
             {
-                if (idx == 0)
-                {
-                    startGrads.p += grad.transpose();
-                }
-                else if (idx == n)
-                {
-                    endGrads.p += grad.transpose();
-                }
-                else
-                {
-                    innerPointsGrad.row(idx - 1) += grad;
-                }
+                this->template addPointGradContribution<BoundaryStateGrads>(
+                    idx, grad, innerPointsGrad, startGrads, endGrads);
             };
 
             ws_gd_internal_.resize(n_pts, 3 * DIM);
             ws_gd_internal_.setZero();
-
-            auto add_grad_d = [&](int idx, const RowVectorType &d_vel, const RowVectorType &d_acc, const RowVectorType &d_jerk)
-            {
-                ws_gd_internal_.row(idx).segment(0, DIM) += d_vel;
-                ws_gd_internal_.row(idx).segment(DIM, DIM) += d_acc;
-                ws_gd_internal_.row(idx).segment(2 * DIM, DIM) += d_jerk;
-            };
 
             for (int i = 0; i < n; ++i)
             {
@@ -2813,7 +2802,7 @@ namespace SplineTrajectory
                 add_point_grad(i, gc0 + sum_grad_P);
                 add_point_grad(i + 1, -sum_grad_P);
 
-                add_grad_d(i, gc1, 0.5 * gc2, (1.0 / 6.0) * gc3);
+                detail::accumulateDerivativeGrads<DIM>(ws_gd_internal_, i, gc1, 0.5 * gc2, (1.0 / 6.0) * gc3);
 
                 RowVectorType grad_v_curr = gc4 * (-20.0 * tp.h3_inv) +
                                             gc5 * (45.0 * tp.h4_inv) +
@@ -2845,8 +2834,8 @@ namespace SplineTrajectory
                                             gc6 * (-0.5 * tp.h3_inv) +
                                             gc7 * (1.0 / 6.0 * tp.h4_inv);
 
-                add_grad_d(i, grad_v_curr, grad_a_curr, grad_j_curr);
-                add_grad_d(i + 1, grad_v_next, grad_a_next, grad_j_next);
+                detail::accumulateDerivativeGrads<DIM>(ws_gd_internal_, i, grad_v_curr, grad_a_curr, grad_j_curr);
+                detail::accumulateDerivativeGrads<DIM>(ws_gd_internal_, i + 1, grad_v_next, grad_a_next, grad_j_next);
 
                 {
                     const RowVectorType &P_curr = spatial_points_.row(i);
@@ -2934,27 +2923,15 @@ namespace SplineTrajectory
                 }
             }
 
-            Eigen::Matrix<double, 3, DIM> raw_start_grad;
-            raw_start_grad.row(0) = ws_gd_internal_.row(0).segment(0, DIM);
-            raw_start_grad.row(1) = ws_gd_internal_.row(0).segment(DIM, DIM);
-            raw_start_grad.row(2) = ws_gd_internal_.row(0).segment(2 * DIM, DIM);
-
-            Eigen::Matrix<double, 3, DIM> raw_end_grad;
-            raw_end_grad.row(0) = ws_gd_internal_.row(n).segment(0, DIM);
-            raw_end_grad.row(1) = ws_gd_internal_.row(n).segment(DIM, DIM);
-            raw_end_grad.row(2) = ws_gd_internal_.row(n).segment(2 * DIM, DIM);
+            Eigen::Matrix<double, 3, DIM> raw_start_grad =
+                detail::readDerivativeGradBlock<3, DIM>(ws_gd_internal_, 0);
+            Eigen::Matrix<double, 3, DIM> raw_end_grad =
+                detail::readDerivativeGradBlock<3, DIM>(ws_gd_internal_, n);
 
             const int num_blocks = n - 1;
             if (num_blocks > 0)
             {
-                ws_lambda_.resize(num_blocks * 3, DIM);
-
-                for (int i = 0; i < num_blocks; ++i)
-                {
-                    ws_lambda_.row(3 * i) = ws_gd_internal_.row(i + 1).segment(0, DIM);
-                    ws_lambda_.row(3 * i + 1) = ws_gd_internal_.row(i + 1).segment(DIM, DIM);
-                    ws_lambda_.row(3 * i + 2) = ws_gd_internal_.row(i + 1).segment(2 * DIM, DIM);
-                }
+                detail::packInteriorDerivativeGrads<3, DIM>(ws_gd_internal_, num_blocks, ws_lambda_);
 
                 BlockOps3::multiplyBlockTransposeNxD(D_inv_cache_, 0,
                                             ws_lambda_.template middleRows<3>(0),
