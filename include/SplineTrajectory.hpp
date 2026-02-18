@@ -614,17 +614,172 @@ namespace SplineTrajectory
         }
     };
 
-    template <int DIM>
-    class CubicSplineND
+    template <typename Derived, int DIM, int Order>
+    class SplineBase
     {
     public:
         using VectorType = Eigen::Matrix<double, DIM, 1>;
         using RowVectorType = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+        static constexpr int COEFF_NUM = Order + 1;
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+    protected:
+        std::vector<double> time_segments_;
+        std::vector<double> cumulative_times_;
+        double start_time_{0.0};
+        int num_segments_{0};
+        bool is_initialized_{false};
+        MatrixType coeffs_;
+
+    private:
+        using BasisCoeffTable = std::array<std::array<double, COEFF_NUM>, COEFF_NUM>;
+
+        static constexpr BasisCoeffTable makeBasisDerivativeCoeffTable()
+        {
+            BasisCoeffTable table{};
+            for (int power = 0; power < COEFF_NUM; ++power)
+            {
+                table[power][0] = 1.0;
+                double coeff = 1.0;
+                for (int deriv = 1; deriv <= power; ++deriv)
+                {
+                    coeff *= static_cast<double>(power - deriv + 1);
+                    table[power][deriv] = coeff;
+                }
+            }
+            return table;
+        }
+
+        inline static constexpr BasisCoeffTable kBasisDerivativeCoeffTable_ = makeBasisDerivativeCoeffTable();
+
+        Derived &derived()
+        {
+            return static_cast<Derived &>(*this);
+        }
+
+        const Derived &derived() const
+        {
+            return static_cast<const Derived &>(*this);
+        }
+
+    protected:
+        template <typename GradientsType>
+        void fillEnergyGradFramework(GradientsType &grads) const
+        {
+            grads.inner_points = derived().getEnergyGradInnerPoints();
+            grads.times = derived().getEnergyGradTimes();
+            auto boundary = derived().getEnergyGradBoundary();
+            grads.start = boundary.start;
+            grads.end = boundary.end;
+        }
+
+        template <typename GradientsType>
+        void propagateGradFramework(const MatrixType &partialGradByCoeffs,
+                                    const Eigen::VectorXd &partialGradByTimes,
+                                    GradientsType &grads)
+        {
+            derived().propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
+                                            grads.inner_points, grads.times, grads.start, grads.end);
+        }
+
+        void convertTimePointsToSegments(const std::vector<double> &t_points)
+        {
+            start_time_ = t_points.front();
+            time_segments_.clear();
+            time_segments_.reserve(t_points.size() - 1);
+            for (size_t i = 1; i < t_points.size(); ++i)
+            {
+                time_segments_.push_back(t_points[i] - t_points[i - 1]);
+            }
+        }
+
+        void updateCumulativeTimes()
+        {
+            if (num_segments_ <= 0)
+            {
+                return;
+            }
+            cumulative_times_.resize(num_segments_ + 1);
+            cumulative_times_[0] = start_time_;
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
+            }
+        }
+
+        void updateSplineInternal()
+        {
+            num_segments_ = static_cast<int>(time_segments_.size());
+            updateCumulativeTimes();
+            derived().precomputeTimePowers();
+            derived().precomputePointDiffs();
+            coeffs_ = derived().solveCoefficients();
+            is_initialized_ = true;
+            derived().initializePPoly();
+        }
+
+        template <int DerivativeOrder>
+        static inline void computeBasisRow(double t, Eigen::Matrix<double, 1, COEFF_NUM> &basis)
+        {
+            static_assert(DerivativeOrder >= 0 && DerivativeOrder < COEFF_NUM,
+                          "Derivative order exceeds spline basis order.");
+            std::array<double, COEFF_NUM> t_powers{};
+            t_powers[0] = 1.0;
+            for (int i = 1; i < COEFF_NUM; ++i)
+            {
+                t_powers[i] = t_powers[i - 1] * t;
+            }
+
+            for (int power = 0; power < COEFF_NUM; ++power)
+            {
+                basis(power) = (power < DerivativeOrder)
+                                   ? 0.0
+                                   : (kBasisDerivativeCoeffTable_[power][DerivativeOrder] *
+                                      t_powers[power - DerivativeOrder]);
+            }
+        }
+
+    public:
+        bool isInitialized() const { return is_initialized_; }
+        int getDimension() const { return DIM; }
+        double getStartTime() const { return start_time_; }
+        double getEndTime() const { return cumulative_times_.back(); }
+        double getDuration() const { return cumulative_times_.back() - start_time_; }
+        int getNumSegments() const { return num_segments_; }
+        const std::vector<double> &getTimeSegments() const { return time_segments_; }
+        const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
+
+        template <typename GradientsType>
+        GradientsType getEnergyGradFramework() const
+        {
+            GradientsType grads;
+            fillEnergyGradFramework(grads);
+            return grads;
+        }
+
+        template <typename GradientsType>
+        GradientsType propagateGradFramework(const MatrixType &partialGradByCoeffs,
+                                             const Eigen::VectorXd &partialGradByTimes)
+        {
+            GradientsType grads;
+            propagateGradFramework(partialGradByCoeffs, partialGradByTimes, grads);
+            return grads;
+        }
+    };
+
+    template <int DIM>
+    class CubicSplineND : public SplineBase<CubicSplineND<DIM>, DIM, 3>
+    {
+    public:
+        using Base = SplineBase<CubicSplineND<DIM>, DIM, 3>;
+        using VectorType = typename Base::VectorType;
+        using RowVectorType = typename Base::RowVectorType;
+        static constexpr int kMatrixOptions = Base::kMatrixOptions;
+        using MatrixType = typename Base::MatrixType;
         static constexpr int ORDER = 3;
-        static constexpr int COEFF_NUM = 4;
+        static constexpr int COEFF_NUM = Base::COEFF_NUM;
         using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
 
         struct BoundaryStateGrads
@@ -650,14 +805,19 @@ namespace SplineTrajectory
         };
 
     private:
-        std::vector<double> time_segments_;
+        friend class SplineBase<CubicSplineND<DIM>, DIM, 3>;
+
+        using Base::coeffs_;
+        using Base::convertTimePointsToSegments;
+        using Base::cumulative_times_;
+        using Base::is_initialized_;
+        using Base::num_segments_;
+        using Base::start_time_;
+        using Base::time_segments_;
+        using Base::updateSplineInternal;
+
         SplineVector<VectorType> spatial_points_;
         BoundaryConditions<DIM> boundary_velocities_;
-        int num_segments_;
-        MatrixType coeffs_;
-        bool is_initialized_;
-        double start_time_;
-        std::vector<double> cumulative_times_;
         TrajectoryType trajectory_;
 
         MatrixType internal_derivatives_;
@@ -678,12 +838,12 @@ namespace SplineTrajectory
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-        CubicSplineND() : num_segments_(0), is_initialized_(false), start_time_(0.0) {}
+        CubicSplineND() = default;
 
         CubicSplineND(const std::vector<double> &t_points,
                       const SplineVector<VectorType> &spatial_points,
                       const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_velocities_(boundary_velocities), is_initialized_(false)
+            : spatial_points_(spatial_points), boundary_velocities_(boundary_velocities)
         {
             convertTimePointsToSegments(t_points);
             updateSplineInternal();
@@ -693,9 +853,10 @@ namespace SplineTrajectory
                       const SplineVector<VectorType> &spatial_points,
                       double start_time,
                       const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : time_segments_(time_segments), spatial_points_(spatial_points), boundary_velocities_(boundary_velocities),
-              is_initialized_(false), start_time_(start_time)
+            : spatial_points_(spatial_points), boundary_velocities_(boundary_velocities)
         {
+            time_segments_ = time_segments;
+            start_time_ = start_time;
             updateSplineInternal();
         }
 
@@ -721,37 +882,12 @@ namespace SplineTrajectory
             updateSplineInternal();
         }
 
-        bool isInitialized() const { return is_initialized_; }
-        int getDimension() const { return DIM; }
-
-        double getStartTime() const
-        {
-            return start_time_;
-        }
-
-        double getEndTime() const
-        {
-            return cumulative_times_.back();
-        }
-
-        double getDuration() const
-        {
-            return cumulative_times_.back() - start_time_;
-        }
-
         size_t getNumPoints() const
         {
             return spatial_points_.size();
         }
 
-        int getNumSegments() const
-        {
-            return num_segments_;
-        }
-
         const SplineVector<VectorType> &getSpacePoints() const { return spatial_points_; }
-        const std::vector<double> &getTimeSegments() const { return time_segments_; }
-        const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_velocities_; }
 
         const TrajectoryType &getTrajectory() const { return trajectory_; }
@@ -767,12 +903,10 @@ namespace SplineTrajectory
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
         {
-            double t1 = t, t2 = t1 * t1, t3 = t2 * t1;
-
-            b_pos << 1, t1, t2, t3;
-            b_vel << 0, 1, 2 * t1, 3 * t2;
-            b_acc << 0, 0, 2, 6 * t1;
-            b_jerk << 0, 0, 0, 6;
+            Base::template computeBasisRow<0>(t, b_pos);
+            Base::template computeBasisRow<1>(t, b_vel);
+            Base::template computeBasisRow<2>(t, b_acc);
+            Base::template computeBasisRow<3>(t, b_jerk);
             b_snap.setZero();
             b_crackle.setZero();
         }
@@ -955,9 +1089,7 @@ namespace SplineTrajectory
          */
         Gradients getEnergyGrad() const
         {
-            Gradients res;
-            getEnergyGrad(res);
-            return res;
+            return this->template getEnergyGradFramework<Gradients>();
         }
 
         /**
@@ -967,11 +1099,7 @@ namespace SplineTrajectory
          */
         void getEnergyGrad(Gradients &grads) const
         {
-            grads.inner_points = getEnergyGradInnerPoints();
-            grads.times = getEnergyGradTimes();
-            BoundaryDualGrads boundary = getEnergyGradBoundary();
-            grads.start = boundary.start;
-            grads.end = boundary.end;
+            this->template fillEnergyGradFramework<Gradients>(grads);
         }
 
         /**
@@ -987,12 +1115,7 @@ namespace SplineTrajectory
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
-            Gradients res;
-
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.times, res.start, res.end);
-
-            return res;
+            return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
         }
 
         /**
@@ -1006,8 +1129,7 @@ namespace SplineTrajectory
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
         {
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.times, grads.start, grads.end);
+            this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes, grads);
         }
 
     private:
@@ -1115,38 +1237,6 @@ namespace SplineTrajectory
             endGrads.v = 6.0 * ws_lambda_.row(n).transpose();
         }
 
-        inline void updateSplineInternal()
-        {
-            num_segments_ = static_cast<int>(time_segments_.size());
-            updateCumulativeTimes();
-            precomputeTimePowers();
-            precomputePointDiffs();
-            coeffs_ = solveSpline();
-            is_initialized_ = true;
-            initializePPoly();
-        }
-
-        void convertTimePointsToSegments(const std::vector<double> &t_points)
-        {
-            start_time_ = t_points.front();
-            time_segments_.clear();
-            time_segments_.reserve(t_points.size() - 1);
-            for (size_t i = 1; i < t_points.size(); ++i)
-                time_segments_.push_back(t_points[i] - t_points[i - 1]);
-        }
-
-        void updateCumulativeTimes()
-        {
-            if (num_segments_ <= 0)
-                return;
-            cumulative_times_.resize(num_segments_ + 1);
-            cumulative_times_[0] = start_time_;
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
-            }
-        }
-
         void precomputeTimePowers()
         {
             int n = static_cast<int>(time_segments_.size());
@@ -1215,6 +1305,11 @@ namespace SplineTrajectory
             }
 
             return coeffs;
+        }
+
+        MatrixType solveCoefficients()
+        {
+            return solveSpline();
         }
 
         template <typename MatType>
@@ -1300,16 +1395,16 @@ namespace SplineTrajectory
     };
 
     template <int DIM>
-    class QuinticSplineND
+    class QuinticSplineND : public SplineBase<QuinticSplineND<DIM>, DIM, 5>
     {
     public:
-        using VectorType = Eigen::Matrix<double, DIM, 1>;
-        using RowVectorType = Eigen::Matrix<double, 1, DIM>;
-        static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
-
+        using Base = SplineBase<QuinticSplineND<DIM>, DIM, 5>;
+        using VectorType = typename Base::VectorType;
+        using RowVectorType = typename Base::RowVectorType;
+        static constexpr int kMatrixOptions = Base::kMatrixOptions;
+        using MatrixType = typename Base::MatrixType;
         static constexpr int ORDER = 5;
-        static constexpr int COEFF_NUM = 6;
+        static constexpr int COEFF_NUM = Base::COEFF_NUM;
         using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
 
         struct BoundaryStateGrads
@@ -1336,19 +1431,21 @@ namespace SplineTrajectory
         };
 
     private:
-        std::vector<double> time_segments_;
-        std::vector<double> cumulative_times_;
-        double start_time_{0.0};
+        friend class SplineBase<QuinticSplineND<DIM>, DIM, 5>;
+
+        using Base::coeffs_;
+        using Base::convertTimePointsToSegments;
+        using Base::cumulative_times_;
+        using Base::is_initialized_;
+        using Base::num_segments_;
+        using Base::start_time_;
+        using Base::time_segments_;
+        using Base::updateSplineInternal;
 
         MatrixType spatial_points_;
         MatrixType point_diffs_;
 
         BoundaryConditions<DIM> boundary_;
-
-        int num_segments_{0};
-        bool is_initialized_{false};
-
-        MatrixType coeffs_;
         TrajectoryType trajectory_;
 
         using BlockMatrix2x2Storage = Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor>;
@@ -1376,18 +1473,6 @@ namespace SplineTrajectory
         MatrixType ws_lambda_;
         Eigen::Matrix<double, Eigen::Dynamic, 2 * DIM, Eigen::RowMajor> ws_gd_internal_;
 
-    private:
-        void updateSplineInternal()
-        {
-            num_segments_ = static_cast<int>(time_segments_.size());
-            updateCumulativeTimes();
-            precomputeTimePowers();
-            precomputePointDiffs();
-            coeffs_ = solveQuintic();
-            is_initialized_ = true;
-            initializePPoly();
-        }
-
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
@@ -1410,10 +1495,10 @@ namespace SplineTrajectory
                         const SplineVector<VectorType> &spatial_points,
                         double start_time,
                         const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : time_segments_(time_segments),
-              start_time_(start_time),
-              boundary_(boundary)
+            : boundary_(boundary)
         {
+            time_segments_ = time_segments;
+            start_time_ = start_time;
             const int n_pts = static_cast<int>(spatial_points.size());
             spatial_points_.resize(n_pts, DIM);
             for (int i = 0; i < n_pts; ++i)
@@ -1449,37 +1534,12 @@ namespace SplineTrajectory
             updateSplineInternal();
         }
 
-        bool isInitialized() const { return is_initialized_; }
-        int getDimension() const { return DIM; }
-
-        double getStartTime() const
-        {
-            return start_time_;
-        }
-
-        double getEndTime() const
-        {
-            return cumulative_times_.back();
-        }
-
-        double getDuration() const
-        {
-            return cumulative_times_.back() - start_time_;
-        }
-
         size_t getNumPoints() const
         {
             return static_cast<size_t>(spatial_points_.rows());
         }
 
-        int getNumSegments() const
-        {
-            return num_segments_;
-        }
-
         const MatrixType &getSpacePoints() const { return spatial_points_; }
-        const std::vector<double> &getTimeSegments() const { return time_segments_; }
-        const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
 
         const TrajectoryType &getTrajectory() const { return trajectory_; }
@@ -1495,14 +1555,12 @@ namespace SplineTrajectory
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
         {
-            double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1;
-
-            b_pos << 1, t1, t2, t3, t4, t5;
-            b_vel << 0, 1, 2 * t1, 3 * t2, 4 * t3, 5 * t4;
-            b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3;
-            b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2;
-            b_snap << 0, 0, 0, 0, 24, 120 * t1;
-            b_crackle << 0, 0, 0, 0, 0, 120;
+            Base::template computeBasisRow<0>(t, b_pos);
+            Base::template computeBasisRow<1>(t, b_vel);
+            Base::template computeBasisRow<2>(t, b_acc);
+            Base::template computeBasisRow<3>(t, b_jerk);
+            Base::template computeBasisRow<4>(t, b_snap);
+            Base::template computeBasisRow<5>(t, b_crackle);
         }
 
         double getEnergy() const
@@ -1712,9 +1770,7 @@ namespace SplineTrajectory
          */
         Gradients getEnergyGrad() const
         {
-            Gradients res;
-            getEnergyGrad(res);
-            return res;
+            return this->template getEnergyGradFramework<Gradients>();
         }
 
         /**
@@ -1724,11 +1780,7 @@ namespace SplineTrajectory
          */
         void getEnergyGrad(Gradients &grads) const
         {
-            grads.inner_points = getEnergyGradInnerPoints();
-            grads.times = getEnergyGradTimes();
-            BoundaryDualGrads boundary = getEnergyGradBoundary();
-            grads.start = boundary.start;
-            grads.end = boundary.end;
+            this->template fillEnergyGradFramework<Gradients>(grads);
         }
 
         /**
@@ -1744,12 +1796,7 @@ namespace SplineTrajectory
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
-            Gradients res;
-
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.times, res.start, res.end);
-
-            return res;
+            return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
         }
 
         /**
@@ -1763,8 +1810,7 @@ namespace SplineTrajectory
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
         {
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.times, grads.start, grads.end);
+            this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes, grads);
         }
 
     private:
@@ -2019,25 +2065,6 @@ namespace SplineTrajectory
             endGrads.v = raw_end_grad.row(0).transpose();
             endGrads.a = raw_end_grad.row(1).transpose();
         }
-        void convertTimePointsToSegments(const std::vector<double> &t_points)
-        {
-            start_time_ = t_points.front();
-            time_segments_.clear();
-            time_segments_.reserve(t_points.size() - 1);
-            for (size_t i = 1; i < t_points.size(); ++i)
-                time_segments_.push_back(t_points[i] - t_points[i - 1]);
-        }
-
-        void updateCumulativeTimes()
-        {
-            if (num_segments_ <= 0)
-                return;
-            cumulative_times_.resize(num_segments_ + 1);
-            cumulative_times_[0] = start_time_;
-            for (int i = 0; i < num_segments_; ++i)
-                cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
-        }
-
         void precomputeTimePowers()
         {
             int n = static_cast<int>(time_segments_.size());
@@ -2313,6 +2340,11 @@ namespace SplineTrajectory
             return coeffs;
         }
 
+        MatrixType solveCoefficients()
+        {
+            return solveQuintic();
+        }
+
         void initializePPoly()
         {
             trajectory_.update(cumulative_times_, coeffs_, 6);
@@ -2320,16 +2352,16 @@ namespace SplineTrajectory
     };
 
     template <int DIM>
-    class SepticSplineND
+    class SepticSplineND : public SplineBase<SepticSplineND<DIM>, DIM, 7>
     {
     public:
-        using VectorType = Eigen::Matrix<double, DIM, 1>;
-        using RowVectorType = Eigen::Matrix<double, 1, DIM>;
-        static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
-
+        using Base = SplineBase<SepticSplineND<DIM>, DIM, 7>;
+        using VectorType = typename Base::VectorType;
+        using RowVectorType = typename Base::RowVectorType;
+        static constexpr int kMatrixOptions = Base::kMatrixOptions;
+        using MatrixType = typename Base::MatrixType;
         static constexpr int ORDER = 7;
-        static constexpr int COEFF_NUM = 8;
+        static constexpr int COEFF_NUM = Base::COEFF_NUM;
         using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
 
         struct BoundaryStateGrads
@@ -2358,19 +2390,21 @@ namespace SplineTrajectory
         };
 
     private:
-        std::vector<double> time_segments_;
-        std::vector<double> cumulative_times_;
-        double start_time_{0.0};
+        friend class SplineBase<SepticSplineND<DIM>, DIM, 7>;
+
+        using Base::coeffs_;
+        using Base::convertTimePointsToSegments;
+        using Base::cumulative_times_;
+        using Base::is_initialized_;
+        using Base::num_segments_;
+        using Base::start_time_;
+        using Base::time_segments_;
+        using Base::updateSplineInternal;
 
         MatrixType spatial_points_;
         MatrixType point_diffs_;
 
         BoundaryConditions<DIM> boundary_;
-
-        int num_segments_{0};
-        bool is_initialized_{false};
-
-        MatrixType coeffs_;
         TrajectoryType trajectory_;
 
         struct TimePowers
@@ -2401,18 +2435,6 @@ namespace SplineTrajectory
         MatrixType internal_acc_;
         MatrixType internal_jerk_;
 
-    private:
-        void updateSplineInternal()
-        {
-            num_segments_ = static_cast<int>(time_segments_.size());
-            updateCumulativeTimes();
-            precomputeTimePowers();
-            precomputePointDiffs();
-            coeffs_ = solveSepticSpline();
-            is_initialized_ = true;
-            initializePPoly();
-        }
-
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
@@ -2435,10 +2457,10 @@ namespace SplineTrajectory
                        const SplineVector<VectorType> &spatial_points,
                        double start_time,
                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : time_segments_(time_segments),
-              start_time_(start_time),
-              boundary_(boundary)
+            : boundary_(boundary)
         {
+            time_segments_ = time_segments;
+            start_time_ = start_time;
             const int n_pts = static_cast<int>(spatial_points.size());
             spatial_points_.resize(n_pts, DIM);
             for (int i = 0; i < n_pts; ++i)
@@ -2474,37 +2496,12 @@ namespace SplineTrajectory
             updateSplineInternal();
         }
 
-        bool isInitialized() const { return is_initialized_; }
-        int getDimension() const { return DIM; }
-
-        double getStartTime() const
-        {
-            return start_time_;
-        }
-
-        double getEndTime() const
-        {
-            return cumulative_times_.back();
-        }
-
-        double getDuration() const
-        {
-            return cumulative_times_.back() - start_time_;
-        }
-
         size_t getNumPoints() const
         {
             return static_cast<size_t>(spatial_points_.rows());
         }
 
-        int getNumSegments() const
-        {
-            return num_segments_;
-        }
-
         const MatrixType &getSpacePoints() const { return spatial_points_; }
-        const std::vector<double> &getTimeSegments() const { return time_segments_; }
-        const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
 
         const TrajectoryType &getTrajectory() const { return trajectory_; }
@@ -2520,14 +2517,12 @@ namespace SplineTrajectory
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
         {
-            double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1, t6 = t5 * t1, t7 = t6 * t1;
-
-            b_pos << 1, t1, t2, t3, t4, t5, t6, t7;
-            b_vel << 0, 1, 2 * t1, 3 * t2, 4 * t3, 5 * t4, 6 * t5, 7 * t6;
-            b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3, 30 * t4, 42 * t5;
-            b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2, 120 * t3, 210 * t4;
-            b_snap << 0, 0, 0, 0, 24, 120 * t1, 360 * t2, 840 * t3;
-            b_crackle << 0, 0, 0, 0, 0, 120, 720 * t1, 2520 * t2;
+            Base::template computeBasisRow<0>(t, b_pos);
+            Base::template computeBasisRow<1>(t, b_vel);
+            Base::template computeBasisRow<2>(t, b_acc);
+            Base::template computeBasisRow<3>(t, b_jerk);
+            Base::template computeBasisRow<4>(t, b_snap);
+            Base::template computeBasisRow<5>(t, b_crackle);
         }
 
         double getEnergy() const
@@ -2769,9 +2764,7 @@ namespace SplineTrajectory
          */
         Gradients getEnergyGrad() const
         {
-            Gradients res;
-            getEnergyGrad(res);
-            return res;
+            return this->template getEnergyGradFramework<Gradients>();
         }
 
         /**
@@ -2781,11 +2774,7 @@ namespace SplineTrajectory
          */
         void getEnergyGrad(Gradients &grads) const
         {
-            grads.inner_points = getEnergyGradInnerPoints();
-            grads.times = getEnergyGradTimes();
-            BoundaryDualGrads boundary = getEnergyGradBoundary();
-            grads.start = boundary.start;
-            grads.end = boundary.end;
+            this->template fillEnergyGradFramework<Gradients>(grads);
         }
 
         /**
@@ -2801,12 +2790,7 @@ namespace SplineTrajectory
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
-            Gradients res;
-
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.times, res.start, res.end);
-
-            return res;
+            return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
         }
 
         /**
@@ -2820,8 +2804,7 @@ namespace SplineTrajectory
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
         {
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.times, grads.start, grads.end);
+            this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes, grads);
         }
 
     private:
@@ -3238,24 +3221,6 @@ namespace SplineTrajectory
             endGrads.a = raw_end_grad.row(1).transpose();
             endGrads.j = raw_end_grad.row(2).transpose();
         }
-        void convertTimePointsToSegments(const std::vector<double> &t_points)
-        {
-            start_time_ = t_points.front();
-            time_segments_.clear();
-            time_segments_.reserve(t_points.size() - 1);
-            for (size_t i = 1; i < t_points.size(); ++i)
-                time_segments_.push_back(t_points[i] - t_points[i - 1]);
-        }
-
-        void updateCumulativeTimes()
-        {
-            if (num_segments_ <= 0)
-                return;
-            cumulative_times_.resize(num_segments_ + 1);
-            cumulative_times_[0] = start_time_;
-            for (int i = 0; i < num_segments_; ++i)
-                cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
-        }
         void precomputeTimePowers()
         {
             int n = static_cast<int>(time_segments_.size());
@@ -3641,6 +3606,11 @@ namespace SplineTrajectory
             }
 
             return coeffs;
+        }
+
+        MatrixType solveCoefficients()
+        {
+            return solveSepticSpline();
         }
 
         void initializePPoly()
