@@ -26,8 +26,8 @@
 #define SPLINE_TRAJECTORY_HPP
 
 #include <Eigen/Dense>
+#include <array>
 #include <vector>
-#include <iostream>
 #include <algorithm>
 
 namespace SplineTrajectory
@@ -77,7 +77,7 @@ namespace SplineTrajectory
         Pop = 6
     };
 
-    template <int DIM>
+    template <int DIM, int ORDER = Eigen::Dynamic>
     class PPolyND
     {
     public:
@@ -88,25 +88,155 @@ namespace SplineTrajectory
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
     private:
+        static constexpr bool kHasFixedOrder = (ORDER != Eigen::Dynamic);
+        static constexpr int kOrderHint = ORDER;
+
         std::vector<double> breakpoints_;
         MatrixType coefficients_;
+        mutable std::vector<MatrixType> derivative_coeffs_;
+        mutable Eigen::MatrixXd derivative_factor_table_;
+        mutable bool derivative_factor_table_ready_{false};
+        mutable bool derivative_coeffs_ready_{false};
         int num_segments_;
         int num_coeffs_;
         bool is_initialized_;
 
-        static inline double computeDerivativeFactor(int n, int k)
-        {
-            if (k == 0)
-                return 1.0;
-            if (k > n)
-                return 0.0;
-            if (k == 1)
-                return static_cast<double>(n);
+        static constexpr int kStaticFactorMaxOrder = 8;
+        using DerivativeFactorTable = std::array<std::array<double, kStaticFactorMaxOrder>, kStaticFactorMaxOrder>;
 
-            double res = 1.0;
-            for (int i = 0; i < k; ++i)
-                res *= (n - i);
-            return res;
+        static constexpr DerivativeFactorTable makeStaticDerivativeFactorTable()
+        {
+            DerivativeFactorTable table{};
+            for (int n = 0; n < kStaticFactorMaxOrder; ++n)
+            {
+                table[n][0] = 1.0;
+                double acc = 1.0;
+                for (int k = 1; k <= n; ++k)
+                {
+                    acc *= static_cast<double>(n - k + 1);
+                    table[n][k] = acc;
+                }
+            }
+            return table;
+        }
+        static constexpr DerivativeFactorTable kStaticDerivativeFactorTable_ = makeStaticDerivativeFactorTable();
+
+        inline double derivativeFactor(int n, int k) const
+        {
+            if (k < 0 || k > n)
+                return 0.0;
+            if constexpr (kHasFixedOrder && kOrderHint <= kStaticFactorMaxOrder)
+                return kStaticDerivativeFactorTable_[n][k];
+            if (n < kStaticFactorMaxOrder && num_coeffs_ <= kStaticFactorMaxOrder)
+                return kStaticDerivativeFactorTable_[n][k];
+            ensureDerivativeFactorTable();
+            return derivative_factor_table_(n, k);
+        }
+
+        inline void buildDynamicDerivativeFactorTable() const
+        {
+            if (num_coeffs_ <= 0)
+            {
+                derivative_factor_table_.resize(0, 0);
+                derivative_factor_table_ready_ = true;
+                return;
+            }
+
+            derivative_factor_table_.resize(num_coeffs_, num_coeffs_);
+            derivative_factor_table_.setZero();
+
+            for (int n = 0; n < num_coeffs_; ++n)
+            {
+                derivative_factor_table_(n, 0) = 1.0;
+                double acc = 1.0;
+                for (int k = 1; k <= n; ++k)
+                {
+                    acc *= static_cast<double>(n - k + 1);
+                    derivative_factor_table_(n, k) = acc;
+                }
+            }
+            derivative_factor_table_ready_ = true;
+        }
+
+        inline void ensureDerivativeFactorTable() const
+        {
+            if (derivative_factor_table_ready_)
+                return;
+            buildDynamicDerivativeFactorTable();
+        }
+
+        inline void buildDerivativeCoefficients() const
+        {
+            derivative_coeffs_.clear();
+            if (num_segments_ <= 0 || num_coeffs_ <= 0)
+            {
+                derivative_coeffs_ready_ = true;
+                return;
+            }
+
+            if constexpr (!(kHasFixedOrder && kOrderHint <= kStaticFactorMaxOrder))
+            {
+                if (num_coeffs_ > kStaticFactorMaxOrder)
+                    ensureDerivativeFactorTable();
+            }
+            else
+            {
+                // Fixed low-order splines use compile-time static derivative factors.
+            }
+
+            derivative_coeffs_.resize(num_coeffs_);
+            for (int d = 0; d < num_coeffs_; ++d)
+            {
+                const int order_d = num_coeffs_ - d;
+                MatrixType coeffs_d(num_segments_ * order_d, DIM);
+
+                for (int seg = 0; seg < num_segments_; ++seg)
+                {
+                    const int src_base = seg * num_coeffs_;
+                    const int dst_base = seg * order_d;
+                    for (int k = 0; k < order_d; ++k)
+                    {
+                        const int orig_k = k + d;
+                        coeffs_d.row(dst_base + k) = derivativeFactor(orig_k, d) * coefficients_.row(src_base + orig_k);
+                    }
+                }
+
+                derivative_coeffs_[d] = std::move(coeffs_d);
+            }
+            derivative_coeffs_ready_ = true;
+        }
+
+        inline void ensureDerivativeCoefficients() const
+        {
+            if (derivative_coeffs_ready_)
+                return;
+            buildDerivativeCoefficients();
+        }
+
+        inline void invalidateDerivativeCaches()
+        {
+            derivative_coeffs_.clear();
+            derivative_factor_table_.resize(0, 0);
+            derivative_factor_table_ready_ = false;
+            derivative_coeffs_ready_ = false;
+        }
+
+        inline VectorType evaluateSegmentHorner(int segment_idx, double t, int derivative_order) const
+        {
+            if (derivative_order >= num_coeffs_ || derivative_order < 0)
+                return VectorType::Zero();
+
+            ensureDerivativeCoefficients();
+            const int order_d = num_coeffs_ - derivative_order;
+            const MatrixType &coeffs_d = derivative_coeffs_[derivative_order];
+            const int base_row = segment_idx * order_d;
+
+            VectorType result = coeffs_d.row(base_row + order_d - 1).transpose();
+            for (int k = order_d - 2; k >= 0; --k)
+            {
+                result = result * t + coeffs_d.row(base_row + k).transpose();
+            }
+            return result;
         }
 
     public:
@@ -139,23 +269,7 @@ namespace SplineTrajectory
 
             VectorType evaluate(double t, int derivative_order) const
             {
-                const int order = parent_->num_coeffs_;
-                if (derivative_order >= order)
-                    return VectorType::Zero();
-
-                VectorType result = VectorType::Zero();
-                double t_power = 1.0;
-
-                int base_row = idx_ * order;
-                const auto &coeffs = parent_->coefficients_;
-
-                for (int k = derivative_order; k < order; ++k)
-                {
-                    double factor = PPolyND::computeDerivativeFactor(k, derivative_order);
-                    result.noalias() += (factor * t_power) * coeffs.row(base_row + k).transpose();
-                    t_power *= t;
-                }
-                return result;
+                return parent_->evaluateSegmentHorner(idx_, t, derivative_order);
             }
 
             auto getCoeffs() const -> decltype(parent_->coefficients_.block(0, 0, 0, 0))
@@ -252,7 +366,7 @@ namespace SplineTrajectory
             int segment_idx = findSegment(t);
             double dt = t - breakpoints_[segment_idx];
 
-            return Segment(this, segment_idx).evaluate(dt, derivative_order);
+            return evaluateSegmentHorner(segment_idx, dt, derivative_order);
         }
 
         VectorType evaluate(double t, Deriv type = Deriv::Pos) const
@@ -287,7 +401,7 @@ namespace SplineTrajectory
             int segment_idx = findSegment(t, last_idx_hint);
             double dt = t - breakpoints_[segment_idx];
 
-            return Segment(this, segment_idx).evaluate(dt, derivative_order);
+            return evaluateSegmentHorner(segment_idx, dt, derivative_order);
         }
 
         double getTrajectoryLength(double dt = 0.01) const
@@ -372,7 +486,7 @@ namespace SplineTrajectory
                 for (int k = 0; k < new_order; ++k)
                 {
                     int orig_k = k + derivative_order;
-                    double coeff_factor = computeDerivativeFactor(orig_k, derivative_order);
+                    double coeff_factor = derivativeFactor(orig_k, derivative_order);
                     RowVectorType orig_coeff = coefficients_.row(seg * num_coeffs_ + orig_k);
                     new_coeffs.row(seg * new_order + k) = coeff_factor * orig_coeff;
                 }
@@ -410,6 +524,7 @@ namespace SplineTrajectory
                 is_initialized_ = false;
                 breakpoints_.clear();
                 coefficients_.resize(0, DIM);
+                invalidateDerivativeCaches();
                 return;
             }
 
@@ -419,13 +534,31 @@ namespace SplineTrajectory
                 num_segments_ = 0;
                 num_coeffs_ = 0;
                 is_initialized_ = false;
+                breakpoints_.clear();
+                coefficients_.resize(0, DIM);
+                invalidateDerivativeCaches();
                 return;
+            }
+
+            if constexpr (kHasFixedOrder)
+            {
+                if (num_coefficients <= 0 || num_coefficients > kOrderHint)
+                {
+                    num_segments_ = 0;
+                    num_coeffs_ = 0;
+                    is_initialized_ = false;
+                    breakpoints_.clear();
+                    coefficients_.resize(0, DIM);
+                    invalidateDerivativeCaches();
+                    return;
+                }
             }
 
             breakpoints_ = breakpoints;
             coefficients_ = coefficients;
             num_coeffs_ = num_coefficients;
             num_segments_ = static_cast<int>(breakpoints_.size()) - 1;
+            invalidateDerivativeCaches();
             is_initialized_ = true;
         }
 
@@ -492,6 +625,7 @@ namespace SplineTrajectory
 
         static constexpr int ORDER = 3;
         static constexpr int COEFF_NUM = 4;
+        using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
 
         struct BoundaryStateGrads
         {
@@ -524,7 +658,7 @@ namespace SplineTrajectory
         bool is_initialized_;
         double start_time_;
         std::vector<double> cumulative_times_;
-        PPolyND<DIM> trajectory_;
+        TrajectoryType trajectory_;
 
         MatrixType internal_derivatives_;
         MatrixType point_diffs_;
@@ -620,10 +754,10 @@ namespace SplineTrajectory
         const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_velocities_; }
 
-        const PPolyND<DIM> &getTrajectory() const { return trajectory_; }
-        PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
-        const PPolyND<DIM> &getPPoly() const { return trajectory_; }
-        PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
+        const TrajectoryType &getTrajectory() const { return trajectory_; }
+        TrajectoryType getTrajectoryCopy() const { return trajectory_; }
+        const TrajectoryType &getPPoly() const { return trajectory_; }
+        TrajectoryType getPPolyCopy() const { return trajectory_; }
 
         static inline void computeBasisFunctions(double t,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
@@ -1176,6 +1310,7 @@ namespace SplineTrajectory
 
         static constexpr int ORDER = 5;
         static constexpr int COEFF_NUM = 6;
+        using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
 
         struct BoundaryStateGrads
         {
@@ -1214,7 +1349,7 @@ namespace SplineTrajectory
         bool is_initialized_{false};
 
         MatrixType coeffs_;
-        PPolyND<DIM> trajectory_;
+        TrajectoryType trajectory_;
 
         using BlockMatrix2x2Storage = Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor>;
         BlockMatrix2x2Storage D_inv_cache_;
@@ -1347,10 +1482,10 @@ namespace SplineTrajectory
         const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
 
-        const PPolyND<DIM> &getTrajectory() const { return trajectory_; }
-        PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
-        const PPolyND<DIM> &getPPoly() const { return trajectory_; }
-        PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
+        const TrajectoryType &getTrajectory() const { return trajectory_; }
+        TrajectoryType getTrajectoryCopy() const { return trajectory_; }
+        const TrajectoryType &getPPoly() const { return trajectory_; }
+        TrajectoryType getPPolyCopy() const { return trajectory_; }
 
         static inline void computeBasisFunctions(double t,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
@@ -2195,6 +2330,7 @@ namespace SplineTrajectory
 
         static constexpr int ORDER = 7;
         static constexpr int COEFF_NUM = 8;
+        using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
 
         struct BoundaryStateGrads
         {
@@ -2235,7 +2371,7 @@ namespace SplineTrajectory
         bool is_initialized_{false};
 
         MatrixType coeffs_;
-        PPolyND<DIM> trajectory_;
+        TrajectoryType trajectory_;
 
         struct TimePowers
         {
@@ -2371,10 +2507,10 @@ namespace SplineTrajectory
         const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
 
-        const PPolyND<DIM> &getTrajectory() const { return trajectory_; }
-        PPolyND<DIM> getTrajectoryCopy() const { return trajectory_; }
-        const PPolyND<DIM> &getPPoly() const { return trajectory_; }
-        PPolyND<DIM> getPPolyCopy() const { return trajectory_; }
+        const TrajectoryType &getTrajectory() const { return trajectory_; }
+        TrajectoryType getTrajectoryCopy() const { return trajectory_; }
+        const TrajectoryType &getPPoly() const { return trajectory_; }
+        TrajectoryType getPPolyCopy() const { return trajectory_; }
 
         static inline void computeBasisFunctions(double t,
                                                  Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
