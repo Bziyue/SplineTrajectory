@@ -728,14 +728,26 @@ namespace SplineTrajectory
         }
 
     protected:
-        static MatrixType splinePointsToMatrix(const SplineVector<VectorType> &points)
+        template <typename BoundaryType>
+        void initializeFromTimePoints(const std::vector<double> &t_points,
+                                      const MatrixType &spatial_points,
+                                      const BoundaryType &boundary)
         {
-            MatrixType matrix(static_cast<int>(points.size()), DIM);
-            for (int i = 0; i < static_cast<int>(points.size()); ++i)
-            {
-                matrix.row(i) = points[static_cast<size_t>(i)].transpose();
-            }
-            return matrix;
+            derived().setSplineData(spatial_points, boundary);
+            convertTimePointsToSegments(t_points);
+            updateSplineInternal();
+        }
+
+        template <typename BoundaryType>
+        void initializeFromTimeSegments(const std::vector<double> &time_segments,
+                                        const MatrixType &spatial_points,
+                                        double start_time,
+                                        const BoundaryType &boundary)
+        {
+            time_segments_ = time_segments;
+            start_time_ = start_time;
+            derived().setSplineData(spatial_points, boundary);
+            updateSplineInternal();
         }
 
         template <typename GradientsType>
@@ -969,8 +981,9 @@ namespace SplineTrajectory
         friend class SplineBase<CubicSplineND<DIM>, DIM, 3>;
 
         using Base::coeffs_;
-        using Base::convertTimePointsToSegments;
         using Base::cumulative_times_;
+        using Base::initializeFromTimePoints;
+        using Base::initializeFromTimeSegments;
         using Base::is_initialized_;
         using Base::num_segments_;
         using Base::start_time_;
@@ -997,46 +1010,23 @@ namespace SplineTrajectory
         CubicSplineND(const std::vector<double> &t_points,
                       const MatrixType &spatial_points,
                       const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_velocities_(boundary_velocities)
         {
-            convertTimePointsToSegments(t_points);
-            updateSplineInternal();
+            initializeFromTimePoints(t_points, spatial_points, boundary_velocities);
         }
 
         CubicSplineND(const std::vector<double> &time_segments,
                       const MatrixType &spatial_points,
                       double start_time,
                       const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_velocities_(boundary_velocities)
         {
-            time_segments_ = time_segments;
-            start_time_ = start_time;
-            updateSplineInternal();
-        }
-
-        CubicSplineND(const std::vector<double> &t_points,
-                      const SplineVector<VectorType> &spatial_points,
-                      const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : CubicSplineND(t_points, Base::splinePointsToMatrix(spatial_points), boundary_velocities)
-        {
-        }
-
-        CubicSplineND(const std::vector<double> &time_segments,
-                      const SplineVector<VectorType> &spatial_points,
-                      double start_time,
-                      const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : CubicSplineND(time_segments, Base::splinePointsToMatrix(spatial_points), start_time, boundary_velocities)
-        {
+            initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary_velocities);
         }
 
         void update(const std::vector<double> &t_points,
                     const MatrixType &spatial_points,
                     const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
         {
-            spatial_points_ = spatial_points;
-            boundary_velocities_ = boundary_velocities;
-            convertTimePointsToSegments(t_points);
-            updateSplineInternal();
+            initializeFromTimePoints(t_points, spatial_points, boundary_velocities);
         }
 
         void update(const std::vector<double> &time_segments,
@@ -1044,26 +1034,7 @@ namespace SplineTrajectory
                     double start_time,
                     const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
         {
-            time_segments_ = time_segments;
-            spatial_points_ = spatial_points;
-            boundary_velocities_ = boundary_velocities;
-            start_time_ = start_time;
-            updateSplineInternal();
-        }
-
-        void update(const std::vector<double> &t_points,
-                    const SplineVector<VectorType> &spatial_points,
-                    const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-        {
-            update(t_points, Base::splinePointsToMatrix(spatial_points), boundary_velocities);
-        }
-
-        void update(const std::vector<double> &time_segments,
-                    const SplineVector<VectorType> &spatial_points,
-                    double start_time,
-                    const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-        {
-            update(time_segments, Base::splinePointsToMatrix(spatial_points), start_time, boundary_velocities);
+            initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary_velocities);
         }
 
         size_t getNumPoints() const
@@ -1307,6 +1278,13 @@ namespace SplineTrajectory
         }
 
     private:
+        void setSplineData(const MatrixType &spatial_points,
+                           const BoundaryConditions<DIM> &boundary_velocities)
+        {
+            spatial_points_ = spatial_points;
+            boundary_velocities_ = boundary_velocities;
+        }
+
         void propagateGradInternal(const MatrixType &partialGradByCoeffs,
                                    const Eigen::VectorXd &partialGradByTimes,
                                    MatrixType &innerPointsGrad,
@@ -1563,8 +1541,9 @@ namespace SplineTrajectory
         friend class SplineBase<QuinticSplineND<DIM>, DIM, 5>;
 
         using Base::coeffs_;
-        using Base::convertTimePointsToSegments;
         using Base::cumulative_times_;
+        using Base::initializeFromTimePoints;
+        using Base::initializeFromTimeSegments;
         using Base::is_initialized_;
         using Base::num_segments_;
         using Base::start_time_;
@@ -1600,46 +1579,23 @@ namespace SplineTrajectory
         QuinticSplineND(const std::vector<double> &t_points,
                         const MatrixType &spatial_points,
                         const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_(boundary)
         {
-            convertTimePointsToSegments(t_points);
-            updateSplineInternal();
+            initializeFromTimePoints(t_points, spatial_points, boundary);
         }
 
         QuinticSplineND(const std::vector<double> &time_segments,
                         const MatrixType &spatial_points,
                         double start_time,
                         const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_(boundary)
         {
-            time_segments_ = time_segments;
-            start_time_ = start_time;
-            updateSplineInternal();
-        }
-
-        QuinticSplineND(const std::vector<double> &t_points,
-                        const SplineVector<VectorType> &spatial_points,
-                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : QuinticSplineND(t_points, Base::splinePointsToMatrix(spatial_points), boundary)
-        {
-        }
-
-        QuinticSplineND(const std::vector<double> &time_segments,
-                        const SplineVector<VectorType> &spatial_points,
-                        double start_time,
-                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : QuinticSplineND(time_segments, Base::splinePointsToMatrix(spatial_points), start_time, boundary)
-        {
+            initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary);
         }
 
         void update(const std::vector<double> &t_points,
                     const MatrixType &spatial_points,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            spatial_points_ = spatial_points;
-            boundary_ = boundary;
-            convertTimePointsToSegments(t_points);
-            updateSplineInternal();
+            initializeFromTimePoints(t_points, spatial_points, boundary);
         }
 
         void update(const std::vector<double> &time_segments,
@@ -1647,26 +1603,7 @@ namespace SplineTrajectory
                     double start_time,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            time_segments_ = time_segments;
-            spatial_points_ = spatial_points;
-            boundary_ = boundary;
-            start_time_ = start_time;
-            updateSplineInternal();
-        }
-
-        void update(const std::vector<double> &t_points,
-                    const SplineVector<VectorType> &spatial_points,
-                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-        {
-            update(t_points, Base::splinePointsToMatrix(spatial_points), boundary);
-        }
-
-        void update(const std::vector<double> &time_segments,
-                    const SplineVector<VectorType> &spatial_points,
-                    double start_time,
-                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-        {
-            update(time_segments, Base::splinePointsToMatrix(spatial_points), start_time, boundary);
+            initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary);
         }
 
         size_t getNumPoints() const
@@ -1939,6 +1876,13 @@ namespace SplineTrajectory
         }
 
     private:
+        void setSplineData(const MatrixType &spatial_points,
+                           const BoundaryConditions<DIM> &boundary)
+        {
+            spatial_points_ = spatial_points;
+            boundary_ = boundary;
+        }
+
         void propagateGradInternal(const MatrixType &partialGradByCoeffs,
                                    const Eigen::VectorXd &partialGradByTimes,
                                    MatrixType &innerPointsGrad,
@@ -2468,8 +2412,9 @@ namespace SplineTrajectory
         friend class SplineBase<SepticSplineND<DIM>, DIM, 7>;
 
         using Base::coeffs_;
-        using Base::convertTimePointsToSegments;
         using Base::cumulative_times_;
+        using Base::initializeFromTimePoints;
+        using Base::initializeFromTimeSegments;
         using Base::is_initialized_;
         using Base::num_segments_;
         using Base::start_time_;
@@ -2507,46 +2452,23 @@ namespace SplineTrajectory
         SepticSplineND(const std::vector<double> &t_points,
                        const MatrixType &spatial_points,
                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_(boundary)
         {
-            convertTimePointsToSegments(t_points);
-            updateSplineInternal();
+            initializeFromTimePoints(t_points, spatial_points, boundary);
         }
 
         SepticSplineND(const std::vector<double> &time_segments,
                        const MatrixType &spatial_points,
                        double start_time,
                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_(boundary)
         {
-            time_segments_ = time_segments;
-            start_time_ = start_time;
-            updateSplineInternal();
-        }
-
-        SepticSplineND(const std::vector<double> &t_points,
-                       const SplineVector<VectorType> &spatial_points,
-                       const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : SepticSplineND(t_points, Base::splinePointsToMatrix(spatial_points), boundary)
-        {
-        }
-
-        SepticSplineND(const std::vector<double> &time_segments,
-                       const SplineVector<VectorType> &spatial_points,
-                       double start_time,
-                       const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-            : SepticSplineND(time_segments, Base::splinePointsToMatrix(spatial_points), start_time, boundary)
-        {
+            initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary);
         }
 
         void update(const std::vector<double> &t_points,
                     const MatrixType &spatial_points,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            spatial_points_ = spatial_points;
-            boundary_ = boundary;
-            convertTimePointsToSegments(t_points);
-            updateSplineInternal();
+            initializeFromTimePoints(t_points, spatial_points, boundary);
         }
 
         void update(const std::vector<double> &time_segments,
@@ -2554,26 +2476,7 @@ namespace SplineTrajectory
                     double start_time,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            time_segments_ = time_segments;
-            spatial_points_ = spatial_points;
-            boundary_ = boundary;
-            start_time_ = start_time;
-            updateSplineInternal();
-        }
-
-        void update(const std::vector<double> &t_points,
-                    const SplineVector<VectorType> &spatial_points,
-                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-        {
-            update(t_points, Base::splinePointsToMatrix(spatial_points), boundary);
-        }
-
-        void update(const std::vector<double> &time_segments,
-                    const SplineVector<VectorType> &spatial_points,
-                    double start_time,
-                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-        {
-            update(time_segments, Base::splinePointsToMatrix(spatial_points), start_time, boundary);
+            initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary);
         }
 
         size_t getNumPoints() const
@@ -2878,6 +2781,13 @@ namespace SplineTrajectory
         }
 
     private:
+        void setSplineData(const MatrixType &spatial_points,
+                           const BoundaryConditions<DIM> &boundary)
+        {
+            spatial_points_ = spatial_points;
+            boundary_ = boundary;
+        }
+
         void propagateGradInternal(const MatrixType &partialGradByCoeffs,
                                    const Eigen::VectorXd &partialGradByTimes,
                                    MatrixType &innerPointsGrad,

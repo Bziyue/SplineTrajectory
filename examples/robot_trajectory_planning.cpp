@@ -17,33 +17,14 @@ int main() {
     
     std::cout << "=== 6-DOF Robot Arm Trajectory Planning ===" << std::endl;
     
-    // Define joint space waypoints (6 joints in radians)
-    SplineVector<SplinePoint6d> joint_waypoints;
-    
-    // Home position
-    SplinePoint6d home_pos;
-    home_pos << 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
-    joint_waypoints.push_back(home_pos);
-    
-    // Intermediate 1
-    SplinePoint6d intermediate1;
-    intermediate1 << M_PI/4, M_PI/6, -M_PI/3, 0.0, M_PI/4, 0.0;
-    joint_waypoints.push_back(intermediate1);
-    
-    // Target position
-    SplinePoint6d target_pos;
-    target_pos << M_PI/2, M_PI/3, -M_PI/2, M_PI/4, M_PI/2, M_PI/6;
-    joint_waypoints.push_back(target_pos);
-    
-    // Intermediate 2
-    SplinePoint6d intermediate2;
-    intermediate2 << M_PI/3, M_PI/4, -M_PI/4, M_PI/6, M_PI/3, M_PI/4;
-    joint_waypoints.push_back(intermediate2);
-    
-    // Return home
-    SplinePoint6d return_home;
-    return_home << 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
-    joint_waypoints.push_back(return_home);
+    // Define joint space waypoints (6 joints in radians, row = one waypoint)
+    QuinticSpline6D::MatrixType joint_waypoints(5, 6);
+    joint_waypoints <<
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        M_PI / 4, M_PI / 6, -M_PI / 3, 0.0, M_PI / 4, 0.0,
+        M_PI / 2, M_PI / 3, -M_PI / 2, M_PI / 4, M_PI / 2, M_PI / 6,
+        M_PI / 3, M_PI / 4, -M_PI / 4, M_PI / 6, M_PI / 3, M_PI / 4,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
     
     // Define time points with varying speeds
     std::vector<double> time_points = {0.0, 2.0, 4.0, 6.0, 8.0};

@@ -16,6 +16,7 @@
 
 using namespace std;
 using namespace std::chrono;
+using PointsMatrix3D = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
 
 struct BenchmarkStats
 {
@@ -98,7 +99,7 @@ void printTimeStats(const string &name, const BenchmarkStats &stats)
 
 void generateRandomData(int N,
                         std::vector<double> &times,
-                        SplineTrajectory::SplineVector3D &all_points,
+                        PointsMatrix3D &all_points,
                         Eigen::Matrix3Xd &inner_points_mat,
                         Eigen::MatrixXd &inner_points_ref_format) // 3x(N-1)
 {
@@ -108,7 +109,7 @@ void generateRandomData(int N,
     std::uniform_real_distribution<> dis_p(-10.0, 10.0);
 
     times.resize(N);
-    all_points.resize(N + 1);
+    all_points.resize(N + 1, 3);
     inner_points_mat.resize(3, N - 1);
     
     for (int i = 0; i < N; ++i)
@@ -116,10 +117,10 @@ void generateRandomData(int N,
 
     for (int i = 0; i <= N; ++i)
     {
-        all_points[i] = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen));
+        all_points.row(i) = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen)).transpose();
         if (i > 0 && i < N)
         {
-            inner_points_mat.col(i - 1) = all_points[i];
+            inner_points_mat.col(i - 1) = all_points.row(i).transpose();
         }
     }
     inner_points_ref_format = inner_points_mat;
@@ -139,13 +140,13 @@ void testCubic(int N, int BENCH_ITERS)
         cout << "Testing SplineTrajectory only for N=1..." << endl;
         
         std::vector<double> times(N);
-        SplineTrajectory::SplineVector3D all_points(N + 1);
+        PointsMatrix3D all_points(N + 1, 3);
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<> dis_t(0.5, 2.0);
         std::uniform_real_distribution<> dis_p(-10.0, 10.0);
         for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
-        for (int i = 0; i <= N; ++i) all_points[i] = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen));
+        for (int i = 0; i <= N; ++i) all_points.row(i) = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen)).transpose();
         
         SplineTrajectory::BoundaryConditions<3> bc;
         SplineTrajectory::CubicSpline3D cubic_spline;
@@ -209,15 +210,15 @@ void testCubic(int N, int BENCH_ITERS)
     }
 
     std::vector<double> times;
-    SplineTrajectory::SplineVector3D all_points;
+    PointsMatrix3D all_points;
     Eigen::Matrix3Xd inner_points;
     Eigen::MatrixXd inner_points_ref; // Not used for min_jerk/snap here, but for MINCO
     generateRandomData(N, times, all_points, inner_points, inner_points_ref);
 
     // Initial Conditions
     Eigen::Matrix<double, 3, 2> headPV, tailPV;
-    headPV.col(0) = all_points[0]; headPV.col(1) = Eigen::Vector3d::Zero();
-    tailPV.col(0) = all_points.back(); tailPV.col(1) = Eigen::Vector3d::Zero();
+    headPV.col(0) = all_points.row(0).transpose(); headPV.col(1) = Eigen::Vector3d::Zero();
+    tailPV.col(0) = all_points.row(all_points.rows() - 1).transpose(); tailPV.col(1) = Eigen::Vector3d::Zero();
 
     // Setup objects
     minco::MINCO_S2NU minco_s2;
@@ -381,13 +382,13 @@ void testQuintic(int N, int BENCH_ITERS)
         cout << "Testing SplineTrajectory only for N=1..." << endl;
         
         std::vector<double> times(N);
-        SplineTrajectory::SplineVector3D all_points(N + 1);
+        PointsMatrix3D all_points(N + 1, 3);
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<> dis_t(0.5, 2.0);
         std::uniform_real_distribution<> dis_p(-10.0, 10.0);
         for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
-        for (int i = 0; i <= N; ++i) all_points[i] = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen));
+        for (int i = 0; i <= N; ++i) all_points.row(i) = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen)).transpose();
         
         SplineTrajectory::BoundaryConditions<3> bc;
         SplineTrajectory::QuinticSpline3D quintic_spline;
@@ -455,15 +456,15 @@ void testQuintic(int N, int BENCH_ITERS)
     }
 
     std::vector<double> times;
-    SplineTrajectory::SplineVector3D all_points;
+    PointsMatrix3D all_points;
     Eigen::Matrix3Xd inner_points;
     Eigen::MatrixXd inner_points_ref; 
     generateRandomData(N, times, all_points, inner_points, inner_points_ref);
 
     // Initial Conditions
     Eigen::Matrix3d headPVA, tailPVA;
-    headPVA.col(0) = all_points[0]; headPVA.col(1).setZero(); headPVA.col(2).setZero();
-    tailPVA.col(0) = all_points.back(); tailPVA.col(1).setZero(); tailPVA.col(2).setZero();
+    headPVA.col(0) = all_points.row(0).transpose(); headPVA.col(1).setZero(); headPVA.col(2).setZero();
+    tailPVA.col(0) = all_points.row(all_points.rows() - 1).transpose(); tailPVA.col(1).setZero(); tailPVA.col(2).setZero();
 
     // Setup objects
     minco::MINCO_S3NU minco_s3;
@@ -645,13 +646,13 @@ void testSeptic(int N, int BENCH_ITERS)
         cout << "Testing SplineTrajectory only for N=1..." << endl;
         
         std::vector<double> times(N);
-        SplineTrajectory::SplineVector3D all_points(N + 1);
+        PointsMatrix3D all_points(N + 1, 3);
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<> dis_t(0.5, 2.0);
         std::uniform_real_distribution<> dis_p(-10.0, 10.0);
         for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
-        for (int i = 0; i <= N; ++i) all_points[i] = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen));
+        for (int i = 0; i <= N; ++i) all_points.row(i) = Eigen::Vector3d(dis_p(gen), dis_p(gen), dis_p(gen)).transpose();
         
         SplineTrajectory::BoundaryConditions<3> bc;
         SplineTrajectory::SepticSpline3D septic_spline;
@@ -723,15 +724,15 @@ void testSeptic(int N, int BENCH_ITERS)
     }
 
     std::vector<double> times;
-    SplineTrajectory::SplineVector3D all_points;
+    PointsMatrix3D all_points;
     Eigen::Matrix3Xd inner_points;
     Eigen::MatrixXd inner_points_ref; 
     generateRandomData(N, times, all_points, inner_points, inner_points_ref);
 
     // Initial Conditions
     Eigen::Matrix<double, 3, 4> headPVAJ, tailPVAJ;
-    headPVAJ.col(0) = all_points[0]; headPVAJ.block<3,3>(0,1).setZero();
-    tailPVAJ.col(0) = all_points.back(); tailPVAJ.block<3,3>(0,1).setZero();
+    headPVAJ.col(0) = all_points.row(0).transpose(); headPVAJ.block<3,3>(0,1).setZero();
+    tailPVAJ.col(0) = all_points.row(all_points.rows() - 1).transpose(); tailPVAJ.block<3,3>(0,1).setZero();
 
     // Setup objects
     minco::MINCO_S4NU minco_s4;

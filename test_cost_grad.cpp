@@ -56,12 +56,11 @@ void test_cubic() {
     std::vector<double> T(n_seg);
     T[0] = 0.8; T[1] = 1.1; T[2] = 0.9; T[3] = 1.3;
 
-    SplineTrajectory::SplineVector<Vec> P;
-    P.resize(n_pts);
+    Mat P(n_pts, DIM);
     for (int i = 0; i < n_pts; ++i) {
         Vec v; v.setZero();
         for (int d = 0; d < DIM; ++d) v(d) = 0.2 * (i + 1) + 0.1 * (d + 1) * (i % 2 ? -1.0 : 1.0);
-        P[i] = v;
+        P.row(i) = v.transpose();
     }
 
     SplineTrajectory::BoundaryConditions<DIM> bc;
@@ -84,7 +83,7 @@ void test_cubic() {
 
     // ---- numeric checks ----
     auto eval_loss = [&](const std::vector<double>& TT,
-                         const SplineTrajectory::SplineVector<Vec>& PP,
+                         const Mat& PP,
                          const SplineTrajectory::BoundaryConditions<DIM>& bcc) {
         Spline tmp(TT, PP, 0.0, bcc);
         return loss_from_spline(tmp, alpha_time);
@@ -97,8 +96,8 @@ void test_cubic() {
     for (int k = 1; k <= n_pts - 2; ++k) {
         for (int d = 0; d < DIM; ++d) {
             auto Pp = P, Pm = P;
-            Pp[k](d) += eps;
-            Pm[k](d) -= eps;
+            Pp(k, d) += eps;
+            Pm(k, d) -= eps;
             double fp = eval_loss(T, Pp, bc);
             double fm = eval_loss(T, Pm, bc);
             double num = (fp - fm) / (2.0 * eps);
@@ -167,12 +166,11 @@ void test_quintic() {
     std::vector<double> T(n_seg);
     T[0] = 0.8; T[1] = 1.1; T[2] = 0.9; T[3] = 1.3;
 
-    SplineTrajectory::SplineVector<Vec> Pvec;
-    Pvec.resize(n_pts);
+    Mat Pvec(n_pts, DIM);
     for (int i = 0; i < n_pts; ++i) {
         Vec v; v.setZero();
         for (int d = 0; d < DIM; ++d) v(d) = 0.25 * (i + 1) + 0.07 * (d + 1) * (i % 2 ? -1.0 : 1.0);
-        Pvec[i] = v;
+        Pvec.row(i) = v.transpose();
     }
 
     SplineTrajectory::BoundaryConditions<DIM> bc;
@@ -190,7 +188,7 @@ void test_quintic() {
     auto g = sp.propagateGrad(dLdC, dLdT);
 
     auto eval_loss = [&](const std::vector<double>& TT,
-                         const SplineTrajectory::SplineVector<Vec>& PP,
+                         const Mat& PP,
                          const SplineTrajectory::BoundaryConditions<DIM>& bcc) {
         Spline tmp(TT, PP, 0.0, bcc);
         return loss_from_spline(tmp, alpha_time);
@@ -202,8 +200,8 @@ void test_quintic() {
     for (int k = 1; k <= n_pts - 2; ++k) {
         for (int d = 0; d < DIM; ++d) {
             auto Pp = Pvec, Pm = Pvec;
-            Pp[k](d) += eps;
-            Pm[k](d) -= eps;
+            Pp(k, d) += eps;
+            Pm(k, d) -= eps;
             double fp = eval_loss(T, Pp, bc);
             double fm = eval_loss(T, Pm, bc);
             double num = (fp - fm) / (2.0 * eps);
@@ -267,6 +265,7 @@ template <int DIM>
 void test_septic() {
     using Spline = SplineTrajectory::SepticSplineND<DIM>;
     using Vec = typename Spline::VectorType;
+    using Mat = typename Spline::MatrixType;
 
     cout << "\n=== SepticSplineND<" << DIM << "> gradient check ===\n";
 
@@ -279,12 +278,11 @@ void test_septic() {
     std::vector<double> T(n_seg);
     T[0] = 0.8; T[1] = 1.1; T[2] = 0.9; T[3] = 1.3;
 
-    SplineTrajectory::SplineVector<Vec> Pvec;
-    Pvec.resize(n_pts);
+    Mat Pvec(n_pts, DIM);
     for (int i = 0; i < n_pts; ++i) {
         Vec v; v.setZero();
         for (int d = 0; d < DIM; ++d) v(d) = 0.18 * (i + 1) + 0.09 * (d + 1) * (i % 2 ? -1.0 : 1.0);
-        Pvec[i] = v;
+        Pvec.row(i) = v.transpose();
     }
 
     SplineTrajectory::BoundaryConditions<DIM> bc;
@@ -304,7 +302,7 @@ void test_septic() {
     auto g = sp.propagateGrad(dLdC, dLdT);
 
     auto eval_loss = [&](const std::vector<double>& TT,
-                         const SplineTrajectory::SplineVector<Vec>& PP,
+                         const Mat& PP,
                          const SplineTrajectory::BoundaryConditions<DIM>& bcc) {
         Spline tmp(TT, PP, 0.0, bcc);
         return loss_from_spline(tmp, alpha_time);
@@ -316,8 +314,8 @@ void test_septic() {
     for (int k = 1; k <= n_pts - 2; ++k) {
         for (int d = 0; d < DIM; ++d) {
             auto Pp = Pvec, Pm = Pvec;
-            Pp[k](d) += eps;
-            Pm[k](d) -= eps;
+            Pp(k, d) += eps;
+            Pm(k, d) -= eps;
             double num = (eval_loss(T, Pp, bc) - eval_loss(T, Pm, bc)) / (2.0 * eps);
             double ana = g.inner_points.row(k - 1)(d);
             cout << "P[" << k << "]." << d

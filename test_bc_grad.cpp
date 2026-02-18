@@ -20,8 +20,9 @@ void testCubicGradients() {
     using SplineType = CubicSplineND<DIM>;
 
     std::vector<double> times = {1.0, 2.0, 1.5};
-    SplineVector<Eigen::Matrix<double, DIM, 1>> points;
-    for(size_t i=0; i<=times.size(); ++i) points.push_back(Eigen::Matrix<double, DIM, 1>::Random());
+    SplineType::MatrixType points(static_cast<int>(times.size()) + 1, DIM);
+    for (int i = 0; i <= static_cast<int>(times.size()); ++i)
+        points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
     BoundaryConditions<DIM> bc;
     bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
@@ -76,12 +77,12 @@ void testCubicGradients() {
     // Test position gradients (start and end points)
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("Start Pos [" + std::to_string(d) + "]",
-                         grads.start.p(d), bc_grads.start.p(d), points[0](d));
+                         grads.start.p(d), bc_grads.start.p(d), points(0, d));
     }
 
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("End Pos [" + std::to_string(d) + "]",
-                         grads.end.p(d), bc_grads.end.p(d), points[points.size()-1](d));
+                         grads.end.p(d), bc_grads.end.p(d), points(points.rows() - 1, d));
     }
 
     // Test velocity gradients
@@ -132,9 +133,9 @@ void testQuinticGradients() {
 
     std::vector<double> times = {1.0, 1.5, 0.8};
 
-    SplineVector<Eigen::Matrix<double, DIM, 1>> points;
-
-    for(size_t i=0; i<=times.size(); ++i) points.push_back(Eigen::Matrix<double, DIM, 1>::Random());
+    SplineType::MatrixType points(static_cast<int>(times.size()) + 1, DIM);
+    for (int i = 0; i <= static_cast<int>(times.size()); ++i)
+        points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
     BoundaryConditions<DIM> bc;
     bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
@@ -190,12 +191,12 @@ void testQuinticGradients() {
     // Test position gradients
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("Start Pos [" + std::to_string(d) + "]",
-                         grads.start.p(d), bc_grads.start.p(d), points[0](d));
+                         grads.start.p(d), bc_grads.start.p(d), points(0, d));
     }
 
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("End Pos [" + std::to_string(d) + "]",
-                         grads.end.p(d), bc_grads.end.p(d), points[points.size()-1](d));
+                         grads.end.p(d), bc_grads.end.p(d), points(points.rows() - 1, d));
     }
 
     // Test velocity gradients
@@ -258,9 +259,9 @@ void testSepticGradients() {
     
     std::vector<double> times = {2.0, 1.0}; 
     
-    SplineVector<Eigen::Matrix<double, DIM, 1>> points;
-    
-    for(size_t i=0; i<=times.size(); ++i) points.push_back(Eigen::Matrix<double, DIM, 1>::Random());
+    SplineType::MatrixType points(static_cast<int>(times.size()) + 1, DIM);
+    for (int i = 0; i <= static_cast<int>(times.size()); ++i)
+        points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
     BoundaryConditions<DIM> bc;
     bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
@@ -315,12 +316,12 @@ void testSepticGradients() {
     // Test position gradients
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("Start Pos [" + std::to_string(d) + "]",
-                         grads.start.p(d), bc_grads.start.p(d), points[0](d));
+                         grads.start.p(d), bc_grads.start.p(d), points(0, d));
     }
 
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("End Pos [" + std::to_string(d) + "]",
-                         grads.end.p(d), bc_grads.end.p(d), points[points.size()-1](d));
+                         grads.end.p(d), bc_grads.end.p(d), points(points.rows() - 1, d));
     }
 
     // Test velocity, acceleration, and jerk gradients
