@@ -126,6 +126,205 @@ namespace SplineTrajectory
         BoundaryStateType end;
     };
 
+    namespace detail
+    {
+        template <int BLOCK_SIZE, int DIM>
+        struct BlockOps
+        {
+            using BlockMatrix = Eigen::Matrix<double, BLOCK_SIZE, BLOCK_SIZE>;
+
+            template <typename StorageType>
+            static inline void setBlock(StorageType &storage, int block_idx, const BlockMatrix &M)
+            {
+                for (int r = 0; r < BLOCK_SIZE; ++r)
+                {
+                    for (int c = 0; c < BLOCK_SIZE; ++c)
+                    {
+                        storage(block_idx, r * BLOCK_SIZE + c) = M(r, c);
+                    }
+                }
+            }
+
+            template <typename StorageA, typename StorageB>
+            static inline void multiplyBlock(const StorageA &A_storage, int idx_a,
+                                             const StorageB &B_storage, int idx_b,
+                                             BlockMatrix &C_out) noexcept
+            {
+                for (int r = 0; r < BLOCK_SIZE; ++r)
+                {
+                    for (int c = 0; c < BLOCK_SIZE; ++c)
+                    {
+                        double acc = 0.0;
+                        for (int k = 0; k < BLOCK_SIZE; ++k)
+                        {
+                            acc += A_storage(idx_a, r * BLOCK_SIZE + k) * B_storage(idx_b, k * BLOCK_SIZE + c);
+                        }
+                        C_out(r, c) = acc;
+                    }
+                }
+            }
+
+            static inline void inverse(const BlockMatrix &A, BlockMatrix &A_inv_out)
+            {
+                if constexpr (BLOCK_SIZE == 2)
+                {
+                    const double a = A(0, 0), b = A(0, 1), c = A(1, 0), d = A(1, 1);
+                    const double det = a * d - b * c;
+                    const double inv_det = 1.0 / det;
+                    A_inv_out(0, 0) = d * inv_det;
+                    A_inv_out(0, 1) = -b * inv_det;
+                    A_inv_out(1, 0) = -c * inv_det;
+                    A_inv_out(1, 1) = a * inv_det;
+                }
+                else if constexpr (BLOCK_SIZE == 3)
+                {
+                    const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
+                    const double a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
+                    const double a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
+
+                    const double c00 = a11 * a22 - a12 * a21;
+                    const double c01 = -(a10 * a22 - a12 * a20);
+                    const double c02 = a10 * a21 - a11 * a20;
+                    const double c10 = -(a01 * a22 - a02 * a21);
+                    const double c11 = a00 * a22 - a02 * a20;
+                    const double c12 = -(a00 * a21 - a01 * a20);
+                    const double c20 = a01 * a12 - a02 * a11;
+                    const double c21 = -(a00 * a12 - a02 * a10);
+                    const double c22 = a00 * a11 - a01 * a10;
+
+                    const double det = a00 * c00 + a01 * c01 + a02 * c02;
+                    const double inv_det = 1.0 / det;
+
+                    A_inv_out(0, 0) = c00 * inv_det;
+                    A_inv_out(0, 1) = c10 * inv_det;
+                    A_inv_out(0, 2) = c20 * inv_det;
+                    A_inv_out(1, 0) = c01 * inv_det;
+                    A_inv_out(1, 1) = c11 * inv_det;
+                    A_inv_out(1, 2) = c21 * inv_det;
+                    A_inv_out(2, 0) = c02 * inv_det;
+                    A_inv_out(2, 1) = c12 * inv_det;
+                    A_inv_out(2, 2) = c22 * inv_det;
+                }
+                else
+                {
+                    A_inv_out = A.inverse();
+                }
+            }
+
+            template <typename StorageType, typename BlockIn, typename BlockOut>
+            static inline void multiplyBlockNxD(const StorageType &A_storage, int idx,
+                                                const BlockIn &B, BlockOut &&C_out) noexcept
+            {
+                std::array<double, BLOCK_SIZE> in_col{};
+                std::array<double, BLOCK_SIZE> out_col{};
+                for (int j = 0; j < DIM; ++j)
+                {
+                    for (int k = 0; k < BLOCK_SIZE; ++k)
+                    {
+                        in_col[k] = B(k, j);
+                    }
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        double acc = 0.0;
+                        for (int k = 0; k < BLOCK_SIZE; ++k)
+                        {
+                            acc += A_storage(idx, r * BLOCK_SIZE + k) * in_col[k];
+                        }
+                        out_col[r] = acc;
+                    }
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        C_out(r, j) = out_col[r];
+                    }
+                }
+            }
+
+            template <typename StorageType, typename BlockIn, typename BlockOut>
+            static inline void multiplyBlockTransposeNxD(const StorageType &A_storage, int idx,
+                                                         const BlockIn &B, BlockOut &&C_out) noexcept
+            {
+                std::array<double, BLOCK_SIZE> in_col{};
+                std::array<double, BLOCK_SIZE> out_col{};
+                for (int j = 0; j < DIM; ++j)
+                {
+                    for (int k = 0; k < BLOCK_SIZE; ++k)
+                    {
+                        in_col[k] = B(k, j);
+                    }
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        double acc = 0.0;
+                        for (int k = 0; k < BLOCK_SIZE; ++k)
+                        {
+                            acc += A_storage(idx, k * BLOCK_SIZE + r) * in_col[k];
+                        }
+                        out_col[r] = acc;
+                    }
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        C_out(r, j) = out_col[r];
+                    }
+                }
+            }
+
+            template <typename StorageType, typename BlockIn, typename BlockOut>
+            static inline void subMultiplyBlockNxD(const StorageType &A_storage, int idx,
+                                                   const BlockIn &B, BlockOut &&C_out) noexcept
+            {
+                std::array<double, BLOCK_SIZE> in_col{};
+                std::array<double, BLOCK_SIZE> out_col{};
+                for (int j = 0; j < DIM; ++j)
+                {
+                    for (int k = 0; k < BLOCK_SIZE; ++k)
+                    {
+                        in_col[k] = B(k, j);
+                    }
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        double acc = 0.0;
+                        for (int k = 0; k < BLOCK_SIZE; ++k)
+                        {
+                            acc += A_storage(idx, r * BLOCK_SIZE + k) * in_col[k];
+                        }
+                        out_col[r] = acc;
+                    }
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        C_out(r, j) -= out_col[r];
+                    }
+                }
+            }
+
+            template <typename StorageType, typename BlockIn, typename BlockOut>
+            static inline void subMultiplyBlockTransposeNxD(const StorageType &A_storage, int idx,
+                                                            const BlockIn &B, BlockOut &&C_out) noexcept
+            {
+                std::array<double, BLOCK_SIZE> in_col{};
+                std::array<double, BLOCK_SIZE> out_col{};
+                for (int j = 0; j < DIM; ++j)
+                {
+                    for (int k = 0; k < BLOCK_SIZE; ++k)
+                    {
+                        in_col[k] = B(k, j);
+                    }
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        double acc = 0.0;
+                        for (int k = 0; k < BLOCK_SIZE; ++k)
+                        {
+                            acc += A_storage(idx, k * BLOCK_SIZE + r) * in_col[k];
+                        }
+                        out_col[r] = acc;
+                    }
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        C_out(r, j) -= out_col[r];
+                    }
+                }
+            }
+        };
+    } // namespace detail
+
     template <int DIM, int ORDER = Eigen::Dynamic>
     class PPolyND
     {
@@ -930,6 +1129,7 @@ namespace SplineTrajectory
 
         bool isInitialized() const { return is_initialized_; }
         int getDimension() const { return DIM; }
+        size_t getNumPoints() const { return static_cast<size_t>(derived().getSpacePoints().rows()); }
         double getStartTime() const { return start_time_; }
         double getEndTime() const { return cumulative_times_.back(); }
         double getDuration() const { return cumulative_times_.back() - start_time_; }
@@ -957,6 +1157,21 @@ namespace SplineTrajectory
             propagateGradFramework(partialGradByCoeffs, partialGradByTimes, grads);
             return grads;
         }
+
+        MatrixType getEnergyPartialGradByCoeffs() const
+        {
+            MatrixType gdC;
+            derived().getEnergyPartialGradByCoeffs(gdC);
+            return gdC;
+        }
+
+        Eigen::VectorXd getEnergyPartialGradByTimes() const
+        {
+            Eigen::VectorXd gdT;
+            derived().getEnergyPartialGradByTimes(gdT);
+            return gdT;
+        }
+
     };
 
     template <int DIM>
@@ -1037,24 +1252,11 @@ namespace SplineTrajectory
             initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary_velocities);
         }
 
-        size_t getNumPoints() const
-        {
-            return static_cast<size_t>(spatial_points_.rows());
-        }
-
         const MatrixType &getSpacePoints() const { return spatial_points_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_velocities_; }
-
-        static inline void computeBasisFunctions(double t,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
-        {
-            Base::computeBasisFunctions(t, b_pos, b_vel, b_acc, b_jerk, b_snap, b_crackle);
-        }
+        using Base::computeBasisFunctions;
+        using Base::getEnergyPartialGradByCoeffs;
+        using Base::getEnergyPartialGradByTimes;
 
         double getEnergy() const
         {
@@ -1108,13 +1310,6 @@ namespace SplineTrajectory
             }
         }
 
-        MatrixType getEnergyPartialGradByCoeffs() const
-        {
-            MatrixType gdC;
-            getEnergyPartialGradByCoeffs(gdC);
-            return gdC;
-        }
-
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
          *
@@ -1137,13 +1332,6 @@ namespace SplineTrajectory
 
                 gdT(i) = acc_end.squaredNorm();
             }
-        }
-
-        Eigen::VectorXd getEnergyPartialGradByTimes() const
-        {
-            Eigen::VectorXd gdT;
-            getEnergyPartialGradByTimes(gdT);
-            return gdT;
         }
 
         /**
@@ -1224,52 +1412,22 @@ namespace SplineTrajectory
             return res;
         }
 
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
-         *
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity)
-         */
         Gradients getEnergyGrad() const
         {
             return this->template getEnergyGradFramework<Gradients>();
         }
 
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
-         *
-         * @param grads Output gradients structure to populate
-         */
         void getEnergyGrad(Gradients &grads) const
         {
             this->template fillEnergyGradFramework<Gradients>(grads);
         }
 
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity)
-         */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
             return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
         }
 
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param grads               Output gradients structure to populate
-         */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
@@ -1556,6 +1714,7 @@ namespace SplineTrajectory
         BoundaryConditions<DIM> boundary_;
 
         using BlockMatrix2x2Storage = Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor>;
+        using BlockOps2 = detail::BlockOps<2, DIM>;
         BlockMatrix2x2Storage D_inv_cache_;
         BlockMatrix2x2Storage U_blocks_cache_;
         BlockMatrix2x2Storage L_blocks_cache_;
@@ -1606,24 +1765,11 @@ namespace SplineTrajectory
             initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary);
         }
 
-        size_t getNumPoints() const
-        {
-            return static_cast<size_t>(spatial_points_.rows());
-        }
-
         const MatrixType &getSpacePoints() const { return spatial_points_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
-
-        static inline void computeBasisFunctions(double t,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
-        {
-            Base::computeBasisFunctions(t, b_pos, b_vel, b_acc, b_jerk, b_snap, b_crackle);
-        }
+        using Base::computeBasisFunctions;
+        using Base::getEnergyPartialGradByCoeffs;
+        using Base::getEnergyPartialGradByTimes;
 
         double getEnergy() const
         {
@@ -1696,13 +1842,6 @@ namespace SplineTrajectory
             }
         }
 
-        MatrixType getEnergyPartialGradByCoeffs() const
-        {
-            MatrixType gdC;
-            getEnergyPartialGradByCoeffs(gdC);
-            return gdC;
-        }
-
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
          *
@@ -1726,13 +1865,6 @@ namespace SplineTrajectory
 
                 gdT(i) = jerk_end.squaredNorm();
             }
-        }
-
-        Eigen::VectorXd getEnergyPartialGradByTimes() const
-        {
-            Eigen::VectorXd gdT;
-            getEnergyPartialGradByTimes(gdT);
-            return gdT;
         }
 
         /**
@@ -1822,52 +1954,22 @@ namespace SplineTrajectory
             return res;
         }
 
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
-         *
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
-         */
         Gradients getEnergyGrad() const
         {
             return this->template getEnergyGradFramework<Gradients>();
         }
 
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
-         *
-         * @param grads Output gradients structure to populate
-         */
         void getEnergyGrad(Gradients &grads) const
         {
             this->template fillEnergyGradFramework<Gradients>(grads);
         }
 
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
-         */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
             return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
         }
 
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param grads               Output gradients structure to populate
-         */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
@@ -2014,23 +2116,23 @@ namespace SplineTrajectory
                     ws_lambda_.row(2 * i + 1) = ws_gd_internal_.row(i + 1).segment(DIM, DIM);
                 }
 
-                multiplyStoredBlock2x2T_2xN(D_inv_cache_, 0,
+                BlockOps2::multiplyBlockTransposeNxD(D_inv_cache_, 0,
                                             ws_lambda_.template middleRows<2>(0),
                                             ws_lambda_.template middleRows<2>(0));
 
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    subMultiplyStoredBlock2x2T_2xN(U_blocks_cache_, i,
+                    BlockOps2::subMultiplyBlockTransposeNxD(U_blocks_cache_, i,
                                                    ws_lambda_.template middleRows<2>(2 * i),
                                                    ws_lambda_.template middleRows<2>(2 * (i + 1)));
-                    multiplyStoredBlock2x2T_2xN(D_inv_cache_, i + 1,
+                    BlockOps2::multiplyBlockTransposeNxD(D_inv_cache_, i + 1,
                                                 ws_lambda_.template middleRows<2>(2 * (i + 1)),
                                                 ws_lambda_.template middleRows<2>(2 * (i + 1)));
                 }
 
                 for (int i = num_blocks - 2; i >= 0; --i)
                 {
-                    subMultiplyStoredBlock2x2_2xN(D_inv_T_mul_L_next_T_cache_, i,
+                    BlockOps2::subMultiplyBlockNxD(D_inv_T_mul_L_next_T_cache_, i,
                                                   ws_lambda_.template middleRows<2>(2 * (i + 1)),
                                                   ws_lambda_.template middleRows<2>(2 * i));
                 }
@@ -2116,13 +2218,13 @@ namespace SplineTrajectory
                 }
 
                 Eigen::Matrix<double, 2, DIM> correction_start;
-                multiplyStoredBlock2x2T_2xN(L_blocks_cache_, 0,
+                BlockOps2::multiplyBlockTransposeNxD(L_blocks_cache_, 0,
                                             ws_lambda_.template middleRows<2>(0),
                                             correction_start);
                 raw_start_grad -= correction_start;
 
                 Eigen::Matrix<double, 2, DIM> correction_end;
-                multiplyStoredBlock2x2T_2xN(U_blocks_cache_, num_blocks - 1,
+                BlockOps2::multiplyBlockTransposeNxD(U_blocks_cache_, num_blocks - 1,
                                             ws_lambda_.template middleRows<2>(2 * (num_blocks - 1)),
                                             correction_end);
                 raw_end_grad -= correction_end;
@@ -2137,100 +2239,6 @@ namespace SplineTrajectory
         void precomputePointDiffs()
         {
             Base::precomputePointDiffsFromSpatialPoints(spatial_points_, point_diffs_);
-        }
-
-        static inline void Inverse2x2(const Eigen::Matrix2d &A, Eigen::Matrix2d &A_inv_out)
-        {
-            const double a = A(0, 0), b = A(0, 1), c = A(1, 0), d = A(1, 1);
-            const double det = a * d - b * c;
-            const double inv_det = 1.0 / det;
-
-            A_inv_out(0, 0) = d * inv_det;
-            A_inv_out(0, 1) = -b * inv_det;
-            A_inv_out(1, 0) = -c * inv_det;
-            A_inv_out(1, 1) = a * inv_det;
-        }
-
-        static inline void setBlock2x2(BlockMatrix2x2Storage &storage, int i, const Eigen::Matrix2d &M)
-        {
-            storage(i, 0) = M(0, 0);
-            storage(i, 1) = M(0, 1);
-            storage(i, 2) = M(1, 0);
-            storage(i, 3) = M(1, 1);
-        }
-
-        inline void MultiplyStoredBlock2x2(const BlockMatrix2x2Storage &A_storage, int idx_a,
-                                           const BlockMatrix2x2Storage &B_storage, int idx_b,
-                                           Eigen::Matrix2d &C_out) const noexcept
-        {
-            const double a00 = A_storage(idx_a, 0), a01 = A_storage(idx_a, 1);
-            const double a10 = A_storage(idx_a, 2), a11 = A_storage(idx_a, 3);
-            const double b00 = B_storage(idx_b, 0), b01 = B_storage(idx_b, 1);
-            const double b10 = B_storage(idx_b, 2), b11 = B_storage(idx_b, 3);
-            C_out(0, 0) = a00 * b00 + a01 * b10;
-            C_out(0, 1) = a00 * b01 + a01 * b11;
-            C_out(1, 0) = a10 * b00 + a11 * b10;
-            C_out(1, 1) = a10 * b01 + a11 * b11;
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void multiplyStoredBlock2x2_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                               const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) = a00 * b0j + a01 * b1j;
-                C_out(1, j) = a10 * b0j + a11 * b1j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void multiplyStoredBlock2x2T_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                                const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) = a00 * b0j + a10 * b1j;
-                C_out(1, j) = a01 * b0j + a11 * b1j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void subMultiplyStoredBlock2x2T_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                                   const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) -= a00 * b0j + a10 * b1j;
-                C_out(1, j) -= a01 * b0j + a11 * b1j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void subMultiplyStoredBlock2x2_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                                  const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) -= a00 * b0j + a01 * b1j;
-                C_out(1, j) -= a10 * b0j + a11 * b1j;
-            }
         }
 
         void solveInternalDerivatives(const MatrixType &P, MatrixType &p_out, MatrixType &q_out)
@@ -2279,12 +2287,12 @@ namespace SplineTrajectory
                 Eigen::Matrix2d L;
                 L << -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv,
                     -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv;
-                setBlock2x2(L_blocks_cache_, i, L);
+                BlockOps2::setBlock(L_blocks_cache_, i, L);
 
                 Eigen::Matrix2d U;
                 U << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
                     24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
-                setBlock2x2(U_blocks_cache_, i, U);
+                BlockOps2::setBlock(U_blocks_cache_, i, U);
 
                 if (i == 0)
                 {
@@ -2293,9 +2301,9 @@ namespace SplineTrajectory
                 else
                 {
                     Eigen::Matrix2d X;
-                    MultiplyStoredBlock2x2(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
+                    BlockOps2::multiplyBlock(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
                     Eigen::Matrix<double, 2, DIM> Y;
-                    multiplyStoredBlock2x2_2xN(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<2>(2 * (i - 1)), Y);
+                    BlockOps2::multiplyBlockNxD(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<2>(2 * (i - 1)), Y);
                     D.noalias() -= L * X;
                     rhs_block.noalias() -= L * Y;
                 }
@@ -2306,20 +2314,20 @@ namespace SplineTrajectory
                 }
 
                 Eigen::Matrix2d D_inv;
-                Inverse2x2(D, D_inv);
-                setBlock2x2(D_inv_cache_, i, D_inv);
+                BlockOps2::inverse(D, D_inv);
+                BlockOps2::setBlock(D_inv_cache_, i, D_inv);
 
                 if (i > 0)
                 {
                     Eigen::Matrix2d L_mul_D_prev_inv;
-                    MultiplyStoredBlock2x2(L_blocks_cache_, i, D_inv_cache_, i - 1, L_mul_D_prev_inv);
-                    setBlock2x2(D_inv_T_mul_L_next_T_cache_, i - 1, L_mul_D_prev_inv.transpose());
+                    BlockOps2::multiplyBlock(L_blocks_cache_, i, D_inv_cache_, i - 1, L_mul_D_prev_inv);
+                    BlockOps2::setBlock(D_inv_T_mul_L_next_T_cache_, i - 1, L_mul_D_prev_inv.transpose());
                 }
             }
 
             ws_solution_.resize(num_blocks * 2, DIM);
 
-            multiplyStoredBlock2x2_2xN(D_inv_cache_, num_blocks - 1,
+            BlockOps2::multiplyBlockNxD(D_inv_cache_, num_blocks - 1,
                                        ws_rhs_mod_.template middleRows<2>(2 * (num_blocks - 1)),
                                        ws_solution_.template middleRows<2>(2 * (num_blocks - 1)));
 
@@ -2338,7 +2346,7 @@ namespace SplineTrajectory
                     rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1);
                     rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1);
                 }
-                multiplyStoredBlock2x2_2xN(D_inv_cache_, i, rhs_temp, sol_block);
+                BlockOps2::multiplyBlockNxD(D_inv_cache_, i, rhs_temp, sol_block);
             }
 
             for (int i = 0; i < num_blocks; ++i)
@@ -2430,6 +2438,7 @@ namespace SplineTrajectory
         std::vector<TimePowers> time_powers_;
 
         using BlockMatrix3x3Storage = Eigen::Matrix<double, Eigen::Dynamic, 9, Eigen::RowMajor>;
+        using BlockOps3 = detail::BlockOps<3, DIM>;
         BlockMatrix3x3Storage D_inv_cache_;
         BlockMatrix3x3Storage U_blocks_cache_;
         BlockMatrix3x3Storage L_blocks_cache_;
@@ -2479,24 +2488,11 @@ namespace SplineTrajectory
             initializeFromTimeSegments(time_segments, spatial_points, start_time, boundary);
         }
 
-        size_t getNumPoints() const
-        {
-            return static_cast<size_t>(spatial_points_.rows());
-        }
-
         const MatrixType &getSpacePoints() const { return spatial_points_; }
         const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
-
-        static inline void computeBasisFunctions(double t,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
-        {
-            Base::computeBasisFunctions(t, b_pos, b_vel, b_acc, b_jerk, b_snap, b_crackle);
-        }
+        using Base::computeBasisFunctions;
+        using Base::getEnergyPartialGradByCoeffs;
+        using Base::getEnergyPartialGradByTimes;
 
         double getEnergy() const
         {
@@ -2588,13 +2584,6 @@ namespace SplineTrajectory
 
         }
 
-        MatrixType getEnergyPartialGradByCoeffs() const
-        {
-            MatrixType gdC;
-            getEnergyPartialGradByCoeffs(gdC);
-            return gdC;
-        }
-
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
          *
@@ -2619,13 +2608,6 @@ namespace SplineTrajectory
 
                 gdT(i) = snap_end.squaredNorm();
             }
-        }
-
-        Eigen::VectorXd getEnergyPartialGradByTimes() const
-        {
-            Eigen::VectorXd gdT;
-            getEnergyPartialGradByTimes(gdT);
-            return gdT;
         }
 
         /**
@@ -2727,52 +2709,22 @@ namespace SplineTrajectory
             return res;
         }
 
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
-         *
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
-         */
         Gradients getEnergyGrad() const
         {
             return this->template getEnergyGradFramework<Gradients>();
         }
 
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
-         *
-         * @param grads Output gradients structure to populate
-         */
         void getEnergyGrad(Gradients &grads) const
         {
             this->template fillEnergyGradFramework<Gradients>(grads);
         }
 
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
-         */
         Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
             return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
         }
 
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param grads               Output gradients structure to populate
-         */
         void propagateGrad(const MatrixType &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
@@ -3004,23 +2956,23 @@ namespace SplineTrajectory
                     ws_lambda_.row(3 * i + 2) = ws_gd_internal_.row(i + 1).segment(2 * DIM, DIM);
                 }
 
-                multiplyStoredBlock3x3T_3xN(D_inv_cache_, 0,
+                BlockOps3::multiplyBlockTransposeNxD(D_inv_cache_, 0,
                                             ws_lambda_.template middleRows<3>(0),
                                             ws_lambda_.template middleRows<3>(0));
 
                 for (int i = 0; i < num_blocks - 1; ++i)
                 {
-                    subMultiplyStoredBlock3x3T_3xN(U_blocks_cache_, i,
+                    BlockOps3::subMultiplyBlockTransposeNxD(U_blocks_cache_, i,
                                                    ws_lambda_.template middleRows<3>(3 * i),
                                                    ws_lambda_.template middleRows<3>(3 * (i + 1)));
-                    multiplyStoredBlock3x3T_3xN(D_inv_cache_, i + 1,
+                    BlockOps3::multiplyBlockTransposeNxD(D_inv_cache_, i + 1,
                                                 ws_lambda_.template middleRows<3>(3 * (i + 1)),
                                                 ws_lambda_.template middleRows<3>(3 * (i + 1)));
                 }
 
                 for (int i = num_blocks - 2; i >= 0; --i)
                 {
-                    subMultiplyStoredBlock3x3_3xN(D_inv_T_mul_L_next_T_cache_, i,
+                    BlockOps3::subMultiplyBlockNxD(D_inv_T_mul_L_next_T_cache_, i,
                                                   ws_lambda_.template middleRows<3>(3 * (i + 1)),
                                                   ws_lambda_.template middleRows<3>(3 * i));
                 }
@@ -3181,13 +3133,13 @@ namespace SplineTrajectory
                 }
 
                 Eigen::Matrix<double, 3, DIM> correction_start;
-                multiplyStoredBlock3x3T_3xN(L_blocks_cache_, 0,
+                BlockOps3::multiplyBlockTransposeNxD(L_blocks_cache_, 0,
                                             ws_lambda_.template middleRows<3>(0),
                                             correction_start);
                 raw_start_grad -= correction_start;
 
                 Eigen::Matrix<double, 3, DIM> correction_end;
-                multiplyStoredBlock3x3T_3xN(U_blocks_cache_, num_blocks - 1,
+                BlockOps3::multiplyBlockTransposeNxD(U_blocks_cache_, num_blocks - 1,
                                             ws_lambda_.template middleRows<3>(3 * (num_blocks - 1)),
                                             correction_end);
                 raw_end_grad -= correction_end;
@@ -3204,147 +3156,6 @@ namespace SplineTrajectory
         void precomputePointDiffs()
         {
             Base::precomputePointDiffsFromSpatialPoints(spatial_points_, point_diffs_);
-        }
-
-        static inline void Inverse3x3(const Eigen::Matrix3d &A, Eigen::Matrix3d &A_inv_out)
-        {
-
-            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2),
-                         a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2),
-                         a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
-
-            const double c00 = a11 * a22 - a12 * a21;
-            const double c01 = -(a10 * a22 - a12 * a20);
-            const double c02 = a10 * a21 - a11 * a20;
-
-            const double c10 = -(a01 * a22 - a02 * a21);
-            const double c11 = a00 * a22 - a02 * a20;
-            const double c12 = -(a00 * a21 - a01 * a20);
-
-            const double c20 = a01 * a12 - a02 * a11;
-            const double c21 = -(a00 * a12 - a02 * a10);
-            const double c22 = a00 * a11 - a01 * a10;
-
-            const double det = a00 * c00 + a01 * c01 + a02 * c02;
-            const double inv_det = 1.0 / det;
-
-            A_inv_out(0, 0) = c00 * inv_det;
-            A_inv_out(0, 1) = c10 * inv_det;
-            A_inv_out(0, 2) = c20 * inv_det;
-
-            A_inv_out(1, 0) = c01 * inv_det;
-            A_inv_out(1, 1) = c11 * inv_det;
-            A_inv_out(1, 2) = c21 * inv_det;
-
-            A_inv_out(2, 0) = c02 * inv_det;
-            A_inv_out(2, 1) = c12 * inv_det;
-            A_inv_out(2, 2) = c22 * inv_det;
-        }
-
-        static inline void setBlock3x3(BlockMatrix3x3Storage &storage, int i, const Eigen::Matrix3d &M)
-        {
-            storage(i, 0) = M(0, 0);
-            storage(i, 1) = M(0, 1);
-            storage(i, 2) = M(0, 2);
-            storage(i, 3) = M(1, 0);
-            storage(i, 4) = M(1, 1);
-            storage(i, 5) = M(1, 2);
-            storage(i, 6) = M(2, 0);
-            storage(i, 7) = M(2, 1);
-            storage(i, 8) = M(2, 2);
-        }
-
-        inline void MultiplyStoredBlock3x3(const BlockMatrix3x3Storage &A_storage, int idx_a,
-                                           const BlockMatrix3x3Storage &B_storage, int idx_b,
-                                           Eigen::Matrix3d &C_out) const noexcept
-        {
-            const double a00 = A_storage(idx_a, 0), a01 = A_storage(idx_a, 1), a02 = A_storage(idx_a, 2);
-            const double a10 = A_storage(idx_a, 3), a11 = A_storage(idx_a, 4), a12 = A_storage(idx_a, 5);
-            const double a20 = A_storage(idx_a, 6), a21 = A_storage(idx_a, 7), a22 = A_storage(idx_a, 8);
-            const double b00 = B_storage(idx_b, 0), b01 = B_storage(idx_b, 1), b02 = B_storage(idx_b, 2);
-            const double b10 = B_storage(idx_b, 3), b11 = B_storage(idx_b, 4), b12 = B_storage(idx_b, 5);
-            const double b20 = B_storage(idx_b, 6), b21 = B_storage(idx_b, 7), b22 = B_storage(idx_b, 8);
-            C_out(0, 0) = a00 * b00 + a01 * b10 + a02 * b20;
-            C_out(0, 1) = a00 * b01 + a01 * b11 + a02 * b21;
-            C_out(0, 2) = a00 * b02 + a01 * b12 + a02 * b22;
-            C_out(1, 0) = a10 * b00 + a11 * b10 + a12 * b20;
-            C_out(1, 1) = a10 * b01 + a11 * b11 + a12 * b21;
-            C_out(1, 2) = a10 * b02 + a11 * b12 + a12 * b22;
-            C_out(2, 0) = a20 * b00 + a21 * b10 + a22 * b20;
-            C_out(2, 1) = a20 * b01 + a21 * b11 + a22 * b21;
-            C_out(2, 2) = a20 * b02 + a21 * b12 + a22 * b22;
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void multiplyStoredBlock3x3_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
-                                               const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
-            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
-            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-                C_out(0, j) = a00 * b0j + a01 * b1j + a02 * b2j;
-                C_out(1, j) = a10 * b0j + a11 * b1j + a12 * b2j;
-                C_out(2, j) = a20 * b0j + a21 * b1j + a22 * b2j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void multiplyStoredBlock3x3T_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
-                                                const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
-            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
-            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-                C_out(0, j) = a00 * b0j + a10 * b1j + a20 * b2j;
-                C_out(1, j) = a01 * b0j + a11 * b1j + a21 * b2j;
-                C_out(2, j) = a02 * b0j + a12 * b1j + a22 * b2j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void subMultiplyStoredBlock3x3T_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
-                                                   const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
-            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
-            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-                C_out(0, j) -= a00 * b0j + a10 * b1j + a20 * b2j;
-                C_out(1, j) -= a01 * b0j + a11 * b1j + a21 * b2j;
-                C_out(2, j) -= a02 * b0j + a12 * b1j + a22 * b2j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void subMultiplyStoredBlock3x3_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
-                                                  const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
-            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
-            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-                C_out(0, j) -= a00 * b0j + a01 * b1j + a02 * b2j;
-                C_out(1, j) -= a10 * b0j + a11 * b1j + a12 * b2j;
-                C_out(2, j) -= a20 * b0j + a21 * b1j + a22 * b2j;
-            }
         }
 
     private:
@@ -3411,13 +3222,13 @@ namespace SplineTrajectory
                 L << 360.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv, 4.0 * tp_L.h_inv,
                     4680.0 * tp_L.h4_inv, 840.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv,
                     24480.0 * tp_L.h5_inv, 4680.0 * tp_L.h4_inv, 360.0 * tp_L.h3_inv;
-                setBlock3x3(L_blocks_cache_, i, L);
+                BlockOps3::setBlock(L_blocks_cache_, i, L);
 
                 Eigen::Matrix3d U;
                 U << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
                     -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
                     24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
-                setBlock3x3(U_blocks_cache_, i, U);
+                BlockOps3::setBlock(U_blocks_cache_, i, U);
 
                 if (i == 0)
                 {
@@ -3426,9 +3237,9 @@ namespace SplineTrajectory
                 else
                 {
                     Eigen::Matrix3d X;
-                    MultiplyStoredBlock3x3(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
+                    BlockOps3::multiplyBlock(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
                     Eigen::Matrix<double, 3, DIM> Y;
-                    multiplyStoredBlock3x3_3xN(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<3>(3 * (i - 1)), Y);
+                    BlockOps3::multiplyBlockNxD(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<3>(3 * (i - 1)), Y);
                     D.noalias() -= L * X;
                     r.noalias() -= L * Y;
                 }
@@ -3439,21 +3250,21 @@ namespace SplineTrajectory
                 }
 
                 Eigen::Matrix3d D_inv;
-                Inverse3x3(D, D_inv);
-                setBlock3x3(D_inv_cache_, i, D_inv);
+                BlockOps3::inverse(D, D_inv);
+                BlockOps3::setBlock(D_inv_cache_, i, D_inv);
 
                 if (i > 0)
                 {
                     Eigen::Matrix3d L_mul_D_prev_inv;
-                    MultiplyStoredBlock3x3(L_blocks_cache_, i, D_inv_cache_, i - 1, L_mul_D_prev_inv);
-                    setBlock3x3(D_inv_T_mul_L_next_T_cache_, i - 1, L_mul_D_prev_inv.transpose());
+                    BlockOps3::multiplyBlock(L_blocks_cache_, i, D_inv_cache_, i - 1, L_mul_D_prev_inv);
+                    BlockOps3::setBlock(D_inv_T_mul_L_next_T_cache_, i - 1, L_mul_D_prev_inv.transpose());
                 }
                 ws_rhs_mod_.template middleRows<3>(3 * i) = r;
             }
 
             ws_solution_.resize(num_blocks * 3, DIM);
 
-            multiplyStoredBlock3x3_3xN(D_inv_cache_, num_blocks - 1,
+            BlockOps3::multiplyBlockNxD(D_inv_cache_, num_blocks - 1,
                                        ws_rhs_mod_.template middleRows<3>(3 * (num_blocks - 1)),
                                        ws_solution_.template middleRows<3>(3 * (num_blocks - 1)));
 
@@ -3474,7 +3285,7 @@ namespace SplineTrajectory
                     rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1 + u12 * s2);
                     rhs_temp(2, j) = rhs_i(2, j) - (u20 * s0 + u21 * s1 + u22 * s2);
                 }
-                multiplyStoredBlock3x3_3xN(D_inv_cache_, i, rhs_temp, sol_block);
+                BlockOps3::multiplyBlockNxD(D_inv_cache_, i, rhs_temp, sol_block);
             }
 
             for (int i = 0; i < num_blocks; ++i)
