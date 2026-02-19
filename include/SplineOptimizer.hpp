@@ -8,17 +8,10 @@
 #include <iostream>
 #include <iomanip>
 #include <memory>
+#include <concepts>
 #include <type_traits> 
 #include <utility>   
 #include <sstream>  
-
-#if defined(__cpp_concepts) && (__cpp_concepts >= 201907L)
-#define ST_SPLINEOPT_HAS_CONCEPTS 1
-#define ST_SPLINEOPT_REQUIRES(...) requires (__VA_ARGS__)
-#else
-#define ST_SPLINEOPT_HAS_CONCEPTS 0
-#define ST_SPLINEOPT_REQUIRES(...)
-#endif
 
 namespace SplineTrajectory
 {
@@ -26,7 +19,7 @@ namespace SplineTrajectory
     //  INTERFACE DOCUMENTATION (Reference Only)
     //  These definitions are provided for documentation purposes. 
     //  User-defined types (Functors/Lambdas) do not need to inherit from them, 
-    //  but must satisfy the function signatures verified by TypeTraits.
+    //  but must satisfy the function signatures verified by Concepts.
     // =========================================================================
 
 #if 0
@@ -134,114 +127,69 @@ namespace SplineTrajectory
     };
 #endif
 
-    namespace TypeTraits
+    namespace Concepts
     {
-        template <typename...>
-        using void_t = void;
-
-        // --- TimeMap Traits ---
-        template <typename T, typename = void>
-        struct HasTimeMapInterface : std::false_type {};
-
         template <typename T>
-        struct HasTimeMapInterface<T, void_t<
-            decltype(static_cast<double>(std::declval<T>().toTime(std::declval<double>()))),
-            decltype(static_cast<double>(std::declval<T>().toTau(std::declval<double>()))),
-            decltype(static_cast<double>(std::declval<T>().backward(std::declval<double>(), std::declval<double>(), std::declval<double>())))
-        >> : std::true_type {};
-
-        // --- SpatialMap Traits ---
-        template <typename T, int DIM, typename = void>
-        struct HasSpatialMapInterface : std::false_type {};
+        concept TimeMapLike = requires(const T &map, double tau, double T, double gradT)
+        {
+            { map.toTime(tau) } -> std::convertible_to<double>;
+            { map.toTau(T) } -> std::convertible_to<double>;
+            { map.backward(tau, T, gradT) } -> std::convertible_to<double>;
+        };
 
         template <typename T, int DIM>
-        struct HasSpatialMapInterface<T, DIM, void_t<
-            decltype(static_cast<int>(std::declval<T>().getUnconstrainedDim(std::declval<int>()))),
-            decltype(std::declval<T>().toPhysical(std::declval<Eigen::VectorXd>(), std::declval<int>())),
-            decltype(std::declval<T>().toUnconstrained(std::declval<Eigen::VectorXd>(), std::declval<int>())),
-            decltype(std::declval<T>().backwardGrad(std::declval<Eigen::VectorXd>(),
-                                                    std::declval<Eigen::VectorXd>(),
-                                                    std::declval<int>()))
-        >> : std::true_type {};
-
-        template <typename T, typename = void>
-        struct HasExecutorInterface : std::false_type {};
-
-        template <typename T>
-        struct HasExecutorInterface<T, void_t<
-            decltype(std::declval<T>()(
-                std::declval<int>(),       
-                std::declval<int>(),       
-                std::declval<void(*)(int)>()                  
-            ))
-        >> : std::true_type {};
-
-        // --- Cost Func Traits ---
-        template <typename T, typename = void>
-        struct HasTimeCostInterface : std::false_type {};
+        concept SpatialMapLike = requires(const T &map,
+                                          const Eigen::VectorXd &xi,
+                                          const Eigen::VectorXd &grad_p,
+                                          const Eigen::Matrix<double, DIM, 1> &p,
+                                          int index)
+        {
+            { map.getUnconstrainedDim(index) } -> std::convertible_to<int>;
+            { map.toPhysical(xi, index) } -> std::convertible_to<Eigen::VectorXd>;
+            { map.toUnconstrained(p, index) } -> std::convertible_to<Eigen::VectorXd>;
+            { map.backwardGrad(xi, grad_p, index) } -> std::convertible_to<Eigen::VectorXd>;
+        };
 
         template <typename T>
-        struct HasTimeCostInterface<T, void_t<
-            decltype(static_cast<double>(std::declval<T>()(
-                std::declval<const std::vector<double>&>(), // All times
-                std::declval<Eigen::VectorXd &>()           // Gradient vector
-            )))
-        >> : std::true_type {};
+        concept ExecutorLike = requires(const T &executor)
+        {
+            executor(0, 1, [](int) {});
+        };
 
-        template <typename T, typename WaypointsType, typename = void>
-        struct HasWaypointsCostInterface : std::false_type {};
+        template <typename T>
+        concept TimeCostLike = requires(T &&f, const std::vector<double> &Ts, Eigen::VectorXd &grad)
+        {
+            { std::forward<T>(f)(Ts, grad) } -> std::convertible_to<double>;
+        };
 
         template <typename T, typename WaypointsType>
-        struct HasWaypointsCostInterface<T, WaypointsType, void_t<
-            decltype(static_cast<double>(std::declval<T>()(
-                std::declval<const WaypointsType &>(),                // Waypoints
-                std::declval<Eigen::Matrix<double, -1, -1> &>()       // Gradient Matrix (Dynamic)
-            )))
-        >> : std::true_type {};
-
-        template <typename T, typename VecT, typename = void>
-        struct HasIntegralCostInterface : std::false_type {};
+        concept WaypointsCostLike = requires(T &&f,
+                                             const WaypointsType &waypoints,
+                                             Eigen::Matrix<double, -1, -1> &grad_q)
+        {
+            { std::forward<T>(f)(waypoints, grad_q) } -> std::convertible_to<double>;
+        };
 
         template <typename T, typename VecT>
-        struct HasIntegralCostInterface<T, VecT, void_t<
-            decltype(static_cast<double>(std::declval<T>()(
-                std::declval<double>(),                  // t (relative)
-                std::declval<double>(),                  // t_global
-                std::declval<int>(),                     // segment_index
-                std::declval<const VecT &>(),            // p
-                std::declval<const VecT &>(),            // v
-                std::declval<const VecT &>(),            // a
-                std::declval<const VecT &>(),            // j
-                std::declval<const VecT &>(),            // s
-                std::declval<VecT &>(),                  // gp
-                std::declval<VecT &>(),                  // gv
-                std::declval<VecT &>(),                  // ga
-                std::declval<VecT &>(),                  // gj
-                std::declval<VecT &>(),                  // gs
-                std::declval<double &>()                 // gt
-            )))
-        >> : std::true_type {};
-
-#if ST_SPLINEOPT_HAS_CONCEPTS
-        template <typename T>
-        concept TimeMapLike = HasTimeMapInterface<T>::value;
-
-        template <typename T, int DIM>
-        concept SpatialMapLike = HasSpatialMapInterface<T, DIM>::value;
-
-        template <typename T>
-        concept ExecutorLike = HasExecutorInterface<T>::value;
-
-        template <typename T>
-        concept TimeCostLike = HasTimeCostInterface<T>::value;
-
-        template <typename T, typename WaypointsType>
-        concept WaypointsCostLike = HasWaypointsCostInterface<T, WaypointsType>::value;
-
-        template <typename T, typename VecT>
-        concept IntegralCostLike = HasIntegralCostInterface<T, VecT>::value;
-#endif
-    }
+        concept IntegralCostLike = requires(T &&f,
+                                            double t,
+                                            double t_global,
+                                            int segment_index,
+                                            const VecT &p,
+                                            const VecT &v,
+                                            const VecT &a,
+                                            const VecT &j,
+                                            const VecT &s,
+                                            VecT &gp,
+                                            VecT &gv,
+                                            VecT &ga,
+                                            VecT &gj,
+                                            VecT &gs,
+                                            double &gt)
+        {
+            { std::forward<T>(f)(t, t_global, segment_index, p, v, a, j, s, gp, gv, ga, gj, gs, gt) } -> std::convertible_to<double>;
+        };
+    } // namespace Concepts
 
     /**
      * @brief SerialExecutor
@@ -377,23 +325,10 @@ namespace SplineTrajectory
               typename SplineType = QuinticSplineND<DIM>,
               typename TimeMap = QuadInvTimeMap,
               typename SpatialMap = IdentitySpatialMap<DIM>>
-    ST_SPLINEOPT_REQUIRES(TypeTraits::TimeMapLike<TimeMap> &&
-                          TypeTraits::SpatialMapLike<SpatialMap, DIM>)
+    requires Concepts::TimeMapLike<TimeMap> &&
+             Concepts::SpatialMapLike<SpatialMap, DIM>
     class SplineOptimizer
     {
-#if !ST_SPLINEOPT_HAS_CONCEPTS
-        static_assert(TypeTraits::HasTimeMapInterface<TimeMap>::value,
-                      "\n[SplineOptimizer Error] The provided 'TimeMap' type does not satisfy the required interface.\n"
-                      "It must implement const member methods:\n"
-                      "  double toTime(double tau) const;\n"
-                      "  double toTau(double T) const;\n"
-                      "  double backward(double tau, double T, double gradT) const;\n");
-
-        static_assert(TypeTraits::HasSpatialMapInterface<SpatialMap, DIM>::value,
-                      "\n[SplineOptimizer Error] The provided 'SpatialMap' type does not satisfy the required interface.\n"
-                      "It must implement toPhysical, toUnconstrained, and backwardGrad methods.\n");
-#endif
-
     public:
         using VectorType = typename SplineType::VectorType;
         using MatrixType = typename SplineType::MatrixType;
@@ -769,11 +704,10 @@ namespace SplineTrajectory
          */
         template <typename TimeCostFunc, typename WaypointsCostFunc, typename IntegralCostFunc, 
                   typename Executor = SerialExecutor>
-        ST_SPLINEOPT_REQUIRES(
-            TypeTraits::TimeCostLike<std::decay_t<TimeCostFunc>> &&
-            TypeTraits::WaypointsCostLike<std::decay_t<WaypointsCostFunc>, WaypointsType> &&
-            TypeTraits::IntegralCostLike<std::decay_t<IntegralCostFunc>, VectorType> &&
-            TypeTraits::ExecutorLike<Executor>)
+        requires Concepts::TimeCostLike<TimeCostFunc> &&
+                 Concepts::WaypointsCostLike<WaypointsCostFunc, WaypointsType> &&
+                 Concepts::IntegralCostLike<IntegralCostFunc, VectorType> &&
+                 Concepts::ExecutorLike<Executor>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
                         TimeCostFunc &&time_cost_func,
                         WaypointsCostFunc &&waypoints_cost_func,
@@ -781,28 +715,7 @@ namespace SplineTrajectory
                         Workspace *ws = nullptr,
                         const Executor& executor = Executor()) const
         {
-            using TCF = std::decay_t<TimeCostFunc>;
             using WCF = std::decay_t<WaypointsCostFunc>;
-            using SCF = std::decay_t<IntegralCostFunc>;
-
-#if !ST_SPLINEOPT_HAS_CONCEPTS
-            static_assert(TypeTraits::HasTimeCostInterface<TCF>::value,
-                          "\n[SplineOptimizer Error] 'TimeCostFunc' signature mismatch.\n"
-                          "Required: double operator()(const vector<double>& Ts, VectorXd &grad)\n");
-
-            static_assert(TypeTraits::HasWaypointsCostInterface<WCF, WaypointsType>::value,
-                          "\n[SplineOptimizer Error] 'WaypointsCostFunc' signature mismatch.\n"
-                          "Required: double operator()(const MatrixType& qs, MatrixXd &grad_q)\n");
-
-            static_assert(TypeTraits::HasIntegralCostInterface<SCF, VectorType>::value,
-                          "\n[SplineOptimizer Error] 'IntegralCostFunc' signature mismatch.\n");
-
-            static_assert(TypeTraits::HasExecutorInterface<Executor>::value,
-                          "\n[SplineOptimizer Error] 'Executor' signature mismatch.\n"
-                          "The Executor must implement:\n"
-                          "  void operator()(int start, int end, Func&& f) const;\n"
-                          "where 'f' is a callable accepting an 'int' index.\n");
-#endif
 
             Workspace& ws_ref = (ws != nullptr) ? *ws : *getOrCreateInternalWorkspace();
             ws_ref.resize(num_segments_);
@@ -957,10 +870,9 @@ namespace SplineTrajectory
          * Forwards to primary evaluate with VoidWaypointsCost.
          */
         template <typename TimeCostFunc, typename IntegralCostFunc, typename Executor = SerialExecutor>
-        ST_SPLINEOPT_REQUIRES(
-            TypeTraits::TimeCostLike<std::decay_t<TimeCostFunc>> &&
-            TypeTraits::IntegralCostLike<std::decay_t<IntegralCostFunc>, VectorType> &&
-            TypeTraits::ExecutorLike<Executor>)
+        requires Concepts::TimeCostLike<TimeCostFunc> &&
+                 Concepts::IntegralCostLike<IntegralCostFunc, VectorType> &&
+                 Concepts::ExecutorLike<Executor>
         double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &grad_out,
                         TimeCostFunc &&time_cost_func, 
                         IntegralCostFunc &&integral_cost_func,
@@ -1006,10 +918,9 @@ namespace SplineTrajectory
          * @param ws Workspace pointer (default nullptr to use internal workspace).
          */
         template <typename TFunc, typename WFunc, typename IFunc>
-        ST_SPLINEOPT_REQUIRES(
-            TypeTraits::TimeCostLike<std::decay_t<TFunc>> &&
-            TypeTraits::WaypointsCostLike<std::decay_t<WFunc>, WaypointsType> &&
-            TypeTraits::IntegralCostLike<std::decay_t<IFunc>, VectorType>)
+        requires Concepts::TimeCostLike<TFunc> &&
+                 Concepts::WaypointsCostLike<WFunc, WaypointsType> &&
+                 Concepts::IntegralCostLike<IFunc, VectorType>
         GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
                             TFunc &&tf, WFunc &&wf, IFunc &&ifc, 
                             Workspace *ws = nullptr,
@@ -1061,9 +972,8 @@ namespace SplineTrajectory
          * Forwards to primary checkGradients with VoidWaypointsCost.
          */
         template <typename TFunc, typename IFunc>
-        ST_SPLINEOPT_REQUIRES(
-            TypeTraits::TimeCostLike<std::decay_t<TFunc>> &&
-            TypeTraits::IntegralCostLike<std::decay_t<IFunc>, VectorType>)
+        requires Concepts::TimeCostLike<TFunc> &&
+                 Concepts::IntegralCostLike<IFunc, VectorType>
         GradientCheckResult checkGradients(const Eigen::VectorXd &x, 
                             TFunc &&tf, IFunc &&ifc, 
                             Workspace *ws = nullptr,
@@ -1247,6 +1157,4 @@ namespace SplineTrajectory
         }
     };
 }
-#undef ST_SPLINEOPT_REQUIRES
-#undef ST_SPLINEOPT_HAS_CONCEPTS
 #endif
