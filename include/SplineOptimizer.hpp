@@ -121,7 +121,7 @@ namespace SplineTrajectory
          * Rows correspond to q0, q1, ... qN
          * @return           Cost value
          */
-        double operator()(const SplineVector<Eigen::Matrix<double, Eigen::Dynamic, 1>> &waypoints, 
+        double operator()(const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &waypoints,
                           Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &grad_q) const;
     };
 #endif
@@ -365,7 +365,7 @@ namespace SplineTrajectory
     public:
         using VectorType = typename SplineType::VectorType;
         using MatrixType = typename SplineType::MatrixType;
-        using WaypointsType = SplineVector<VectorType>;
+        using WaypointsType = MatrixType;
 
         /**
          * @brief Workspace holds all mutable state required during optimization.
@@ -394,7 +394,7 @@ namespace SplineTrajectory
                 if (static_cast<int>(cache_times.size()) != num_segments)
                 {
                     cache_times.resize(num_segments);
-                    cache_waypoints.resize(num_segments + 1);
+                    cache_waypoints.resize(num_segments + 1, DIM);
                     cache_gdT.resize(num_segments);
                     user_gdT_buffer.resize(num_segments);
                     cache_gdC.resize(num_segments * SplineType::COEFF_NUM, DIM);
@@ -619,8 +619,8 @@ namespace SplineTrajectory
                                  " != num_segments_ = " + std::to_string(num_segments_));
             }
             
-            if (ref_waypoints_.size() != static_cast<size_t>(num_segments_ + 1)) {
-                errors.push_back("Size mismatch: ref_waypoints_.size() = " + std::to_string(ref_waypoints_.size()) + 
+            if (ref_waypoints_.rows() != num_segments_ + 1) {
+                errors.push_back("Size mismatch: ref_waypoints_.rows() = " + std::to_string(ref_waypoints_.rows()) + 
                                  " != num_segments_ + 1 = " + std::to_string(num_segments_ + 1));
             }
             
@@ -638,9 +638,9 @@ namespace SplineTrajectory
                 }
             }
             
-            for (size_t i = 0; i < ref_waypoints_.size(); ++i) {
-                if (!ref_waypoints_[i].array().isFinite().all()) {
-                    errors.push_back("Waypoint [" + std::to_string(i) + "] contains NaN or Inf");
+            for (int i = 0; i < ref_waypoints_.rows(); ++i) {
+                if (!ref_waypoints_.row(i).array().isFinite().all()) {
+                    errors.push_back("Waypoint row [" + std::to_string(i) + "] contains NaN or Inf");
                 }
             }
             
@@ -706,7 +706,7 @@ namespace SplineTrajectory
             {
                 if (is_spatial_optimized(i)) {
                     int dof = active_spatial_map_->getUnconstrainedDim(i);
-                    x.segment(offset, dof) = active_spatial_map_->toUnconstrained(ref_waypoints_[i], i);
+                    x.segment(offset, dof) = active_spatial_map_->toUnconstrained(ref_waypoints_.row(i).transpose(), i);
                     offset += dof;
                 }
             }
@@ -747,14 +747,16 @@ namespace SplineTrajectory
             using TCF = typename std::decay<TimeCostFunc>::type;
             using WCF = typename std::decay<WaypointsCostFunc>::type;
             using SCF = typename std::decay<IntegralCostFunc>::type;
+            constexpr bool kSupportsMatrixWaypointsCost =
+                TypeTraits::HasWaypointsCostInterface<WCF, WaypointsType>::value;
 
             static_assert(TypeTraits::HasTimeCostInterface<TCF>::value,
                           "\n[SplineOptimizer Error] 'TimeCostFunc' signature mismatch.\n"
                           "Required: double operator()(const vector<double>& Ts, VectorXd &grad)\n");
 
-            static_assert(TypeTraits::HasWaypointsCostInterface<WCF, WaypointsType>::value,
+            static_assert(kSupportsMatrixWaypointsCost,
                           "\n[SplineOptimizer Error] 'WaypointsCostFunc' signature mismatch.\n"
-                          "Required: double operator()(const WaypointsType& qs, MatrixXd &grad_q)\n");
+                          "Required: double operator()(const MatrixType& qs, MatrixXd &grad_q)\n");
 
             static_assert(TypeTraits::HasIntegralCostInterface<SCF, VectorType>::value,
                           "\n[SplineOptimizer Error] 'IntegralCostFunc' signature mismatch.\n");
@@ -787,10 +789,10 @@ namespace SplineTrajectory
                 if (is_spatial_optimized(i)) {
                     int dof = active_spatial_map_->getUnconstrainedDim(i);
                     Eigen::VectorXd xi = x.segment(offset, dof);
-                    ws_ref.cache_waypoints[i] = active_spatial_map_->toPhysical(xi, i);
+                    ws_ref.cache_waypoints.row(i) = active_spatial_map_->toPhysical(xi, i).transpose();
                     offset += dof;
                 } else {
-                    ws_ref.cache_waypoints[i] = ref_waypoints_[i];
+                    ws_ref.cache_waypoints.row(i) = ref_waypoints_.row(i);
                 }
             }
 
