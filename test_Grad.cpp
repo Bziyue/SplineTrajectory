@@ -254,6 +254,7 @@ void testCubic(int N, int BENCH_ITERS)
 
     Eigen::MatrixX3d gdC_minco; Eigen::VectorXd gdT_minco;
     Eigen::Matrix3Xd gradP_minco_out; Eigen::VectorXd gradT_minco_out;
+    Eigen::Matrix<double, 3, 2> gradHeadPV_minco, gradTailPV_minco;
 
     SplineTrajectory::CubicSpline3D::MatrixType gdC_spline;
     Eigen::VectorXd gdT_spline;
@@ -300,6 +301,7 @@ void testCubic(int N, int BENCH_ITERS)
     }, BENCH_ITERS);
     printTimeStats("MINCO S2 Opt Step", step_minco_stats);
     printTimeStats("Spline3 Opt Step", step_spline_stats);
+    minco_s2.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out, gradHeadPV_minco, gradTailPV_minco);
 
     // 4. Gradient Consistency Check
     printSubHeader("Consistency: Gradients");
@@ -311,6 +313,10 @@ void testCubic(int N, int BENCH_ITERS)
     Eigen::Matrix3Xd gradP_spline_inner = gradP_spline_full.block(1, 0, N - 1, 3).transpose();
     printCheck("Propagated Grad (Inner P)", (gradP_minco_out - gradP_spline_inner).norm());
     printCheck("Propagated Grad (Times)", (gradT_minco_out - gradT_spline_out).norm());
+    printCheck("Propagated Grad (Start P)", (gradHeadPV_minco.col(0).transpose() - grads_ref.start.p.transpose()).norm());
+    printCheck("Propagated Grad (Start V)", (gradHeadPV_minco.col(1).transpose() - grads_ref.start.v.transpose()).norm());
+    printCheck("Propagated Grad (End P)", (gradTailPV_minco.col(0).transpose() - grads_ref.end.p.transpose()).norm());
+    printCheck("Propagated Grad (End V)", (gradTailPV_minco.col(1).transpose() - grads_ref.end.v.transpose()).norm());
 
     // 5. Self-Check (Direct vs Propagated)
     printSubHeader("Self-Check: Direct vs Propagated");
@@ -361,11 +367,15 @@ void testCubic(int N, int BENCH_ITERS)
     // 7. Print Boundary Gradients
     printSubHeader("Boundary Condition Gradients");
     cout << "\n[Start Boundary Gradients]" << endl;
-    cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
-    cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
+    cout << "Position (P) MINCO : " << gradHeadPV_minco.col(0).transpose() << endl;
+    cout << "Position (P) Spline: " << direct_bc_grads.start.p.transpose() << endl;
+    cout << "Velocity (V) MINCO : " << gradHeadPV_minco.col(1).transpose() << endl;
+    cout << "Velocity (V) Spline: " << direct_bc_grads.start.v.transpose() << endl;
     cout << "\n[End Boundary Gradients]" << endl;
-    cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
-    cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
+    cout << "Position (P) MINCO : " << gradTailPV_minco.col(0).transpose() << endl;
+    cout << "Position (P) Spline: " << direct_bc_grads.end.p.transpose() << endl;
+    cout << "Velocity (V) MINCO : " << gradTailPV_minco.col(1).transpose() << endl;
+    cout << "Velocity (V) Spline: " << direct_bc_grads.end.v.transpose() << endl;
 }
 
 // ---------------------------------------------------------
@@ -507,6 +517,7 @@ void testQuintic(int N, int BENCH_ITERS)
 
     Eigen::MatrixX3d gdC_minco; Eigen::VectorXd gdT_minco;
     Eigen::Matrix3Xd gradP_minco_out; Eigen::VectorXd gradT_minco_out;
+    Eigen::Matrix3d gradHeadPVA_minco, gradTailPVA_minco;
 
     SplineTrajectory::QuinticSpline3D::MatrixType gdC_spline;
     Eigen::VectorXd gdT_spline;
@@ -553,6 +564,7 @@ void testQuintic(int N, int BENCH_ITERS)
     }, BENCH_ITERS);
     printTimeStats("MINCO S3 Opt Step", step_minco_stats);
     printTimeStats("Spline5 Opt Step", step_spline_stats);
+    minco_s3.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out, gradHeadPVA_minco, gradTailPVA_minco);
 
     // 4. Gradient Consistency Check (vs MINCO)
     printSubHeader("Consistency: Gradients vs MINCO");
@@ -562,6 +574,12 @@ void testQuintic(int N, int BENCH_ITERS)
     Eigen::Matrix3Xd gradP_spline_inner_T = gradP_spline_full.block(1, 0, N - 1, 3).transpose();
     printCheck("Propagated Grad (Inner P)", (gradP_minco_out - gradP_spline_inner_T).norm());
     printCheck("Propagated Grad (Times)", (gradT_minco_out - gradT_spline_out).norm());
+    printCheck("Propagated Grad (Start P)", (gradHeadPVA_minco.col(0).transpose() - grads_ref.start.p.transpose()).norm());
+    printCheck("Propagated Grad (Start V)", (gradHeadPVA_minco.col(1).transpose() - grads_ref.start.v.transpose()).norm());
+    printCheck("Propagated Grad (Start A)", (gradHeadPVA_minco.col(2).transpose() - grads_ref.start.a.transpose()).norm());
+    printCheck("Propagated Grad (End P)", (gradTailPVA_minco.col(0).transpose() - grads_ref.end.p.transpose()).norm());
+    printCheck("Propagated Grad (End V)", (gradTailPVA_minco.col(1).transpose() - grads_ref.end.v.transpose()).norm());
+    printCheck("Propagated Grad (End A)", (gradTailPVA_minco.col(2).transpose() - grads_ref.end.a.transpose()).norm());
 
     // 5. Direct Gradient Consistency Check (vs Ref min_jerk)
     printSubHeader("Consistency: Direct Gradients vs Ref");
@@ -627,13 +645,19 @@ void testQuintic(int N, int BENCH_ITERS)
     // 8. Print Boundary Gradients
     printSubHeader("Boundary Condition Gradients");
     cout << "\n[Start Boundary Gradients]" << endl;
-    cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
-    cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
-    cout << "Acceleration (A): " << direct_bc_grads.start.a.transpose() << endl;
+    cout << "Position (P) MINCO : " << gradHeadPVA_minco.col(0).transpose() << endl;
+    cout << "Position (P) Spline: " << direct_bc_grads.start.p.transpose() << endl;
+    cout << "Velocity (V) MINCO : " << gradHeadPVA_minco.col(1).transpose() << endl;
+    cout << "Velocity (V) Spline: " << direct_bc_grads.start.v.transpose() << endl;
+    cout << "Acceleration (A) MINCO : " << gradHeadPVA_minco.col(2).transpose() << endl;
+    cout << "Acceleration (A) Spline: " << direct_bc_grads.start.a.transpose() << endl;
     cout << "\n[End Boundary Gradients]" << endl;
-    cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
-    cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
-    cout << "Acceleration (A): " << direct_bc_grads.end.a.transpose() << endl;
+    cout << "Position (P) MINCO : " << gradTailPVA_minco.col(0).transpose() << endl;
+    cout << "Position (P) Spline: " << direct_bc_grads.end.p.transpose() << endl;
+    cout << "Velocity (V) MINCO : " << gradTailPVA_minco.col(1).transpose() << endl;
+    cout << "Velocity (V) Spline: " << direct_bc_grads.end.v.transpose() << endl;
+    cout << "Acceleration (A) MINCO : " << gradTailPVA_minco.col(2).transpose() << endl;
+    cout << "Acceleration (A) Spline: " << direct_bc_grads.end.a.transpose() << endl;
 }
 void testSeptic(int N, int BENCH_ITERS)
 {
@@ -775,6 +799,7 @@ void testSeptic(int N, int BENCH_ITERS)
 
     Eigen::MatrixX3d gdC_minco; Eigen::VectorXd gdT_minco;
     Eigen::Matrix3Xd gradP_minco_out; Eigen::VectorXd gradT_minco_out;
+    Eigen::Matrix<double, 3, 4> gradHeadPVAJ_minco, gradTailPVAJ_minco;
 
     SplineTrajectory::SepticSpline3D::MatrixType gdC_spline;
     Eigen::VectorXd gdT_spline;
@@ -821,6 +846,7 @@ void testSeptic(int N, int BENCH_ITERS)
     }, BENCH_ITERS);
     printTimeStats("MINCO S4 Opt Step", step_minco_stats);
     printTimeStats("Spline7 Opt Step", step_spline_stats);
+    minco_s4.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out, gradHeadPVAJ_minco, gradTailPVAJ_minco);
 
     // 4. Gradient Consistency Check (vs MINCO)
     printSubHeader("Consistency: Gradients vs MINCO");
@@ -830,6 +856,14 @@ void testSeptic(int N, int BENCH_ITERS)
     Eigen::Matrix3Xd gradP_spline_inner_T = gradP_spline_full.block(1, 0, N - 1, 3).transpose();
     printCheck("Propagated Grad (Inner P)", (gradP_minco_out - gradP_spline_inner_T).norm());
     printCheck("Propagated Grad (Times)", (gradT_minco_out - gradT_spline_out).norm());
+    printCheck("Propagated Grad (Start P)", (gradHeadPVAJ_minco.col(0).transpose() - grads_ref.start.p.transpose()).norm());
+    printCheck("Propagated Grad (Start V)", (gradHeadPVAJ_minco.col(1).transpose() - grads_ref.start.v.transpose()).norm());
+    printCheck("Propagated Grad (Start A)", (gradHeadPVAJ_minco.col(2).transpose() - grads_ref.start.a.transpose()).norm());
+    printCheck("Propagated Grad (Start J)", (gradHeadPVAJ_minco.col(3).transpose() - grads_ref.start.j.transpose()).norm());
+    printCheck("Propagated Grad (End P)", (gradTailPVAJ_minco.col(0).transpose() - grads_ref.end.p.transpose()).norm());
+    printCheck("Propagated Grad (End V)", (gradTailPVAJ_minco.col(1).transpose() - grads_ref.end.v.transpose()).norm());
+    printCheck("Propagated Grad (End A)", (gradTailPVAJ_minco.col(2).transpose() - grads_ref.end.a.transpose()).norm());
+    printCheck("Propagated Grad (End J)", (gradTailPVAJ_minco.col(3).transpose() - grads_ref.end.j.transpose()).norm());
 
     // 5. Direct Gradient Consistency Check (vs Ref min_snap)
     printSubHeader("Consistency: Direct Gradients vs Ref");
@@ -897,15 +931,23 @@ void testSeptic(int N, int BENCH_ITERS)
     // 8. Print Boundary Gradients
     printSubHeader("Boundary Condition Gradients");
     cout << "\n[Start Boundary Gradients]" << endl;
-    cout << "Position (P): " << direct_bc_grads.start.p.transpose() << endl;
-    cout << "Velocity (V): " << direct_bc_grads.start.v.transpose() << endl;
-    cout << "Acceleration (A): " << direct_bc_grads.start.a.transpose() << endl;
-    cout << "Jerk (J): " << direct_bc_grads.start.j.transpose() << endl;
+    cout << "Position (P) MINCO : " << gradHeadPVAJ_minco.col(0).transpose() << endl;
+    cout << "Position (P) Spline: " << direct_bc_grads.start.p.transpose() << endl;
+    cout << "Velocity (V) MINCO : " << gradHeadPVAJ_minco.col(1).transpose() << endl;
+    cout << "Velocity (V) Spline: " << direct_bc_grads.start.v.transpose() << endl;
+    cout << "Acceleration (A) MINCO : " << gradHeadPVAJ_minco.col(2).transpose() << endl;
+    cout << "Acceleration (A) Spline: " << direct_bc_grads.start.a.transpose() << endl;
+    cout << "Jerk (J) MINCO : " << gradHeadPVAJ_minco.col(3).transpose() << endl;
+    cout << "Jerk (J) Spline: " << direct_bc_grads.start.j.transpose() << endl;
     cout << "\n[End Boundary Gradients]" << endl;
-    cout << "Position (P): " << direct_bc_grads.end.p.transpose() << endl;
-    cout << "Velocity (V): " << direct_bc_grads.end.v.transpose() << endl;
-    cout << "Acceleration (A): " << direct_bc_grads.end.a.transpose() << endl;
-    cout << "Jerk (J): " << direct_bc_grads.end.j.transpose() << endl;
+    cout << "Position (P) MINCO : " << gradTailPVAJ_minco.col(0).transpose() << endl;
+    cout << "Position (P) Spline: " << direct_bc_grads.end.p.transpose() << endl;
+    cout << "Velocity (V) MINCO : " << gradTailPVAJ_minco.col(1).transpose() << endl;
+    cout << "Velocity (V) Spline: " << direct_bc_grads.end.v.transpose() << endl;
+    cout << "Acceleration (A) MINCO : " << gradTailPVAJ_minco.col(2).transpose() << endl;
+    cout << "Acceleration (A) Spline: " << direct_bc_grads.end.a.transpose() << endl;
+    cout << "Jerk (J) MINCO : " << gradTailPVAJ_minco.col(3).transpose() << endl;
+    cout << "Jerk (J) Spline: " << direct_bc_grads.end.j.transpose() << endl;
 }
 
 int main()

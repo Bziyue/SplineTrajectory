@@ -345,8 +345,9 @@ namespace minco
         inline void propogateGrad(const Eigen::MatrixX3d &partialGradByCoeffs,
                                   const Eigen::VectorXd &partialGradByTimes,
                                   Eigen::Matrix3Xd &gradByPoints,
-                                  Eigen::VectorXd &gradByTimes)
-
+                                  Eigen::VectorXd &gradByTimes,
+                                  Eigen::Matrix<double, 3, 2> &gradByHeadPV,
+                                  Eigen::Matrix<double, 3, 2> &gradByTailPV)
         {
             gradByPoints.resize(3, N - 1);
             gradByTimes.resize(N);
@@ -389,7 +390,27 @@ namespace minco
 
             gradByTimes(N - 1) = B2.cwiseProduct(adjGrad.block<2, 3>(4 * N - 2, 0)).sum();
 
+            gradByHeadPV.col(0) = adjGrad.row(0).transpose();
+            gradByHeadPV.col(1) = adjGrad.row(1).transpose();
+            gradByTailPV.col(0) = adjGrad.row(4 * N - 2).transpose();
+            gradByTailPV.col(1) = adjGrad.row(4 * N - 1).transpose();
+
             gradByTimes += partialGradByTimes;
+        }
+
+        inline void propogateGrad(const Eigen::MatrixX3d &partialGradByCoeffs,
+                                  const Eigen::VectorXd &partialGradByTimes,
+                                  Eigen::Matrix3Xd &gradByPoints,
+                                  Eigen::VectorXd &gradByTimes)
+        {
+            Eigen::Matrix<double, 3, 2> gradByHeadPV;
+            Eigen::Matrix<double, 3, 2> gradByTailPV;
+            propogateGrad(partialGradByCoeffs,
+                          partialGradByTimes,
+                          gradByPoints,
+                          gradByTimes,
+                          gradByHeadPV,
+                          gradByTailPV);
         }
     };
 
@@ -584,8 +605,9 @@ namespace minco
         inline void propogateGrad(const Eigen::MatrixX3d &partialGradByCoeffs,
                                   const Eigen::VectorXd &partialGradByTimes,
                                   Eigen::Matrix3Xd &gradByPoints,
-                                  Eigen::VectorXd &gradByTimes)
-
+                                  Eigen::VectorXd &gradByTimes,
+                                  Eigen::Matrix3d &gradByHeadPVA,
+                                  Eigen::Matrix3d &gradByTailPVA)
         {
             gradByPoints.resize(3, N - 1);
             gradByTimes.resize(N);
@@ -650,7 +672,29 @@ namespace minco
 
             gradByTimes(N - 1) = B2.cwiseProduct(adjGrad.block<3, 3>(6 * N - 3, 0)).sum();
 
+            gradByHeadPVA.col(0) = adjGrad.row(0).transpose();
+            gradByHeadPVA.col(1) = adjGrad.row(1).transpose();
+            gradByHeadPVA.col(2) = adjGrad.row(2).transpose();
+            gradByTailPVA.col(0) = adjGrad.row(6 * N - 3).transpose();
+            gradByTailPVA.col(1) = adjGrad.row(6 * N - 2).transpose();
+            gradByTailPVA.col(2) = adjGrad.row(6 * N - 1).transpose();
+
             gradByTimes += partialGradByTimes;
+        }
+
+        inline void propogateGrad(const Eigen::MatrixX3d &partialGradByCoeffs,
+                                  const Eigen::VectorXd &partialGradByTimes,
+                                  Eigen::Matrix3Xd &gradByPoints,
+                                  Eigen::VectorXd &gradByTimes)
+        {
+            Eigen::Matrix3d gradByHeadPVA;
+            Eigen::Matrix3d gradByTailPVA;
+            propogateGrad(partialGradByCoeffs,
+                          partialGradByTimes,
+                          gradByPoints,
+                          gradByTimes,
+                          gradByHeadPVA,
+                          gradByTailPVA);
         }
     };
 
@@ -899,7 +943,9 @@ namespace minco
         inline void propogateGrad(const Eigen::MatrixX3d &partialGradByCoeffs,
                                   const Eigen::VectorXd &partialGradByTimes,
                                   Eigen::Matrix3Xd &gradByPoints,
-                                  Eigen::VectorXd &gradByTimes)
+                                  Eigen::VectorXd &gradByTimes,
+                                  Eigen::Matrix<double, 3, 4> &gradByHeadPVAJ,
+                                  Eigen::Matrix<double, 3, 4> &gradByTailPVAJ)
         {
             gradByPoints.resize(3, N - 1);
             gradByTimes.resize(N);
@@ -992,7 +1038,32 @@ namespace minco
                           840.0 * T3(N - 1) * b.row(8 * N - 1));
 
             gradByTimes(N - 1) = B2.cwiseProduct(adjGrad.block<4, 3>(8 * N - 4, 0)).sum();
+
+            gradByHeadPVAJ.col(0) = adjGrad.row(0).transpose();
+            gradByHeadPVAJ.col(1) = adjGrad.row(1).transpose();
+            gradByHeadPVAJ.col(2) = adjGrad.row(2).transpose();
+            gradByHeadPVAJ.col(3) = adjGrad.row(3).transpose();
+            gradByTailPVAJ.col(0) = adjGrad.row(8 * N - 4).transpose();
+            gradByTailPVAJ.col(1) = adjGrad.row(8 * N - 3).transpose();
+            gradByTailPVAJ.col(2) = adjGrad.row(8 * N - 2).transpose();
+            gradByTailPVAJ.col(3) = adjGrad.row(8 * N - 1).transpose();
+
             gradByTimes += partialGradByTimes;
+        }
+
+        inline void propogateGrad(const Eigen::MatrixX3d &partialGradByCoeffs,
+                                  const Eigen::VectorXd &partialGradByTimes,
+                                  Eigen::Matrix3Xd &gradByPoints,
+                                  Eigen::VectorXd &gradByTimes)
+        {
+            Eigen::Matrix<double, 3, 4> gradByHeadPVAJ;
+            Eigen::Matrix<double, 3, 4> gradByTailPVAJ;
+            propogateGrad(partialGradByCoeffs,
+                          partialGradByTimes,
+                          gradByPoints,
+                          gradByTimes,
+                          gradByHeadPVAJ,
+                          gradByTailPVAJ);
         }
     };
 
