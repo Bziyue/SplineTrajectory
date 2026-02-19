@@ -318,6 +318,140 @@ namespace SplineTrajectory
             }
         }
 
+        template <int BLOCK_SIZE, int DIM, typename BlockOpsType,
+                  typename WorkspaceType,
+                  typename DInvStorageType, typename UStorageType, typename LStorageType, typename LTStorageType,
+                  typename LambdaType, typename InteriorCallback>
+        inline void solveAdjointWithBoundaryCorrection(const WorkspaceType &workspace,
+                                                       int num_segments,
+                                                       const DInvStorageType &d_inv_cache,
+                                                       const UStorageType &u_blocks_cache,
+                                                       const LStorageType &l_blocks_cache,
+                                                       const LTStorageType &d_inv_t_mul_l_next_t_cache,
+                                                       LambdaType &lambda,
+                                                       Eigen::Matrix<double, BLOCK_SIZE, DIM> &raw_start_grad,
+                                                       Eigen::Matrix<double, BLOCK_SIZE, DIM> &raw_end_grad,
+                                                       InteriorCallback &&interior_callback)
+        {
+            raw_start_grad = readDerivativeGradBlock<BLOCK_SIZE, DIM>(workspace, 0);
+            raw_end_grad = readDerivativeGradBlock<BLOCK_SIZE, DIM>(workspace, num_segments);
+
+            const int num_blocks = num_segments - 1;
+            if (num_blocks <= 0)
+            {
+                return;
+            }
+
+            packInteriorDerivativeGrads<BLOCK_SIZE, DIM>(workspace, num_blocks, lambda);
+            solveAdjointLambda<BLOCK_SIZE, DIM, BlockOpsType>(
+                d_inv_cache, u_blocks_cache, d_inv_t_mul_l_next_t_cache, num_blocks, lambda);
+
+            interior_callback(num_blocks);
+
+            applyAdjointBoundaryCorrections<BLOCK_SIZE, DIM, BlockOpsType>(
+                l_blocks_cache, u_blocks_cache, num_blocks, lambda, raw_start_grad, raw_end_grad);
+        }
+
+        template <int BLOCK_SIZE, int DIM, typename BlockOpsType,
+                  typename DInvStorageType, typename UStorageType, typename LStorageType, typename LTStorageType,
+                  typename RhsStorageType, typename SolutionType, typename BoundaryBlockType, typename AssembleBlockFn>
+        inline void factorAndSolveBlockSystem(const int num_blocks,
+                                              const BoundaryBlockType &boundary_left,
+                                              const BoundaryBlockType &boundary_right,
+                                              DInvStorageType &d_inv_cache,
+                                              UStorageType &u_blocks_cache,
+                                              LStorageType &l_blocks_cache,
+                                              LTStorageType &d_inv_t_mul_l_next_t_cache,
+                                              RhsStorageType &rhs_mod,
+                                              SolutionType &solution,
+                                              AssembleBlockFn &&assemble_block)
+        {
+            if (num_blocks <= 0)
+            {
+                solution.resize(0, DIM);
+                return;
+            }
+
+            constexpr int kFlatBlockSize = BLOCK_SIZE * BLOCK_SIZE;
+            using BlockMatrix = typename BlockOpsType::BlockMatrix;
+            using BlockRhs = Eigen::Matrix<double, BLOCK_SIZE, DIM>;
+
+            u_blocks_cache.resize(num_blocks, kFlatBlockSize);
+            d_inv_cache.resize(num_blocks, kFlatBlockSize);
+            l_blocks_cache.resize(num_blocks, kFlatBlockSize);
+            d_inv_t_mul_l_next_t_cache.resize(std::max(0, num_blocks - 1), kFlatBlockSize);
+            rhs_mod.resize(num_blocks * BLOCK_SIZE, DIM);
+
+            for (int i = 0; i < num_blocks; ++i)
+            {
+                BlockMatrix D;
+                BlockMatrix L;
+                BlockMatrix U;
+                BlockRhs rhs_block;
+                assemble_block(i, D, L, U, rhs_block);
+
+                BlockOpsType::setBlock(l_blocks_cache, i, L);
+                BlockOpsType::setBlock(u_blocks_cache, i, U);
+
+                if (i == 0)
+                {
+                    rhs_block.noalias() -= L * boundary_left;
+                }
+                else
+                {
+                    BlockMatrix X;
+                    BlockOpsType::multiplyBlock(d_inv_cache, i - 1, u_blocks_cache, i - 1, X);
+
+                    BlockRhs Y;
+                    BlockOpsType::multiplyBlockNxD(
+                        d_inv_cache, i - 1,
+                        rhs_mod.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (i - 1)),
+                        Y);
+
+                    D.noalias() -= L * X;
+                    rhs_block.noalias() -= L * Y;
+                }
+
+                if (i == num_blocks - 1)
+                {
+                    rhs_block.noalias() -= U * boundary_right;
+                }
+
+                BlockMatrix D_inv;
+                BlockOpsType::inverse(D, D_inv);
+                BlockOpsType::setBlock(d_inv_cache, i, D_inv);
+
+                if (i > 0)
+                {
+                    BlockMatrix L_mul_D_prev_inv;
+                    BlockOpsType::multiplyBlock(l_blocks_cache, i, d_inv_cache, i - 1, L_mul_D_prev_inv);
+                    BlockOpsType::setBlock(d_inv_t_mul_l_next_t_cache, i - 1, L_mul_D_prev_inv.transpose());
+                }
+
+                rhs_mod.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * i) = rhs_block;
+            }
+
+            solveFactoredBlockSystem<BLOCK_SIZE, DIM, BlockOpsType>(
+                d_inv_cache, u_blocks_cache, rhs_mod, num_blocks, solution);
+        }
+
+        template <int DIM>
+        inline void assignBoundaryDerivativeGrads(const Eigen::Matrix<double, 2, DIM> &raw_grad,
+                                                  BoundaryStateGradsND<DIM, 3> &state)
+        {
+            state.v = raw_grad.row(0).transpose();
+            state.a = raw_grad.row(1).transpose();
+        }
+
+        template <int DIM>
+        inline void assignBoundaryDerivativeGrads(const Eigen::Matrix<double, 3, DIM> &raw_grad,
+                                                  BoundaryStateGradsND<DIM, 4> &state)
+        {
+            state.v = raw_grad.row(0).transpose();
+            state.a = raw_grad.row(1).transpose();
+            state.j = raw_grad.row(2).transpose();
+        }
+
         template <int BLOCK_SIZE, int DIM>
         struct BlockOps
         {
@@ -2263,107 +2397,97 @@ namespace SplineTrajectory
                 gradByTimes(i) += gc3.dot(dc3_dh) + gc4.dot(dc4_dh) + gc5.dot(dc5_dh);
             }
 
-            Eigen::Matrix<double, 2, DIM> raw_start_grad =
-                detail::readDerivativeGradBlock<2, DIM>(ws_gd_internal_, 0);
-            Eigen::Matrix<double, 2, DIM> raw_end_grad =
-                detail::readDerivativeGradBlock<2, DIM>(ws_gd_internal_, n);
-
-            const int num_blocks = n - 1;
-            if (num_blocks > 0)
-            {
-                detail::packInteriorDerivativeGrads<2, DIM>(ws_gd_internal_, num_blocks, ws_lambda_);
-                detail::solveAdjointLambda<2, DIM, BlockOps2>(
-                    D_inv_cache_, U_blocks_cache_, D_inv_T_mul_L_next_T_cache_, num_blocks, ws_lambda_);
-
-                for (int i = 0; i < num_blocks; ++i)
+            Eigen::Matrix<double, 2, DIM> raw_start_grad;
+            Eigen::Matrix<double, 2, DIM> raw_end_grad;
+            detail::solveAdjointWithBoundaryCorrection<2, DIM, BlockOps2>(
+                ws_gd_internal_, n,
+                D_inv_cache_, U_blocks_cache_, L_blocks_cache_, D_inv_T_mul_L_next_T_cache_,
+                ws_lambda_, raw_start_grad, raw_end_grad,
+                [&](const int num_blocks)
                 {
-                    const RowVectorType lam_snap = ws_lambda_.row(2 * i);
-                    const RowVectorType lam_jerk = ws_lambda_.row(2 * i + 1);
+                    for (int i = 0; i < num_blocks; ++i)
+                    {
+                        const RowVectorType lam_snap = ws_lambda_.row(2 * i);
+                        const RowVectorType lam_jerk = ws_lambda_.row(2 * i + 1);
 
-                    const int m = i + 1;
-                    const auto &tp_L = time_powers_[m - 1];
-                    const auto &tp_R = time_powers_[m];
+                        const int m = i + 1;
+                        const auto &tp_L = time_powers_[m - 1];
+                        const auto &tp_R = time_powers_[m];
 
-                    const RowVectorType dP_L = point_diffs_.row(m - 1);
-                    const RowVectorType dP_R = point_diffs_.row(m);
-                    const RowVectorType &V_prev = internal_vel_.row(m - 1);
-                    const RowVectorType &V_curr = internal_vel_.row(m);
-                    const RowVectorType &V_next = internal_vel_.row(m + 1);
+                        const RowVectorType dP_L = point_diffs_.row(m - 1);
+                        const RowVectorType dP_R = point_diffs_.row(m);
+                        const RowVectorType &V_prev = internal_vel_.row(m - 1);
+                        const RowVectorType &V_curr = internal_vel_.row(m);
+                        const RowVectorType &V_next = internal_vel_.row(m + 1);
 
-                    const RowVectorType &A_prev = internal_acc_.row(m - 1);
-                    const RowVectorType &A_curr = internal_acc_.row(m);
-                    const RowVectorType &A_next = internal_acc_.row(m + 1);
+                        const RowVectorType &A_prev = internal_acc_.row(m - 1);
+                        const RowVectorType &A_curr = internal_acc_.row(m);
+                        const RowVectorType &A_next = internal_acc_.row(m + 1);
 
-                    const double dD00_dhL = 576.0 * tp_L.h4_inv;
-                    const double dD01_dhL = -72.0 * tp_L.h3_inv;
-                    const double dD10_dhL = 72.0 * tp_L.h3_inv;
-                    const double dD11_dhL = -9.0 * tp_L.h2_inv;
+                        const double dD00_dhL = 576.0 * tp_L.h4_inv;
+                        const double dD01_dhL = -72.0 * tp_L.h3_inv;
+                        const double dD10_dhL = 72.0 * tp_L.h3_inv;
+                        const double dD11_dhL = -9.0 * tp_L.h2_inv;
 
-                    const double dL00_dhL = 504.0 * tp_L.h4_inv;
-                    const double dL01_dhL = 48.0 * tp_L.h3_inv;
-                    const double dL10_dhL = 48.0 * tp_L.h3_inv;
-                    const double dL11_dhL = 3.0 * tp_L.h2_inv;
+                        const double dL00_dhL = 504.0 * tp_L.h4_inv;
+                        const double dL01_dhL = 48.0 * tp_L.h3_inv;
+                        const double dL10_dhL = 48.0 * tp_L.h3_inv;
+                        const double dL11_dhL = 3.0 * tp_L.h2_inv;
 
-                    const double dD00_dhR = 576.0 * tp_R.h4_inv;
-                    const double dD01_dhR = 72.0 * tp_R.h3_inv;
-                    const double dD10_dhR = -72.0 * tp_R.h3_inv;
-                    const double dD11_dhR = -9.0 * tp_R.h2_inv;
+                        const double dD00_dhR = 576.0 * tp_R.h4_inv;
+                        const double dD01_dhR = 72.0 * tp_R.h3_inv;
+                        const double dD10_dhR = -72.0 * tp_R.h3_inv;
+                        const double dD11_dhR = -9.0 * tp_R.h2_inv;
 
-                    const double dU00_dhR = 504.0 * tp_R.h4_inv;
-                    const double dU01_dhR = -48.0 * tp_R.h3_inv;
-                    const double dU10_dhR = -48.0 * tp_R.h3_inv;
-                    const double dU11_dhR = 3.0 * tp_R.h2_inv;
+                        const double dU00_dhR = 504.0 * tp_R.h4_inv;
+                        const double dU01_dhR = -48.0 * tp_R.h3_inv;
+                        const double dU10_dhR = -48.0 * tp_R.h3_inv;
+                        const double dU11_dhR = 3.0 * tp_R.h2_inv;
 
-                    const RowVectorType drhs0_dhL = 1440.0 * dP_L * tp_L.h5_inv;
-                    const RowVectorType drhs1_dhL = 180.0 * dP_L * tp_L.h4_inv;
+                        const RowVectorType drhs0_dhL = 1440.0 * dP_L * tp_L.h5_inv;
+                        const RowVectorType drhs1_dhL = 180.0 * dP_L * tp_L.h4_inv;
 
-                    RowVectorType rhs0_L = drhs0_dhL -
-                                           (dD00_dhL * V_curr + dD01_dhL * A_curr +
-                                            dL00_dhL * V_prev + dL01_dhL * A_prev);
-                    RowVectorType rhs1_L = drhs1_dhL -
-                                           (dD10_dhL * V_curr + dD11_dhL * A_curr +
-                                            dL10_dhL * V_prev + dL11_dhL * A_prev);
+                        RowVectorType rhs0_L = drhs0_dhL -
+                                               (dD00_dhL * V_curr + dD01_dhL * A_curr +
+                                                dL00_dhL * V_prev + dL01_dhL * A_prev);
+                        RowVectorType rhs1_L = drhs1_dhL -
+                                               (dD10_dhL * V_curr + dD11_dhL * A_curr +
+                                                dL10_dhL * V_prev + dL11_dhL * A_prev);
 
-                    gradByTimes(m - 1) += lam_snap.dot(rhs0_L) + lam_jerk.dot(rhs1_L);
+                        gradByTimes(m - 1) += lam_snap.dot(rhs0_L) + lam_jerk.dot(rhs1_L);
 
-                    const RowVectorType drhs0_dhR = 1440.0 * dP_R * tp_R.h5_inv;
-                    const RowVectorType drhs1_dhR = -180.0 * dP_R * tp_R.h4_inv;
+                        const RowVectorType drhs0_dhR = 1440.0 * dP_R * tp_R.h5_inv;
+                        const RowVectorType drhs1_dhR = -180.0 * dP_R * tp_R.h4_inv;
 
-                    RowVectorType rhs0_R = drhs0_dhR -
-                                           (dD00_dhR * V_curr + dD01_dhR * A_curr +
-                                            dU00_dhR * V_next + dU01_dhR * A_next);
-                    RowVectorType rhs1_R = drhs1_dhR -
-                                           (dD10_dhR * V_curr + dD11_dhR * A_curr +
-                                            dU10_dhR * V_next + dU11_dhR * A_next);
+                        RowVectorType rhs0_R = drhs0_dhR -
+                                               (dD00_dhR * V_curr + dD01_dhR * A_curr +
+                                                dU00_dhR * V_next + dU01_dhR * A_next);
+                        RowVectorType rhs1_R = drhs1_dhR -
+                                               (dD10_dhR * V_curr + dD11_dhR * A_curr +
+                                                dU10_dhR * V_next + dU11_dhR * A_next);
 
-                    gradByTimes(m) += lam_snap.dot(rhs0_R) + lam_jerk.dot(rhs1_R);
+                        gradByTimes(m) += lam_snap.dot(rhs0_R) + lam_jerk.dot(rhs1_R);
 
-                    double dr4_dp_next = -360.0 * tp_R.h4_inv;
-                    double dr4_dp_curr = 360.0 * (tp_R.h4_inv - tp_L.h4_inv);
-                    double dr4_dp_prev = 360.0 * tp_L.h4_inv;
+                        const double dr4_dp_next = -360.0 * tp_R.h4_inv;
+                        const double dr4_dp_curr = 360.0 * (tp_R.h4_inv - tp_L.h4_inv);
+                        const double dr4_dp_prev = 360.0 * tp_L.h4_inv;
 
-                    double dr3_dp_next = 60.0 * tp_R.h3_inv;
-                    double dr3_dp_curr = -60.0 * (tp_R.h3_inv + tp_L.h3_inv);
-                    double dr3_dp_prev = 60.0 * tp_L.h3_inv;
+                        const double dr3_dp_next = 60.0 * tp_R.h3_inv;
+                        const double dr3_dp_curr = -60.0 * (tp_R.h3_inv + tp_L.h3_inv);
+                        const double dr3_dp_prev = 60.0 * tp_L.h3_inv;
 
-                    RowVectorType grad_P_next = lam_snap * dr4_dp_next + lam_jerk * dr3_dp_next;
-                    RowVectorType grad_P_curr = lam_snap * dr4_dp_curr + lam_jerk * dr3_dp_curr;
-                    RowVectorType grad_P_prev = lam_snap * dr4_dp_prev + lam_jerk * dr3_dp_prev;
+                        const RowVectorType grad_P_next = lam_snap * dr4_dp_next + lam_jerk * dr3_dp_next;
+                        const RowVectorType grad_P_curr = lam_snap * dr4_dp_curr + lam_jerk * dr3_dp_curr;
+                        const RowVectorType grad_P_prev = lam_snap * dr4_dp_prev + lam_jerk * dr3_dp_prev;
 
-                    add_point_grad(i + 2, grad_P_next);
-                    add_point_grad(i + 1, grad_P_curr);
-                    add_point_grad(i, grad_P_prev);
-                }
+                        add_point_grad(i + 2, grad_P_next);
+                        add_point_grad(i + 1, grad_P_curr);
+                        add_point_grad(i, grad_P_prev);
+                    }
+                });
 
-                detail::applyAdjointBoundaryCorrections<2, DIM, BlockOps2>(
-                    L_blocks_cache_, U_blocks_cache_, num_blocks, ws_lambda_, raw_start_grad, raw_end_grad);
-            }
-
-            startGrads.v = raw_start_grad.row(0).transpose();
-            startGrads.a = raw_start_grad.row(1).transpose();
-
-            endGrads.v = raw_end_grad.row(0).transpose();
-            endGrads.a = raw_end_grad.row(1).transpose();
+            detail::assignBoundaryDerivativeGrads(raw_start_grad, startGrads);
+            detail::assignBoundaryDerivativeGrads(raw_end_grad, endGrads);
         }
         void precomputePointDiffs()
         {
@@ -2391,71 +2515,35 @@ namespace SplineTrajectory
             B_right.row(0) = boundary_.end_velocity.transpose();
             B_right.row(1) = boundary_.end_acceleration.transpose();
 
-            U_blocks_cache_.resize(num_blocks, 4);
-            D_inv_cache_.resize(num_blocks, 4);
-            L_blocks_cache_.resize(num_blocks, 4);
-            D_inv_T_mul_L_next_T_cache_.resize(std::max(0, num_blocks - 1), 4);
-            ws_rhs_mod_.resize(num_blocks * 2, DIM);
-
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                const int k = i + 2;
-                const auto &tp_L = time_powers_[k - 2];
-                const auto &tp_R = time_powers_[k - 1];
-
-                auto rhs_block = ws_rhs_mod_.template middleRows<2>(2 * i);
-                const RowVectorType dP_L = point_diffs_.row(k - 2);
-                const RowVectorType dP_R = point_diffs_.row(k - 1);
-                rhs_block.row(0) = -360.0 * (dP_R * tp_R.h4_inv + dP_L * tp_L.h4_inv);
-                rhs_block.row(1) = 60.0 * (dP_R * tp_R.h3_inv - dP_L * tp_L.h3_inv);
-
-                Eigen::Matrix2d D;
-                D << -192.0 * (tp_L.h3_inv + tp_R.h3_inv), 36.0 * (tp_L.h2_inv - tp_R.h2_inv),
-                    -36.0 * (tp_L.h2_inv - tp_R.h2_inv), 9.0 * (tp_L.h_inv + tp_R.h_inv);
-
-                Eigen::Matrix2d L;
-                L << -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv,
-                    -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv;
-                BlockOps2::setBlock(L_blocks_cache_, i, L);
-
-                Eigen::Matrix2d U;
-                U << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
-                    24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
-                BlockOps2::setBlock(U_blocks_cache_, i, U);
-
-                if (i == 0)
+            detail::factorAndSolveBlockSystem<2, DIM, BlockOps2>(
+                num_blocks,
+                B_left, B_right,
+                D_inv_cache_, U_blocks_cache_, L_blocks_cache_, D_inv_T_mul_L_next_T_cache_,
+                ws_rhs_mod_, ws_solution_,
+                [&](const int i,
+                    Eigen::Matrix2d &D,
+                    Eigen::Matrix2d &L,
+                    Eigen::Matrix2d &U,
+                    Eigen::Matrix<double, 2, DIM> &rhs_block)
                 {
-                    rhs_block.noalias() -= L * B_left;
-                }
-                else
-                {
-                    Eigen::Matrix2d X;
-                    BlockOps2::multiplyBlock(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
-                    Eigen::Matrix<double, 2, DIM> Y;
-                    BlockOps2::multiplyBlockNxD(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<2>(2 * (i - 1)), Y);
-                    D.noalias() -= L * X;
-                    rhs_block.noalias() -= L * Y;
-                }
+                    const int k = i + 2;
+                    const auto &tp_L = time_powers_[k - 2];
+                    const auto &tp_R = time_powers_[k - 1];
 
-                if (k == n - 1)
-                {
-                    rhs_block.noalias() -= U * B_right;
-                }
+                    const RowVectorType dP_L = point_diffs_.row(k - 2);
+                    const RowVectorType dP_R = point_diffs_.row(k - 1);
+                    rhs_block.row(0) = -360.0 * (dP_R * tp_R.h4_inv + dP_L * tp_L.h4_inv);
+                    rhs_block.row(1) = 60.0 * (dP_R * tp_R.h3_inv - dP_L * tp_L.h3_inv);
 
-                Eigen::Matrix2d D_inv;
-                BlockOps2::inverse(D, D_inv);
-                BlockOps2::setBlock(D_inv_cache_, i, D_inv);
+                    D << -192.0 * (tp_L.h3_inv + tp_R.h3_inv), 36.0 * (tp_L.h2_inv - tp_R.h2_inv),
+                        -36.0 * (tp_L.h2_inv - tp_R.h2_inv), 9.0 * (tp_L.h_inv + tp_R.h_inv);
 
-                if (i > 0)
-                {
-                    Eigen::Matrix2d L_mul_D_prev_inv;
-                    BlockOps2::multiplyBlock(L_blocks_cache_, i, D_inv_cache_, i - 1, L_mul_D_prev_inv);
-                    BlockOps2::setBlock(D_inv_T_mul_L_next_T_cache_, i - 1, L_mul_D_prev_inv.transpose());
-                }
-            }
+                    L << -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv,
+                        -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv;
 
-            detail::solveFactoredBlockSystem<2, DIM, BlockOps2>(
-                D_inv_cache_, U_blocks_cache_, ws_rhs_mod_, num_blocks, ws_solution_);
+                    U << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
+                        24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
+                });
 
             detail::unpackInteriorStates<2, DIM>(ws_solution_, num_blocks, p_out, q_out);
         }
@@ -2987,184 +3075,172 @@ namespace SplineTrajectory
                 }
             }
 
-            Eigen::Matrix<double, 3, DIM> raw_start_grad =
-                detail::readDerivativeGradBlock<3, DIM>(ws_gd_internal_, 0);
-            Eigen::Matrix<double, 3, DIM> raw_end_grad =
-                detail::readDerivativeGradBlock<3, DIM>(ws_gd_internal_, n);
-
-            const int num_blocks = n - 1;
-            if (num_blocks > 0)
-            {
-                detail::packInteriorDerivativeGrads<3, DIM>(ws_gd_internal_, num_blocks, ws_lambda_);
-                detail::solveAdjointLambda<3, DIM, BlockOps3>(
-                    D_inv_cache_, U_blocks_cache_, D_inv_T_mul_L_next_T_cache_, num_blocks, ws_lambda_);
-
-                for (int i = 0; i < num_blocks; ++i)
+            Eigen::Matrix<double, 3, DIM> raw_start_grad;
+            Eigen::Matrix<double, 3, DIM> raw_end_grad;
+            detail::solveAdjointWithBoundaryCorrection<3, DIM, BlockOps3>(
+                ws_gd_internal_, n,
+                D_inv_cache_, U_blocks_cache_, L_blocks_cache_, D_inv_T_mul_L_next_T_cache_,
+                ws_lambda_, raw_start_grad, raw_end_grad,
+                [&](const int num_blocks)
                 {
-                    const int m = i + 1;
-                    const auto &tp_L = time_powers_[m - 1];
-                    const auto &tp_R = time_powers_[m];
-
-                    const RowVectorType &P_prev = spatial_points_.row(m - 1);
-                    const RowVectorType &P_curr = spatial_points_.row(m);
-                    const RowVectorType &P_next = spatial_points_.row(m + 1);
-                    const RowVectorType &V_prev = internal_vel_.row(m - 1);
-                    const RowVectorType &V_curr = internal_vel_.row(m);
-                    const RowVectorType &V_next = internal_vel_.row(m + 1);
-
-                    const RowVectorType &A_prev = internal_acc_.row(m - 1);
-                    const RowVectorType &A_curr = internal_acc_.row(m);
-                    const RowVectorType &A_next = internal_acc_.row(m + 1);
-
-                    const RowVectorType &J_prev = internal_jerk_.row(m - 1);
-                    const RowVectorType &J_curr = internal_jerk_.row(m);
-                    const RowVectorType &J_next = internal_jerk_.row(m + 1);
-
-                    const RowVectorType lam_3 = ws_lambda_.row(3 * i);
-                    const RowVectorType lam_4 = ws_lambda_.row(3 * i + 1);
-                    const RowVectorType lam_5 = ws_lambda_.row(3 * i + 2);
-
-                    const double dD00_dhL = -1440.0 * tp_L.h4_inv;
-                    const double dD01_dhL = 240.0 * tp_L.h3_inv;
-                    const double dD02_dhL = -16.0 * tp_L.h2_inv;
-                    const double dD10_dhL = -21600.0 * tp_L.h5_inv;
-                    const double dD11_dhL = 3600.0 * tp_L.h4_inv;
-                    const double dD12_dhL = -240.0 * tp_L.h3_inv;
-                    const double dD20_dhL = -129600.0 * tp_L.h6_inv;
-                    const double dD21_dhL = 21600.0 * tp_L.h5_inv;
-                    const double dD22_dhL = -1440.0 * tp_L.h4_inv;
-
-                    const double dL00_dhL = -1080.0 * tp_L.h4_inv;
-                    const double dL01_dhL = -120.0 * tp_L.h3_inv;
-                    const double dL02_dhL = -4.0 * tp_L.h2_inv;
-                    const double dL10_dhL = -18720.0 * tp_L.h5_inv;
-                    const double dL11_dhL = -2520.0 * tp_L.h4_inv;
-                    const double dL12_dhL = -120.0 * tp_L.h3_inv;
-                    const double dL20_dhL = -122400.0 * tp_L.h6_inv;
-                    const double dL21_dhL = -18720.0 * tp_L.h5_inv;
-                    const double dL22_dhL = -1080.0 * tp_L.h4_inv;
-
-                    const double dD00_dhR = -1440.0 * tp_R.h4_inv;
-                    const double dD01_dhR = -240.0 * tp_R.h3_inv;
-                    const double dD02_dhR = -16.0 * tp_R.h2_inv;
-                    const double dD10_dhR = 21600.0 * tp_R.h5_inv;
-                    const double dD11_dhR = 3600.0 * tp_R.h4_inv;
-                    const double dD12_dhR = 240.0 * tp_R.h3_inv;
-                    const double dD20_dhR = -129600.0 * tp_R.h6_inv;
-                    const double dD21_dhR = -21600.0 * tp_R.h5_inv;
-                    const double dD22_dhR = -1440.0 * tp_R.h4_inv;
-
-                    const double dU00_dhR = -1080.0 * tp_R.h4_inv;
-                    const double dU01_dhR = 120.0 * tp_R.h3_inv;
-                    const double dU02_dhR = -4.0 * tp_R.h2_inv;
-                    const double dU10_dhR = 18720.0 * tp_R.h5_inv;
-                    const double dU11_dhR = -2520.0 * tp_R.h4_inv;
-                    const double dU12_dhR = 120.0 * tp_R.h3_inv;
-                    const double dU20_dhR = -122400.0 * tp_R.h6_inv;
-                    const double dU21_dhR = 18720.0 * tp_R.h5_inv;
-                    const double dU22_dhR = -1080.0 * tp_R.h4_inv;
-                    if constexpr (DIM <= 3)
+                    for (int i = 0; i < num_blocks; ++i)
                     {
-                        double grad_hL = 0.0;
-                        double grad_hR = 0.0;
-                        for (int j = 0; j < DIM; ++j)
+                        const int m = i + 1;
+                        const auto &tp_L = time_powers_[m - 1];
+                        const auto &tp_R = time_powers_[m];
+
+                        const RowVectorType &P_prev = spatial_points_.row(m - 1);
+                        const RowVectorType &P_curr = spatial_points_.row(m);
+                        const RowVectorType &P_next = spatial_points_.row(m + 1);
+                        const RowVectorType &V_prev = internal_vel_.row(m - 1);
+                        const RowVectorType &V_curr = internal_vel_.row(m);
+                        const RowVectorType &V_next = internal_vel_.row(m + 1);
+
+                        const RowVectorType &A_prev = internal_acc_.row(m - 1);
+                        const RowVectorType &A_curr = internal_acc_.row(m);
+                        const RowVectorType &A_next = internal_acc_.row(m + 1);
+
+                        const RowVectorType &J_prev = internal_jerk_.row(m - 1);
+                        const RowVectorType &J_curr = internal_jerk_.row(m);
+                        const RowVectorType &J_next = internal_jerk_.row(m + 1);
+
+                        const RowVectorType lam_3 = ws_lambda_.row(3 * i);
+                        const RowVectorType lam_4 = ws_lambda_.row(3 * i + 1);
+                        const RowVectorType lam_5 = ws_lambda_.row(3 * i + 2);
+
+                        const double dD00_dhL = -1440.0 * tp_L.h4_inv;
+                        const double dD01_dhL = 240.0 * tp_L.h3_inv;
+                        const double dD02_dhL = -16.0 * tp_L.h2_inv;
+                        const double dD10_dhL = -21600.0 * tp_L.h5_inv;
+                        const double dD11_dhL = 3600.0 * tp_L.h4_inv;
+                        const double dD12_dhL = -240.0 * tp_L.h3_inv;
+                        const double dD20_dhL = -129600.0 * tp_L.h6_inv;
+                        const double dD21_dhL = 21600.0 * tp_L.h5_inv;
+                        const double dD22_dhL = -1440.0 * tp_L.h4_inv;
+
+                        const double dL00_dhL = -1080.0 * tp_L.h4_inv;
+                        const double dL01_dhL = -120.0 * tp_L.h3_inv;
+                        const double dL02_dhL = -4.0 * tp_L.h2_inv;
+                        const double dL10_dhL = -18720.0 * tp_L.h5_inv;
+                        const double dL11_dhL = -2520.0 * tp_L.h4_inv;
+                        const double dL12_dhL = -120.0 * tp_L.h3_inv;
+                        const double dL20_dhL = -122400.0 * tp_L.h6_inv;
+                        const double dL21_dhL = -18720.0 * tp_L.h5_inv;
+                        const double dL22_dhL = -1080.0 * tp_L.h4_inv;
+
+                        const double dD00_dhR = -1440.0 * tp_R.h4_inv;
+                        const double dD01_dhR = -240.0 * tp_R.h3_inv;
+                        const double dD02_dhR = -16.0 * tp_R.h2_inv;
+                        const double dD10_dhR = 21600.0 * tp_R.h5_inv;
+                        const double dD11_dhR = 3600.0 * tp_R.h4_inv;
+                        const double dD12_dhR = 240.0 * tp_R.h3_inv;
+                        const double dD20_dhR = -129600.0 * tp_R.h6_inv;
+                        const double dD21_dhR = -21600.0 * tp_R.h5_inv;
+                        const double dD22_dhR = -1440.0 * tp_R.h4_inv;
+
+                        const double dU00_dhR = -1080.0 * tp_R.h4_inv;
+                        const double dU01_dhR = 120.0 * tp_R.h3_inv;
+                        const double dU02_dhR = -4.0 * tp_R.h2_inv;
+                        const double dU10_dhR = 18720.0 * tp_R.h5_inv;
+                        const double dU11_dhR = -2520.0 * tp_R.h4_inv;
+                        const double dU12_dhR = 120.0 * tp_R.h3_inv;
+                        const double dU20_dhR = -122400.0 * tp_R.h6_inv;
+                        const double dU21_dhR = 18720.0 * tp_R.h5_inv;
+                        const double dU22_dhR = -1080.0 * tp_R.h4_inv;
+                        if constexpr (DIM <= 3)
                         {
-                            const double p_prev = P_prev(j);
-                            const double p_curr = P_curr(j);
-                            const double p_next = P_next(j);
-                            const double v_prev = V_prev(j);
-                            const double v_curr = V_curr(j);
-                            const double v_next = V_next(j);
-                            const double a_prev = A_prev(j);
-                            const double a_curr = A_curr(j);
-                            const double a_next = A_next(j);
-                            const double j_prev = J_prev(j);
-                            const double j_curr = J_curr(j);
-                            const double j_next = J_next(j);
+                            double grad_hL = 0.0;
+                            double grad_hR = 0.0;
+                            for (int j = 0; j < DIM; ++j)
+                            {
+                                const double p_prev = P_prev(j);
+                                const double p_curr = P_curr(j);
+                                const double p_next = P_next(j);
+                                const double v_prev = V_prev(j);
+                                const double v_curr = V_curr(j);
+                                const double v_next = V_next(j);
+                                const double a_prev = A_prev(j);
+                                const double a_curr = A_curr(j);
+                                const double a_next = A_next(j);
+                                const double j_prev = J_prev(j);
+                                const double j_curr = J_curr(j);
+                                const double j_next = J_next(j);
 
-                            const double rhs0_L = -3360.0 * (p_curr - p_prev) * tp_L.h5_inv -
-                                                  (dD00_dhL * v_curr + dD01_dhL * a_curr + dD02_dhL * j_curr +
-                                                   dL00_dhL * v_prev + dL01_dhL * a_prev + dL02_dhL * j_prev);
-                            const double rhs1_L = -50400.0 * (p_curr - p_prev) * tp_L.h6_inv -
-                                                  (dD10_dhL * v_curr + dD11_dhL * a_curr + dD12_dhL * j_curr +
-                                                   dL10_dhL * v_prev + dL11_dhL * a_prev + dL12_dhL * j_prev);
-                            const double rhs2_L = -302400.0 * (p_curr - p_prev) * tp_L.h7_inv -
-                                                  (dD20_dhL * v_curr + dD21_dhL * a_curr + dD22_dhL * j_curr +
-                                                   dL20_dhL * v_prev + dL21_dhL * a_prev + dL22_dhL * j_prev);
+                                const double rhs0_L = -3360.0 * (p_curr - p_prev) * tp_L.h5_inv -
+                                                      (dD00_dhL * v_curr + dD01_dhL * a_curr + dD02_dhL * j_curr +
+                                                       dL00_dhL * v_prev + dL01_dhL * a_prev + dL02_dhL * j_prev);
+                                const double rhs1_L = -50400.0 * (p_curr - p_prev) * tp_L.h6_inv -
+                                                      (dD10_dhL * v_curr + dD11_dhL * a_curr + dD12_dhL * j_curr +
+                                                       dL10_dhL * v_prev + dL11_dhL * a_prev + dL12_dhL * j_prev);
+                                const double rhs2_L = -302400.0 * (p_curr - p_prev) * tp_L.h7_inv -
+                                                      (dD20_dhL * v_curr + dD21_dhL * a_curr + dD22_dhL * j_curr +
+                                                       dL20_dhL * v_prev + dL21_dhL * a_prev + dL22_dhL * j_prev);
 
-                            const double rhs0_R = -3360.0 * (p_next - p_curr) * tp_R.h5_inv -
-                                                  (dD00_dhR * v_curr + dD01_dhR * a_curr + dD02_dhR * j_curr +
-                                                   dU00_dhR * v_next + dU01_dhR * a_next + dU02_dhR * j_next);
-                            const double rhs1_R = -50400.0 * (p_curr - p_next) * tp_R.h6_inv -
-                                                  (dD10_dhR * v_curr + dD11_dhR * a_curr + dD12_dhR * j_curr +
-                                                   dU10_dhR * v_next + dU11_dhR * a_next + dU12_dhR * j_next);
-                            const double rhs2_R = -302400.0 * (p_next - p_curr) * tp_R.h7_inv -
-                                                  (dD20_dhR * v_curr + dD21_dhR * a_curr + dD22_dhR * j_curr +
-                                                   dU20_dhR * v_next + dU21_dhR * a_next + dU22_dhR * j_next);
+                                const double rhs0_R = -3360.0 * (p_next - p_curr) * tp_R.h5_inv -
+                                                      (dD00_dhR * v_curr + dD01_dhR * a_curr + dD02_dhR * j_curr +
+                                                       dU00_dhR * v_next + dU01_dhR * a_next + dU02_dhR * j_next);
+                                const double rhs1_R = -50400.0 * (p_curr - p_next) * tp_R.h6_inv -
+                                                      (dD10_dhR * v_curr + dD11_dhR * a_curr + dD12_dhR * j_curr +
+                                                       dU10_dhR * v_next + dU11_dhR * a_next + dU12_dhR * j_next);
+                                const double rhs2_R = -302400.0 * (p_next - p_curr) * tp_R.h7_inv -
+                                                      (dD20_dhR * v_curr + dD21_dhR * a_curr + dD22_dhR * j_curr +
+                                                       dU20_dhR * v_next + dU21_dhR * a_next + dU22_dhR * j_next);
 
-                            grad_hL += lam_3(j) * rhs0_L + lam_4(j) * rhs1_L + lam_5(j) * rhs2_L;
-                            grad_hR += lam_3(j) * rhs0_R + lam_4(j) * rhs1_R + lam_5(j) * rhs2_R;
+                                grad_hL += lam_3(j) * rhs0_L + lam_4(j) * rhs1_L + lam_5(j) * rhs2_L;
+                                grad_hR += lam_3(j) * rhs0_R + lam_4(j) * rhs1_R + lam_5(j) * rhs2_R;
+                            }
+                            gradByTimes(m - 1) += grad_hL;
+                            gradByTimes(m) += grad_hR;
                         }
-                        gradByTimes(m - 1) += grad_hL;
-                        gradByTimes(m) += grad_hR;
+                        else
+                        {
+                            RowVectorType rhs0_L = -3360.0 * (P_curr - P_prev) * tp_L.h5_inv -
+                                                   (dD00_dhL * V_curr + dD01_dhL * A_curr + dD02_dhL * J_curr +
+                                                    dL00_dhL * V_prev + dL01_dhL * A_prev + dL02_dhL * J_prev);
+                            RowVectorType rhs1_L = -50400.0 * (P_curr - P_prev) * tp_L.h6_inv -
+                                                   (dD10_dhL * V_curr + dD11_dhL * A_curr + dD12_dhL * J_curr +
+                                                    dL10_dhL * V_prev + dL11_dhL * A_prev + dL12_dhL * J_prev);
+                            RowVectorType rhs2_L = -302400.0 * (P_curr - P_prev) * tp_L.h7_inv -
+                                                   (dD20_dhL * V_curr + dD21_dhL * A_curr + dD22_dhL * J_curr +
+                                                    dL20_dhL * V_prev + dL21_dhL * A_prev + dL22_dhL * J_prev);
+
+                            RowVectorType rhs0_R = -3360.0 * (P_next - P_curr) * tp_R.h5_inv -
+                                                   (dD00_dhR * V_curr + dD01_dhR * A_curr + dD02_dhR * J_curr +
+                                                    dU00_dhR * V_next + dU01_dhR * A_next + dU02_dhR * J_next);
+                            RowVectorType rhs1_R = -50400.0 * (P_curr - P_next) * tp_R.h6_inv -
+                                                   (dD10_dhR * V_curr + dD11_dhR * A_curr + dD12_dhR * J_curr +
+                                                    dU10_dhR * V_next + dU11_dhR * A_next + dU12_dhR * J_next);
+                            RowVectorType rhs2_R = -302400.0 * (P_next - P_curr) * tp_R.h7_inv -
+                                                   (dD20_dhR * V_curr + dD21_dhR * A_curr + dD22_dhR * J_curr +
+                                                    dU20_dhR * V_next + dU21_dhR * A_next + dU22_dhR * J_next);
+
+                            gradByTimes(m - 1) += lam_3.dot(rhs0_L) + lam_4.dot(rhs1_L) + lam_5.dot(rhs2_L);
+                            gradByTimes(m) += lam_3.dot(rhs0_R) + lam_4.dot(rhs1_R) + lam_5.dot(rhs2_R);
+                        }
+
+                        const double dr3_dp_next = 840.0 * tp_R.h4_inv;
+                        const double dr4_dp_next = -10080.0 * tp_R.h5_inv;
+                        const double dr5_dp_next = 50400.0 * tp_R.h6_inv;
+                        const RowVectorType grad_P_next = lam_3 * dr3_dp_next + lam_4 * dr4_dp_next + lam_5 * dr5_dp_next;
+
+                        const double dr3_dp_curr = -840.0 * (tp_R.h4_inv - tp_L.h4_inv);
+                        const double dr4_dp_curr = 10080.0 * (tp_R.h5_inv + tp_L.h5_inv);
+                        const double dr5_dp_curr = -50400.0 * (tp_R.h6_inv - tp_L.h6_inv);
+                        const RowVectorType grad_P_curr = lam_3 * dr3_dp_curr + lam_4 * dr4_dp_curr + lam_5 * dr5_dp_curr;
+
+                        const double dr3_dp_prev = -840.0 * tp_L.h4_inv;
+                        const double dr4_dp_prev = -10080.0 * tp_L.h5_inv;
+                        const double dr5_dp_prev = -50400.0 * tp_L.h6_inv;
+                        const RowVectorType grad_P_prev = lam_3 * dr3_dp_prev + lam_4 * dr4_dp_prev + lam_5 * dr5_dp_prev;
+
+                        add_point_grad(i + 2, grad_P_next);
+                        add_point_grad(i + 1, grad_P_curr);
+                        add_point_grad(i, grad_P_prev);
                     }
-                    else
-                    {
-                        RowVectorType rhs0_L = -3360.0 * (P_curr - P_prev) * tp_L.h5_inv -
-                                               (dD00_dhL * V_curr + dD01_dhL * A_curr + dD02_dhL * J_curr +
-                                                dL00_dhL * V_prev + dL01_dhL * A_prev + dL02_dhL * J_prev);
-                        RowVectorType rhs1_L = -50400.0 * (P_curr - P_prev) * tp_L.h6_inv -
-                                               (dD10_dhL * V_curr + dD11_dhL * A_curr + dD12_dhL * J_curr +
-                                                dL10_dhL * V_prev + dL11_dhL * A_prev + dL12_dhL * J_prev);
-                        RowVectorType rhs2_L = -302400.0 * (P_curr - P_prev) * tp_L.h7_inv -
-                                               (dD20_dhL * V_curr + dD21_dhL * A_curr + dD22_dhL * J_curr +
-                                                dL20_dhL * V_prev + dL21_dhL * A_prev + dL22_dhL * J_prev);
+                });
 
-                        RowVectorType rhs0_R = -3360.0 * (P_next - P_curr) * tp_R.h5_inv -
-                                               (dD00_dhR * V_curr + dD01_dhR * A_curr + dD02_dhR * J_curr +
-                                                dU00_dhR * V_next + dU01_dhR * A_next + dU02_dhR * J_next);
-                        RowVectorType rhs1_R = -50400.0 * (P_curr - P_next) * tp_R.h6_inv -
-                                               (dD10_dhR * V_curr + dD11_dhR * A_curr + dD12_dhR * J_curr +
-                                                dU10_dhR * V_next + dU11_dhR * A_next + dU12_dhR * J_next);
-                        RowVectorType rhs2_R = -302400.0 * (P_next - P_curr) * tp_R.h7_inv -
-                                               (dD20_dhR * V_curr + dD21_dhR * A_curr + dD22_dhR * J_curr +
-                                                dU20_dhR * V_next + dU21_dhR * A_next + dU22_dhR * J_next);
-
-                        gradByTimes(m - 1) += lam_3.dot(rhs0_L) + lam_4.dot(rhs1_L) + lam_5.dot(rhs2_L);
-                        gradByTimes(m) += lam_3.dot(rhs0_R) + lam_4.dot(rhs1_R) + lam_5.dot(rhs2_R);
-                    }
-
-                    double dr3_dp_next = 840.0 * tp_R.h4_inv;
-                    double dr4_dp_next = -10080.0 * tp_R.h5_inv;
-                    double dr5_dp_next = 50400.0 * tp_R.h6_inv;
-                    RowVectorType grad_P_next = lam_3 * dr3_dp_next + lam_4 * dr4_dp_next + lam_5 * dr5_dp_next;
-
-                    double dr3_dp_curr = -840.0 * (tp_R.h4_inv - tp_L.h4_inv);
-                    double dr4_dp_curr = 10080.0 * (tp_R.h5_inv + tp_L.h5_inv);
-                    double dr5_dp_curr = -50400.0 * (tp_R.h6_inv - tp_L.h6_inv);
-                    RowVectorType grad_P_curr = lam_3 * dr3_dp_curr + lam_4 * dr4_dp_curr + lam_5 * dr5_dp_curr;
-
-                    double dr3_dp_prev = -840.0 * tp_L.h4_inv;
-                    double dr4_dp_prev = -10080.0 * tp_L.h5_inv;
-                    double dr5_dp_prev = -50400.0 * tp_L.h6_inv;
-                    RowVectorType grad_P_prev = lam_3 * dr3_dp_prev + lam_4 * dr4_dp_prev + lam_5 * dr5_dp_prev;
-
-                    add_point_grad(i + 2, grad_P_next);
-                    add_point_grad(i + 1, grad_P_curr);
-                    add_point_grad(i, grad_P_prev);
-                }
-
-                detail::applyAdjointBoundaryCorrections<3, DIM, BlockOps3>(
-                    L_blocks_cache_, U_blocks_cache_, num_blocks, ws_lambda_, raw_start_grad, raw_end_grad);
-            }
-
-            startGrads.v = raw_start_grad.row(0).transpose();
-            startGrads.a = raw_start_grad.row(1).transpose();
-            startGrads.j = raw_start_grad.row(2).transpose();
-
-            endGrads.v = raw_end_grad.row(0).transpose();
-            endGrads.a = raw_end_grad.row(1).transpose();
-            endGrads.j = raw_end_grad.row(2).transpose();
+            detail::assignBoundaryDerivativeGrads(raw_start_grad, startGrads);
+            detail::assignBoundaryDerivativeGrads(raw_end_grad, endGrads);
         }
         void precomputePointDiffs()
         {
@@ -3202,80 +3278,40 @@ namespace SplineTrajectory
             B_right.row(1) = boundary_.end_acceleration.transpose();
             B_right.row(2) = boundary_.end_jerk.transpose();
 
-            U_blocks_cache_.resize(num_blocks, 9);
-            D_inv_cache_.resize(num_blocks, 9);
-            L_blocks_cache_.resize(num_blocks, 9);
-            D_inv_T_mul_L_next_T_cache_.resize(std::max(0, num_blocks - 1), 9);
-            ws_rhs_mod_.resize(num_blocks * 3, DIM);
-
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                const int k = i + 2;
-                const auto &tp_L = time_powers_[k - 2];
-                const auto &tp_R = time_powers_[k - 1];
-
-                Eigen::Matrix<double, 1, DIM> r3 = 840.0 * ((spatial_points_.row(k) - spatial_points_.row(k - 1)) * tp_R.h4_inv +
-                                                            (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h4_inv);
-                Eigen::Matrix<double, 1, DIM> r4 = 10080.0 * ((spatial_points_.row(k - 1) - spatial_points_.row(k)) * tp_R.h5_inv +
-                                                              (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h5_inv);
-                Eigen::Matrix<double, 1, DIM> r5 = 50400.0 * ((spatial_points_.row(k) - spatial_points_.row(k - 1)) * tp_R.h6_inv +
-                                                              (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h6_inv);
-                Eigen::Matrix<double, 3, DIM> r;
-                r.row(0) = r3;
-                r.row(1) = r4;
-                r.row(2) = r5;
-
-                Eigen::Matrix3d D;
-                D << 480.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_R.h2_inv - tp_L.h2_inv), 16.0 * (tp_L.h_inv + tp_R.h_inv),
-                    5400.0 * (tp_L.h4_inv - tp_R.h4_inv), -1200.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_L.h2_inv - tp_R.h2_inv),
-                    25920.0 * (tp_L.h5_inv + tp_R.h5_inv), 5400.0 * (tp_R.h4_inv - tp_L.h4_inv), 480.0 * (tp_L.h3_inv + tp_R.h3_inv);
-
-                Eigen::Matrix3d L;
-                L << 360.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv, 4.0 * tp_L.h_inv,
-                    4680.0 * tp_L.h4_inv, 840.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv,
-                    24480.0 * tp_L.h5_inv, 4680.0 * tp_L.h4_inv, 360.0 * tp_L.h3_inv;
-                BlockOps3::setBlock(L_blocks_cache_, i, L);
-
-                Eigen::Matrix3d U;
-                U << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
-                    -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
-                    24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
-                BlockOps3::setBlock(U_blocks_cache_, i, U);
-
-                if (i == 0)
+            detail::factorAndSolveBlockSystem<3, DIM, BlockOps3>(
+                num_blocks,
+                B_left, B_right,
+                D_inv_cache_, U_blocks_cache_, L_blocks_cache_, D_inv_T_mul_L_next_T_cache_,
+                ws_rhs_mod_, ws_solution_,
+                [&](const int i,
+                    Eigen::Matrix3d &D,
+                    Eigen::Matrix3d &L,
+                    Eigen::Matrix3d &U,
+                    Eigen::Matrix<double, 3, DIM> &rhs_block)
                 {
-                    r.noalias() -= L * B_left;
-                }
-                else
-                {
-                    Eigen::Matrix3d X;
-                    BlockOps3::multiplyBlock(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
-                    Eigen::Matrix<double, 3, DIM> Y;
-                    BlockOps3::multiplyBlockNxD(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<3>(3 * (i - 1)), Y);
-                    D.noalias() -= L * X;
-                    r.noalias() -= L * Y;
-                }
+                    const int k = i + 2;
+                    const auto &tp_L = time_powers_[k - 2];
+                    const auto &tp_R = time_powers_[k - 1];
 
-                if (i == num_blocks - 1)
-                {
-                    r.noalias() -= U * B_right;
-                }
+                    rhs_block.row(0) = 840.0 * ((spatial_points_.row(k) - spatial_points_.row(k - 1)) * tp_R.h4_inv +
+                                                (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h4_inv);
+                    rhs_block.row(1) = 10080.0 * ((spatial_points_.row(k - 1) - spatial_points_.row(k)) * tp_R.h5_inv +
+                                                  (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h5_inv);
+                    rhs_block.row(2) = 50400.0 * ((spatial_points_.row(k) - spatial_points_.row(k - 1)) * tp_R.h6_inv +
+                                                  (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h6_inv);
 
-                Eigen::Matrix3d D_inv;
-                BlockOps3::inverse(D, D_inv);
-                BlockOps3::setBlock(D_inv_cache_, i, D_inv);
+                    D << 480.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_R.h2_inv - tp_L.h2_inv), 16.0 * (tp_L.h_inv + tp_R.h_inv),
+                        5400.0 * (tp_L.h4_inv - tp_R.h4_inv), -1200.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_L.h2_inv - tp_R.h2_inv),
+                        25920.0 * (tp_L.h5_inv + tp_R.h5_inv), 5400.0 * (tp_R.h4_inv - tp_L.h4_inv), 480.0 * (tp_L.h3_inv + tp_R.h3_inv);
 
-                if (i > 0)
-                {
-                    Eigen::Matrix3d L_mul_D_prev_inv;
-                    BlockOps3::multiplyBlock(L_blocks_cache_, i, D_inv_cache_, i - 1, L_mul_D_prev_inv);
-                    BlockOps3::setBlock(D_inv_T_mul_L_next_T_cache_, i - 1, L_mul_D_prev_inv.transpose());
-                }
-                ws_rhs_mod_.template middleRows<3>(3 * i) = r;
-            }
+                    L << 360.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv, 4.0 * tp_L.h_inv,
+                        4680.0 * tp_L.h4_inv, 840.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv,
+                        24480.0 * tp_L.h5_inv, 4680.0 * tp_L.h4_inv, 360.0 * tp_L.h3_inv;
 
-            detail::solveFactoredBlockSystem<3, DIM, BlockOps3>(
-                D_inv_cache_, U_blocks_cache_, ws_rhs_mod_, num_blocks, ws_solution_);
+                    U << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
+                        -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
+                        24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
+                });
 
             detail::unpackInteriorStates<3, DIM>(ws_solution_, num_blocks, p_out, q_out, s_out);
         }
