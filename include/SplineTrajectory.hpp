@@ -159,6 +159,121 @@ namespace SplineTrajectory
             }
         }
 
+        template <int BLOCK_SIZE, int DIM, typename BlockOpsType,
+                  typename DInvStorageType, typename UStorageType, typename LStorageType, typename MatrixType>
+        inline void solveAdjointLambda(const DInvStorageType &d_inv_cache,
+                                       const UStorageType &u_blocks_cache,
+                                       const LStorageType &d_inv_t_mul_l_next_t_cache,
+                                       int num_blocks,
+                                       MatrixType &lambda)
+        {
+            if (num_blocks <= 0)
+            {
+                return;
+            }
+
+            BlockOpsType::multiplyBlockTransposeNxD(d_inv_cache, 0,
+                                                    lambda.template middleRows<BLOCK_SIZE>(0),
+                                                    lambda.template middleRows<BLOCK_SIZE>(0));
+
+            for (int i = 0; i < num_blocks - 1; ++i)
+            {
+                BlockOpsType::subMultiplyBlockTransposeNxD(u_blocks_cache, i,
+                                                           lambda.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * i),
+                                                           lambda.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (i + 1)));
+                BlockOpsType::multiplyBlockTransposeNxD(d_inv_cache, i + 1,
+                                                        lambda.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (i + 1)),
+                                                        lambda.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (i + 1)));
+            }
+
+            for (int i = num_blocks - 2; i >= 0; --i)
+            {
+                BlockOpsType::subMultiplyBlockNxD(d_inv_t_mul_l_next_t_cache, i,
+                                                  lambda.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (i + 1)),
+                                                  lambda.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * i));
+            }
+        }
+
+        template <int BLOCK_SIZE, int DIM, typename BlockOpsType,
+                  typename LStorageType, typename UStorageType, typename MatrixType>
+        inline void applyAdjointBoundaryCorrections(const LStorageType &l_blocks_cache,
+                                                    const UStorageType &u_blocks_cache,
+                                                    int num_blocks,
+                                                    const MatrixType &lambda,
+                                                    Eigen::Matrix<double, BLOCK_SIZE, DIM> &raw_start_grad,
+                                                    Eigen::Matrix<double, BLOCK_SIZE, DIM> &raw_end_grad)
+        {
+            Eigen::Matrix<double, BLOCK_SIZE, DIM> correction_start;
+            BlockOpsType::multiplyBlockTransposeNxD(l_blocks_cache, 0,
+                                                    lambda.template middleRows<BLOCK_SIZE>(0),
+                                                    correction_start);
+            raw_start_grad -= correction_start;
+
+            Eigen::Matrix<double, BLOCK_SIZE, DIM> correction_end;
+            BlockOpsType::multiplyBlockTransposeNxD(u_blocks_cache, num_blocks - 1,
+                                                    lambda.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (num_blocks - 1)),
+                                                    correction_end);
+            raw_end_grad -= correction_end;
+        }
+
+        template <int BLOCK_SIZE, int DIM, typename BlockOpsType,
+                  typename DInvStorageType, typename UStorageType, typename RhsType, typename MatrixType>
+        inline void solveFactoredBlockSystem(const DInvStorageType &d_inv_cache,
+                                             const UStorageType &u_blocks_cache,
+                                             const RhsType &rhs_mod,
+                                             int num_blocks,
+                                             MatrixType &solution)
+        {
+            if (num_blocks <= 0)
+            {
+                solution.resize(0, DIM);
+                return;
+            }
+
+            solution.resize(num_blocks * BLOCK_SIZE, DIM);
+
+            BlockOpsType::multiplyBlockNxD(d_inv_cache, num_blocks - 1,
+                                           rhs_mod.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (num_blocks - 1)),
+                                           solution.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (num_blocks - 1)));
+
+            for (int i = num_blocks - 2; i >= 0; --i)
+            {
+                auto sol_block = solution.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * i);
+                auto sol_next = solution.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * (i + 1));
+                auto rhs_i = rhs_mod.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * i);
+
+                Eigen::Matrix<double, BLOCK_SIZE, DIM> rhs_temp;
+                for (int j = 0; j < DIM; ++j)
+                {
+                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    {
+                        double acc = rhs_i(r, j);
+                        for (int c = 0; c < BLOCK_SIZE; ++c)
+                        {
+                            acc -= u_blocks_cache(i, r * BLOCK_SIZE + c) * sol_next(c, j);
+                        }
+                        rhs_temp(r, j) = acc;
+                    }
+                }
+                BlockOpsType::multiplyBlockNxD(d_inv_cache, i, rhs_temp, sol_block);
+            }
+        }
+
+        template <int BLOCK_SIZE, int DIM, typename SolutionType, typename... OutputTypes>
+        inline void unpackInteriorStates(const SolutionType &solution,
+                                         int num_blocks,
+                                         OutputTypes &... outputs)
+        {
+            static_assert(sizeof...(outputs) == BLOCK_SIZE, "Output matrix count must match block size.");
+            for (int i = 0; i < num_blocks; ++i)
+            {
+                const int block_row = BLOCK_SIZE * i;
+                const int row = i + 1;
+                int out_idx = 0;
+                ((outputs.row(row) = solution.row(block_row + out_idx++)), ...);
+            }
+        }
+
         template <int BLOCK_SIZE, int DIM>
         struct BlockOps
         {
@@ -2132,27 +2247,8 @@ namespace SplineTrajectory
             if (num_blocks > 0)
             {
                 detail::packInteriorDerivativeGrads<2, DIM>(ws_gd_internal_, num_blocks, ws_lambda_);
-
-                BlockOps2::multiplyBlockTransposeNxD(D_inv_cache_, 0,
-                                            ws_lambda_.template middleRows<2>(0),
-                                            ws_lambda_.template middleRows<2>(0));
-
-                for (int i = 0; i < num_blocks - 1; ++i)
-                {
-                    BlockOps2::subMultiplyBlockTransposeNxD(U_blocks_cache_, i,
-                                                   ws_lambda_.template middleRows<2>(2 * i),
-                                                   ws_lambda_.template middleRows<2>(2 * (i + 1)));
-                    BlockOps2::multiplyBlockTransposeNxD(D_inv_cache_, i + 1,
-                                                ws_lambda_.template middleRows<2>(2 * (i + 1)),
-                                                ws_lambda_.template middleRows<2>(2 * (i + 1)));
-                }
-
-                for (int i = num_blocks - 2; i >= 0; --i)
-                {
-                    BlockOps2::subMultiplyBlockNxD(D_inv_T_mul_L_next_T_cache_, i,
-                                                  ws_lambda_.template middleRows<2>(2 * (i + 1)),
-                                                  ws_lambda_.template middleRows<2>(2 * i));
-                }
+                detail::solveAdjointLambda<2, DIM, BlockOps2>(
+                    D_inv_cache_, U_blocks_cache_, D_inv_T_mul_L_next_T_cache_, num_blocks, ws_lambda_);
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
@@ -2234,17 +2330,8 @@ namespace SplineTrajectory
                     add_point_grad(i, grad_P_prev);
                 }
 
-                Eigen::Matrix<double, 2, DIM> correction_start;
-                BlockOps2::multiplyBlockTransposeNxD(L_blocks_cache_, 0,
-                                            ws_lambda_.template middleRows<2>(0),
-                                            correction_start);
-                raw_start_grad -= correction_start;
-
-                Eigen::Matrix<double, 2, DIM> correction_end;
-                BlockOps2::multiplyBlockTransposeNxD(U_blocks_cache_, num_blocks - 1,
-                                            ws_lambda_.template middleRows<2>(2 * (num_blocks - 1)),
-                                            correction_end);
-                raw_end_grad -= correction_end;
+                detail::applyAdjointBoundaryCorrections<2, DIM, BlockOps2>(
+                    L_blocks_cache_, U_blocks_cache_, num_blocks, ws_lambda_, raw_start_grad, raw_end_grad);
             }
 
             startGrads.v = raw_start_grad.row(0).transpose();
@@ -2342,35 +2429,10 @@ namespace SplineTrajectory
                 }
             }
 
-            ws_solution_.resize(num_blocks * 2, DIM);
+            detail::solveFactoredBlockSystem<2, DIM, BlockOps2>(
+                D_inv_cache_, U_blocks_cache_, ws_rhs_mod_, num_blocks, ws_solution_);
 
-            BlockOps2::multiplyBlockNxD(D_inv_cache_, num_blocks - 1,
-                                       ws_rhs_mod_.template middleRows<2>(2 * (num_blocks - 1)),
-                                       ws_solution_.template middleRows<2>(2 * (num_blocks - 1)));
-
-            for (int i = num_blocks - 2; i >= 0; --i)
-            {
-                auto sol_block = ws_solution_.template middleRows<2>(2 * i);
-                auto sol_next = ws_solution_.template middleRows<2>(2 * (i + 1));
-                auto rhs_i = ws_rhs_mod_.template middleRows<2>(2 * i);
-
-                const double u00 = U_blocks_cache_(i, 0), u01 = U_blocks_cache_(i, 1);
-                const double u10 = U_blocks_cache_(i, 2), u11 = U_blocks_cache_(i, 3);
-                Eigen::Matrix<double, 2, DIM> rhs_temp;
-                for (int j = 0; j < DIM; ++j)
-                {
-                    const double s0 = sol_next(0, j), s1 = sol_next(1, j);
-                    rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1);
-                    rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1);
-                }
-                BlockOps2::multiplyBlockNxD(D_inv_cache_, i, rhs_temp, sol_block);
-            }
-
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                p_out.row(i + 1) = ws_solution_.row(2 * i);
-                q_out.row(i + 1) = ws_solution_.row(2 * i + 1);
-            }
+            detail::unpackInteriorStates<2, DIM>(ws_solution_, num_blocks, p_out, q_out);
         }
 
         MatrixType solveQuintic()
@@ -2932,27 +2994,8 @@ namespace SplineTrajectory
             if (num_blocks > 0)
             {
                 detail::packInteriorDerivativeGrads<3, DIM>(ws_gd_internal_, num_blocks, ws_lambda_);
-
-                BlockOps3::multiplyBlockTransposeNxD(D_inv_cache_, 0,
-                                            ws_lambda_.template middleRows<3>(0),
-                                            ws_lambda_.template middleRows<3>(0));
-
-                for (int i = 0; i < num_blocks - 1; ++i)
-                {
-                    BlockOps3::subMultiplyBlockTransposeNxD(U_blocks_cache_, i,
-                                                   ws_lambda_.template middleRows<3>(3 * i),
-                                                   ws_lambda_.template middleRows<3>(3 * (i + 1)));
-                    BlockOps3::multiplyBlockTransposeNxD(D_inv_cache_, i + 1,
-                                                ws_lambda_.template middleRows<3>(3 * (i + 1)),
-                                                ws_lambda_.template middleRows<3>(3 * (i + 1)));
-                }
-
-                for (int i = num_blocks - 2; i >= 0; --i)
-                {
-                    BlockOps3::subMultiplyBlockNxD(D_inv_T_mul_L_next_T_cache_, i,
-                                                  ws_lambda_.template middleRows<3>(3 * (i + 1)),
-                                                  ws_lambda_.template middleRows<3>(3 * i));
-                }
+                detail::solveAdjointLambda<3, DIM, BlockOps3>(
+                    D_inv_cache_, U_blocks_cache_, D_inv_T_mul_L_next_T_cache_, num_blocks, ws_lambda_);
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
@@ -3109,17 +3152,8 @@ namespace SplineTrajectory
                     add_point_grad(i, grad_P_prev);
                 }
 
-                Eigen::Matrix<double, 3, DIM> correction_start;
-                BlockOps3::multiplyBlockTransposeNxD(L_blocks_cache_, 0,
-                                            ws_lambda_.template middleRows<3>(0),
-                                            correction_start);
-                raw_start_grad -= correction_start;
-
-                Eigen::Matrix<double, 3, DIM> correction_end;
-                BlockOps3::multiplyBlockTransposeNxD(U_blocks_cache_, num_blocks - 1,
-                                            ws_lambda_.template middleRows<3>(3 * (num_blocks - 1)),
-                                            correction_end);
-                raw_end_grad -= correction_end;
+                detail::applyAdjointBoundaryCorrections<3, DIM, BlockOps3>(
+                    L_blocks_cache_, U_blocks_cache_, num_blocks, ws_lambda_, raw_start_grad, raw_end_grad);
             }
 
             startGrads.v = raw_start_grad.row(0).transpose();
@@ -3239,39 +3273,10 @@ namespace SplineTrajectory
                 ws_rhs_mod_.template middleRows<3>(3 * i) = r;
             }
 
-            ws_solution_.resize(num_blocks * 3, DIM);
+            detail::solveFactoredBlockSystem<3, DIM, BlockOps3>(
+                D_inv_cache_, U_blocks_cache_, ws_rhs_mod_, num_blocks, ws_solution_);
 
-            BlockOps3::multiplyBlockNxD(D_inv_cache_, num_blocks - 1,
-                                       ws_rhs_mod_.template middleRows<3>(3 * (num_blocks - 1)),
-                                       ws_solution_.template middleRows<3>(3 * (num_blocks - 1)));
-
-            for (int i = num_blocks - 2; i >= 0; --i)
-            {
-                auto sol_block = ws_solution_.template middleRows<3>(3 * i);
-                auto sol_next = ws_solution_.template middleRows<3>(3 * (i + 1));
-                auto rhs_i = ws_rhs_mod_.template middleRows<3>(3 * i);
-
-                const double u00 = U_blocks_cache_(i, 0), u01 = U_blocks_cache_(i, 1), u02 = U_blocks_cache_(i, 2);
-                const double u10 = U_blocks_cache_(i, 3), u11 = U_blocks_cache_(i, 4), u12 = U_blocks_cache_(i, 5);
-                const double u20 = U_blocks_cache_(i, 6), u21 = U_blocks_cache_(i, 7), u22 = U_blocks_cache_(i, 8);
-                Eigen::Matrix<double, 3, DIM> rhs_temp;
-                for (int j = 0; j < DIM; ++j)
-                {
-                    const double s0 = sol_next(0, j), s1 = sol_next(1, j), s2 = sol_next(2, j);
-                    rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1 + u02 * s2);
-                    rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1 + u12 * s2);
-                    rhs_temp(2, j) = rhs_i(2, j) - (u20 * s0 + u21 * s1 + u22 * s2);
-                }
-                BlockOps3::multiplyBlockNxD(D_inv_cache_, i, rhs_temp, sol_block);
-            }
-
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                const int row = i + 1;
-                p_out.row(row) = ws_solution_.row(3 * i);
-                q_out.row(row) = ws_solution_.row(3 * i + 1);
-                s_out.row(row) = ws_solution_.row(3 * i + 2);
-            }
+            detail::unpackInteriorStates<3, DIM>(ws_solution_, num_blocks, p_out, q_out, s_out);
         }
 
         MatrixType solveSepticSpline()
