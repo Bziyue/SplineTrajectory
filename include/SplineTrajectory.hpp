@@ -1361,6 +1361,33 @@ namespace SplineTrajectory
             return gdT;
         }
 
+        template <typename T = Derived>
+        typename T::Gradients getEnergyGrad() const
+        {
+            return getEnergyGradFramework<typename T::Gradients>();
+        }
+
+        template <typename T = Derived>
+        void getEnergyGrad(typename T::Gradients &grads) const
+        {
+            fillEnergyGradFramework<typename T::Gradients>(grads);
+        }
+
+        template <typename T = Derived>
+        typename T::Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+                                            const Eigen::VectorXd &partialGradByTimes)
+        {
+            return propagateGradFramework<typename T::Gradients>(partialGradByCoeffs, partialGradByTimes);
+        }
+
+        template <typename T = Derived>
+        void propagateGrad(const MatrixType &partialGradByCoeffs,
+                           const Eigen::VectorXd &partialGradByTimes,
+                           typename T::Gradients &grads)
+        {
+            propagateGradFramework<typename T::Gradients>(partialGradByCoeffs, partialGradByTimes, grads);
+        }
+
     };
 
     template <int DIM>
@@ -1599,29 +1626,6 @@ namespace SplineTrajectory
             res.end.v = 2.0 * acc_end.transpose();
 
             return res;
-        }
-
-        Gradients getEnergyGrad() const
-        {
-            return this->template getEnergyGradFramework<Gradients>();
-        }
-
-        void getEnergyGrad(Gradients &grads) const
-        {
-            this->template fillEnergyGradFramework<Gradients>(grads);
-        }
-
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
-        {
-            return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
-        }
-
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           Gradients &grads)
-        {
-            this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes, grads);
         }
 
     private:
@@ -2122,29 +2126,6 @@ namespace SplineTrajectory
             return res;
         }
 
-        Gradients getEnergyGrad() const
-        {
-            return this->template getEnergyGradFramework<Gradients>();
-        }
-
-        void getEnergyGrad(Gradients &grads) const
-        {
-            this->template fillEnergyGradFramework<Gradients>(grads);
-        }
-
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
-        {
-            return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
-        }
-
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           Gradients &grads)
-        {
-            this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes, grads);
-        }
-
     private:
         void setSplineData(const MatrixType &spatial_points,
                            const BoundaryConditions<DIM> &boundary)
@@ -2345,9 +2326,9 @@ namespace SplineTrajectory
             Base::precomputePointDiffsFromSpatialPoints(spatial_points_, point_diffs_);
         }
 
-        void solveInternalDerivatives(const MatrixType &P, MatrixType &p_out, MatrixType &q_out)
+        void solveInternalDerivatives(MatrixType &p_out, MatrixType &q_out)
         {
-            const int n = static_cast<int>(P.rows());
+            const int n = num_segments_ + 1;
             p_out.resize(n, DIM);
             q_out.resize(n, DIM);
 
@@ -2439,7 +2420,7 @@ namespace SplineTrajectory
         {
             const int n = num_segments_;
 
-            solveInternalDerivatives(spatial_points_, internal_vel_, internal_acc_);
+            solveInternalDerivatives(internal_vel_, internal_acc_);
 
             MatrixType coeffs(n * 6, DIM);
 
@@ -2786,29 +2767,6 @@ namespace SplineTrajectory
             res.end.j = 2.0 * snap_end.transpose();
 
             return res;
-        }
-
-        Gradients getEnergyGrad() const
-        {
-            return this->template getEnergyGradFramework<Gradients>();
-        }
-
-        void getEnergyGrad(Gradients &grads) const
-        {
-            this->template fillEnergyGradFramework<Gradients>(grads);
-        }
-
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
-        {
-            return this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes);
-        }
-
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           Gradients &grads)
-        {
-            this->template propagateGradFramework<Gradients>(partialGradByCoeffs, partialGradByTimes, grads);
         }
 
     private:
@@ -3170,12 +3128,11 @@ namespace SplineTrajectory
         }
 
     private:
-        void solveInternalDerivatives(const MatrixType &P,
-                                      MatrixType &p_out,
+        void solveInternalDerivatives(MatrixType &p_out,
                                       MatrixType &q_out,
                                       MatrixType &s_out)
         {
-            const int n = static_cast<int>(P.rows());
+            const int n = num_segments_ + 1;
             p_out.resize(n, DIM);
             q_out.resize(n, DIM);
             s_out.resize(n, DIM);
@@ -3213,12 +3170,12 @@ namespace SplineTrajectory
                 const auto &tp_L = time_powers_[k - 2];
                 const auto &tp_R = time_powers_[k - 1];
 
-                Eigen::Matrix<double, 1, DIM> r3 = 840.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h4_inv +
-                                                            (P.row(k - 1) - P.row(k - 2)) * tp_L.h4_inv);
-                Eigen::Matrix<double, 1, DIM> r4 = 10080.0 * ((P.row(k - 1) - P.row(k)) * tp_R.h5_inv +
-                                                              (P.row(k - 1) - P.row(k - 2)) * tp_L.h5_inv);
-                Eigen::Matrix<double, 1, DIM> r5 = 50400.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h6_inv +
-                                                              (P.row(k - 1) - P.row(k - 2)) * tp_L.h6_inv);
+                Eigen::Matrix<double, 1, DIM> r3 = 840.0 * ((spatial_points_.row(k) - spatial_points_.row(k - 1)) * tp_R.h4_inv +
+                                                            (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h4_inv);
+                Eigen::Matrix<double, 1, DIM> r4 = 10080.0 * ((spatial_points_.row(k - 1) - spatial_points_.row(k)) * tp_R.h5_inv +
+                                                              (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h5_inv);
+                Eigen::Matrix<double, 1, DIM> r5 = 50400.0 * ((spatial_points_.row(k) - spatial_points_.row(k - 1)) * tp_R.h6_inv +
+                                                              (spatial_points_.row(k - 1) - spatial_points_.row(k - 2)) * tp_L.h6_inv);
                 Eigen::Matrix<double, 3, DIM> r;
                 r.row(0) = r3;
                 r.row(1) = r4;
@@ -3283,7 +3240,7 @@ namespace SplineTrajectory
         {
             const int n = num_segments_;
 
-            solveInternalDerivatives(spatial_points_, internal_vel_, internal_acc_, internal_jerk_);
+            solveInternalDerivatives(internal_vel_, internal_acc_, internal_jerk_);
 
             MatrixType coeffs(n * 8, DIM);
 
