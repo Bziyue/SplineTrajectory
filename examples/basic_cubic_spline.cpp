@@ -16,14 +16,14 @@ int main() {
     
     std::cout << "=== Basic Cubic Spline Example ===" << std::endl;
     
-    // Define 3D waypoints for a trajectory
-    SplineVector<SplinePoint3d> waypoints = {
-        SplinePoint3d(0.0, 0.0, 0.0),     // Start point
-        SplinePoint3d(1.0, 2.0, 1.0),     // Waypoint 1
-        SplinePoint3d(3.0, 1.0, 2.0),     // Waypoint 2
-        SplinePoint3d(4.0, 3.0, 0.5),     // Waypoint 3
-        SplinePoint3d(5.0, 0.0, 1.5)      // End point
-    };
+    // Define 3D waypoints for a trajectory (row = one waypoint)
+    CubicSpline3D::MatrixType waypoints(5, 3);
+    waypoints <<
+        0.0, 0.0, 0.0,
+        1.0, 2.0, 1.0,
+        3.0, 1.0, 2.0,
+        4.0, 3.0, 0.5,
+        5.0, 0.0, 1.5;
     
     // Define corresponding time points
     std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0, 6.0};

@@ -44,17 +44,17 @@ struct BatchPerformanceResult
 };
 
 // 生成随机控制点
-SplineVector<Eigen::VectorXd> generateRandomWaypoints(int dim, int num_points, double min_val = -10.0, double max_val = 10.0)
+Eigen::MatrixXd generateRandomWaypoints(int dim, int num_points, double min_val = -10.0, double max_val = 10.0)
 {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<double> dis(min_val, max_val);
-    SplineVector<Eigen::VectorXd> waypoints(num_points, Eigen::VectorXd::Zero(dim));
+    Eigen::MatrixXd waypoints = Eigen::MatrixXd::Zero(num_points, dim);
     for (int i = 0; i < num_points; ++i)
     {
         for (int d = 0; d < dim; ++d)
         {
-            waypoints[i](d) = dis(gen);
+            waypoints(i, d) = dis(gen);
         }
     }
     return waypoints;
@@ -236,7 +236,7 @@ void runSepticTest()
     int fit_runs = 1000;
 
     auto time_segments_vec = generateRandomTimeSegments(num_segments);
-    auto waypoints_vec_eigen = generateRandomWaypoints(DIM, num_points);
+    auto waypoints_mat = generateRandomWaypoints(DIM, num_points);
     auto start_vel_eigen = generateRandomVector(DIM, 3.0);
     auto end_vel_eigen = generateRandomVector(DIM, 3.0);
     auto start_acc_eigen = generateRandomVector(DIM, 2.0);
@@ -247,9 +247,7 @@ void runSepticTest()
     using SepticSpline = SplineTrajectory::SepticSplineND<DIM>;
     using VectorD = typename SepticSpline::VectorType;
 
-    SplineVector<VectorD> waypoints;
-    for (const auto &v : waypoints_vec_eigen)
-        waypoints.push_back(v);
+    typename SepticSpline::MatrixType waypoints = waypoints_mat;
 
     BoundaryConditions<DIM> bc(start_vel_eigen, start_acc_eigen,start_jerk_eigen,
                                end_vel_eigen, end_acc_eigen, end_jerk_eigen);
@@ -285,12 +283,12 @@ void runSepticTest()
             Eigen::MatrixXd head = Eigen::MatrixXd::Zero(3, 4), tail = Eigen::MatrixXd::Zero(3, 4);
 
             // 安全地填充头部边界条件（位置、速度、加速度）
-            Eigen::Vector3d head_pos = make3DFromND(waypoints_vec_eigen.front(), start_dim);
+            Eigen::Vector3d head_pos = make3DFromND(waypoints_mat.row(0).transpose(), start_dim);
             Eigen::Vector3d head_vel = make3DFromND(start_vel_eigen, start_dim);
             Eigen::Vector3d head_acc = make3DFromND(start_acc_eigen, start_dim);
             Eigen::Vector3d head_jerk = make3DFromND(start_jerk_eigen, start_dim);
 
-            Eigen::Vector3d tail_pos = make3DFromND(waypoints_vec_eigen.back(), start_dim);
+            Eigen::Vector3d tail_pos = make3DFromND(waypoints_mat.row(num_points - 1).transpose(), start_dim);
             Eigen::Vector3d tail_vel = make3DFromND(end_vel_eigen, start_dim);
             Eigen::Vector3d tail_acc = make3DFromND(end_acc_eigen, start_dim);
             Eigen::Vector3d tail_jerk = make3DFromND(end_jerk_eigen, start_dim);
@@ -310,7 +308,7 @@ void runSepticTest()
             Eigen::MatrixXd minco_points = Eigen::MatrixXd::Zero(3, num_points - 2);
             for (int k = 1; k < num_points - 1; ++k)
             {
-                Eigen::Vector3d waypoint_3d = make3DFromND(waypoints_vec_eigen[k], start_dim);
+                Eigen::Vector3d waypoint_3d = make3DFromND(waypoints_mat.row(k).transpose(), start_dim);
                 minco_points.col(k - 1) = waypoint_3d;
             }
 
@@ -341,12 +339,12 @@ void runSepticTest()
         Eigen::MatrixXd head = Eigen::MatrixXd::Zero(3, 4), tail = Eigen::MatrixXd::Zero(3, 4);
 
         // 安全地填充头部边界条件（位置、速度、加速度）
-        Eigen::Vector3d head_pos = make3DFromND(waypoints_vec_eigen.front(), start_dim);
+        Eigen::Vector3d head_pos = make3DFromND(waypoints_mat.row(0).transpose(), start_dim);
         Eigen::Vector3d head_vel = make3DFromND(start_vel_eigen, start_dim);
         Eigen::Vector3d head_acc = make3DFromND(start_acc_eigen, start_dim);
         Eigen::Vector3d head_jerk = make3DFromND(start_jerk_eigen, start_dim);
 
-        Eigen::Vector3d tail_pos = make3DFromND(waypoints_vec_eigen.back(), start_dim);
+        Eigen::Vector3d tail_pos = make3DFromND(waypoints_mat.row(num_points - 1).transpose(), start_dim);
         Eigen::Vector3d tail_vel = make3DFromND(end_vel_eigen, start_dim);
         Eigen::Vector3d tail_acc = make3DFromND(end_acc_eigen, start_dim);
         Eigen::Vector3d tail_jerk = make3DFromND(end_jerk_eigen, start_dim);
@@ -365,7 +363,7 @@ void runSepticTest()
         Eigen::MatrixXd minco_points = Eigen::MatrixXd::Zero(3, num_points - 2);
         for (int k = 1; k < num_points - 1; ++k)
         {
-            Eigen::Vector3d waypoint_3d = make3DFromND(waypoints_vec_eigen[k], start_dim);
+            Eigen::Vector3d waypoint_3d = make3DFromND(waypoints_mat.row(k).transpose(), start_dim);
             minco_points.col(k - 1) = waypoint_3d;
         }
 

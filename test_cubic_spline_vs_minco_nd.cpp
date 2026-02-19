@@ -37,17 +37,17 @@ struct ConsistencyResult
 };
 
 // 生成随机控制点
-SplineVector<Eigen::VectorXd> generateRandomWaypoints(int dim, int num_points, double min_val = -10.0, double max_val = 10.0)
+Eigen::MatrixXd generateRandomWaypoints(int dim, int num_points, double min_val = -10.0, double max_val = 10.0)
 {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<double> dis(min_val, max_val);
-    SplineVector<Eigen::VectorXd> waypoints(num_points, Eigen::VectorXd::Zero(dim));
+    Eigen::MatrixXd waypoints = Eigen::MatrixXd::Zero(num_points, dim);
     for (int i = 0; i < num_points; ++i)
     {
         for (int d = 0; d < dim; ++d)
         {
-            waypoints[i](d) = dis(gen);
+            waypoints(i, d) = dis(gen);
         }
     }
     return waypoints;
@@ -179,16 +179,14 @@ void runTest()
     double start_time = 0.0;
     int fit_runs = 10;
     auto time_segments_vec = generateRandomTimeSegments(num_segments);
-    auto waypoints_vec_eigen = generateRandomWaypoints(DIM, num_points);
+    auto waypoints_mat = generateRandomWaypoints(DIM, num_points);
     auto start_vel_eigen = generateRandomVelocity(DIM);
     auto end_vel_eigen = generateRandomVelocity(DIM);
 
     using Spline = SplineTrajectory::CubicSplineND<DIM>;
     using VectorD = typename Spline::VectorType;
 
-    SplineVector<VectorD> waypoints;
-    for (const auto &v : waypoints_vec_eigen)
-        waypoints.push_back(v);
+    typename Spline::MatrixType waypoints = waypoints_mat;
 
     BoundaryConditions<DIM> bv(start_vel_eigen, end_vel_eigen);
 
@@ -215,14 +213,14 @@ void runTest()
             int start_dim = j * 3;
             int current_dim = std::min(3, DIM - start_dim);
             Eigen::MatrixXd head = Eigen::MatrixXd::Zero(3, 2), tail = Eigen::MatrixXd::Zero(3, 2);
-            head.block(0, 0, current_dim, 1) = waypoints_vec_eigen.front().segment(start_dim, current_dim);
+            head.block(0, 0, current_dim, 1) = waypoints_mat.row(0).segment(start_dim, current_dim).transpose();
             head.block(0, 1, current_dim, 1) = start_vel_eigen.segment(start_dim, current_dim);
-            tail.block(0, 0, current_dim, 1) = waypoints_vec_eigen.back().segment(start_dim, current_dim);
+            tail.block(0, 0, current_dim, 1) = waypoints_mat.row(num_points - 1).segment(start_dim, current_dim).transpose();
             tail.block(0, 1, current_dim, 1) = end_vel_eigen.segment(start_dim, current_dim);
             minco_solvers[j].setConditions(head, tail, num_segments);
             Eigen::MatrixXd minco_points = Eigen::MatrixXd::Zero(3, num_points - 2);
             for (int k = 1; k < num_points - 1; ++k)
-                minco_points.block(0, k - 1, current_dim, 1) = waypoints_vec_eigen[k].segment(start_dim, current_dim);
+                minco_points.block(0, k - 1, current_dim, 1) = waypoints_mat.row(k).segment(start_dim, current_dim).transpose();
             Eigen::VectorXd minco_times(num_segments);
             for (int k = 0; k < num_segments; ++k)
                 minco_times(k) = time_segments_vec[k];
@@ -242,14 +240,14 @@ void runTest()
         int start_dim = j * 3;
         int current_dim = std::min(3, DIM - start_dim);
         Eigen::MatrixXd head = Eigen::MatrixXd::Zero(3, 2), tail = Eigen::MatrixXd::Zero(3, 2);
-        head.block(0, 0, current_dim, 1) = waypoints_vec_eigen.front().segment(start_dim, current_dim);
+        head.block(0, 0, current_dim, 1) = waypoints_mat.row(0).segment(start_dim, current_dim).transpose();
         head.block(0, 1, current_dim, 1) = start_vel_eigen.segment(start_dim, current_dim);
-        tail.block(0, 0, current_dim, 1) = waypoints_vec_eigen.back().segment(start_dim, current_dim);
+        tail.block(0, 0, current_dim, 1) = waypoints_mat.row(num_points - 1).segment(start_dim, current_dim).transpose();
         tail.block(0, 1, current_dim, 1) = end_vel_eigen.segment(start_dim, current_dim);
         minco_solvers_for_query[j].setConditions(head, tail, num_segments);
         Eigen::MatrixXd minco_points = Eigen::MatrixXd::Zero(3, num_points - 2);
         for (int k = 1; k < num_points - 1; ++k)
-            minco_points.block(0, k - 1, current_dim, 1) = waypoints_vec_eigen[k].segment(start_dim, current_dim);
+            minco_points.block(0, k - 1, current_dim, 1) = waypoints_mat.row(k).segment(start_dim, current_dim).transpose();
         Eigen::VectorXd minco_times(num_segments);
         for (int k = 0; k < num_segments; ++k)
             minco_times(k) = time_segments_vec[k];

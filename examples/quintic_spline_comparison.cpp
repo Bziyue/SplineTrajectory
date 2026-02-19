@@ -16,16 +16,16 @@ int main() {
     
     std::cout << "=== Cubic vs Quintic Spline Comparison ===" << std::endl;
     
-    // Define a challenging 2D trajectory with sharp turns
-    SplineVector<SplinePoint2d> waypoints = {
-        SplinePoint2d(0.0, 0.0),
-        SplinePoint2d(2.0, 1.0),
-        SplinePoint2d(2.5, 3.0),
-        SplinePoint2d(1.0, 4.0),
-        SplinePoint2d(-0.5, 3.5),
-        SplinePoint2d(0.0, 2.0),
-        SplinePoint2d(1.5, 1.0)
-    };
+    // Define a challenging 2D trajectory with sharp turns (row = one waypoint)
+    QuinticSpline2D::MatrixType waypoints(7, 2);
+    waypoints <<
+        0.0, 0.0,
+        2.0, 1.0,
+        2.5, 3.0,
+        1.0, 4.0,
+        -0.5, 3.5,
+        0.0, 2.0,
+        1.5, 1.0;
     
     std::vector<double> time_points = {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
     

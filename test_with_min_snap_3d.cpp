@@ -82,19 +82,9 @@ VectorXd allocateTime(const MatrixXd &wayPs,
     return durations;
 }
 
-SplineVector3D convertMatrixToSplineVector(const MatrixXd &route)
+SepticSpline3D::MatrixType convertRouteToSplineMatrix(const MatrixXd &route)
 {
-    SplineVector3D spline_points;
-    spline_points.reserve(route.cols());
-    
-    for (int i = 0; i < route.cols(); ++i)
-    {
-        SplinePoint3d point;
-        point << route(0, i), route(1, i), route(2, i);
-        spline_points.push_back(point);
-    }
-    
-    return spline_points;
+    return route.transpose();
 }
 
 std::vector<double> convertVectorXdToStdVector(const VectorXd &eigen_vec)
@@ -184,7 +174,7 @@ void runEvaluationTests()
     snapOpt.getTraj(minSnapTraj);
     
     // Setup SepticSpline trajectory
-    SplineVector3D spline_points = convertMatrixToSplineVector(route);
+    SepticSpline3D::MatrixType spline_points = convertRouteToSplineMatrix(route);
     std::vector<double> time_segments = convertVectorXdToStdVector(ts);
     BoundaryConditions<3> boundary;
     boundary.start_velocity.setZero();
@@ -361,7 +351,7 @@ void runEvaluationTests()
     auto ss_vel_consistency = septicSpline.getTrajectory().evaluate(consistency_times, Deriv::Vel);
     auto ss_acc_consistency = septicSpline.getTrajectory().evaluate(consistency_times, Deriv::Acc);
     
-    // Convert SplineVector to std::vector for error calculation
+    // Convert sampled results to std::vector for error calculation
     std::vector<Vector3d> ss_pos_consistency_vec(ss_pos_consistency.begin(), ss_pos_consistency.end());
     std::vector<Vector3d> ss_vel_consistency_vec(ss_vel_consistency.begin(), ss_vel_consistency.end());
     std::vector<Vector3d> ss_acc_consistency_vec(ss_acc_consistency.begin(), ss_acc_consistency.end());
@@ -464,7 +454,7 @@ int main()
             minSnapTime_us += std::chrono::duration_cast<std::chrono::microseconds>(tc1 - tc0).count();
 
             // 准备 SepticSpline 数据
-            SplineVector3D spline_points = convertMatrixToSplineVector(route);
+            SepticSpline3D::MatrixType spline_points = convertRouteToSplineMatrix(route);
             std::vector<double> time_segments = convertVectorXdToStdVector(ts);
             
             // 设置边界条件（零速度、加速度和急动度）
