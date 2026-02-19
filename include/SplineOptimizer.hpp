@@ -15,128 +15,24 @@
 
 namespace SplineTrajectory
 {
-    // =========================================================================
-    //  INTERFACE DOCUMENTATION (Reference Only)
-    //  These definitions are provided for documentation purposes. 
-    //  User-defined types (Functors/Lambdas) do not need to inherit from them, 
-    //  but must satisfy the function signatures verified by Concepts.
-    // =========================================================================
-
-#if 0
-    /**
-     * @brief TimeMap Interface Protocol
-     * Defines how the unconstrained optimization variable (tau) maps to physical time (T).
-     */
-    struct TimeMapProtocol
-    {
-        // Convert unconstrained variable 'tau' to physical time 'T'
-        double toTime(double tau) const;
-        // Convert physical time 'T' to unconstrained variable 'tau'
-        double toTau(double T) const;
-        // Compute gradient w.r.t tau given gradient w.r.t T (Chain Rule)
-        // Returns: dCost/dtau = (dCost/dT) * (dT/dtau)
-        double backward(double tau, double T, double gradT) const;
-    };
-
-    /**
-     * @brief SpatialMap Interface Protocol [NEW]
-     * Defines how the unconstrained variable (xi) maps to physical position (p).
-     * Unlike TimeMap, this acts on an instance level to hold constraints (e.g., Polyhedrons).
-     *
-     * Global Absolute Indexing:
-     * - index = 0: The Start Point of the trajectory
-     * - index = 1 to N-1: The Inner Waypoints
-     * - index = N: The End Point of the trajectory
-     */
-    struct SpatialMapProtocol
-    {
-        // Get dimension of unconstrained variable xi for the point at global 'index'
-        int getUnconstrainedDim(int index) const;
-
-        // Forward: xi (unconstrained) -> p (physical)
-        Eigen::VectorXd toPhysical(const Eigen::VectorXd& xi, int index) const;
-
-        // Backward: p (physical) -> xi (unconstrained), used for initial guess
-        Eigen::VectorXd toUnconstrained(const Eigen::VectorXd& p, int index) const;
-
-        // Gradient: dCost/dxi = (dCost/dp) * (dp/dxi)
-        Eigen::VectorXd backwardGrad(const Eigen::VectorXd& xi, const Eigen::VectorXd& grad_p, int index) const;
-    };
-
-    /**
-     * @brief IntegralCostFunc Protocol
-     * Functor to compute trajectory integral cost.
-     * Returns the scalar cost value.
-     */
-    struct IntegralCostProtocol
-    {
-        /**
-         * @param t         Relative time inside the segment [0, T]
-         * @param t_global  Global time from start of trajectory    
-         * @param i         Segment index
-         * @param p         Position vector (dim)
-         * @param v         Velocity vector (dim)
-         * @param a         Acceleration vector (dim)
-         * @param j         Jerk vector (dim)
-         * @param s         Snap vector (dim)
-         * @param gp        [Output] Gradient w.r.t Position
-         * @param gv        [Output] Gradient w.r.t Velocity
-         * @param ga        [Output] Gradient w.r.t Acceleration
-         * @param gj        [Output] Gradient w.r.t Jerk
-         * @param gs        [Output] Gradient w.r.t Snap
-         * @param gt        [Output] Gradient w.r.t Explicit Time (e.g. dynamic obstacles)
-         * @return          Scalar cost value to be accumulated
-         */
-        double operator()(double t, double t_global, int i,
-                          const Eigen::VectorXd &p, const Eigen::VectorXd &v,
-                          const Eigen::VectorXd &a, const Eigen::VectorXd &j, const Eigen::VectorXd &s,
-                          Eigen::VectorXd &gp, Eigen::VectorXd &gv, Eigen::VectorXd &ga,
-                          Eigen::VectorXd &gj, Eigen::VectorXd &gs, double &gt) const;
-    };
-
-    /**
-     * @brief TimeCostFunc Protocol
-     * Functor to compute cost based on ALL segment durations.
-     * Allows for global time constraints (e.g., total time).
-     */
-    struct TimeCostProtocol
-    {
-        /**
-         * @param Ts    Physical durations of all segments (std::vector<double>)
-         * @param grad  [Output] Gradient of cost w.r.t each T (Eigen::VectorXd ref)
-         * @return      Cost value
-         */
-        double operator()(const std::vector<double>& Ts, Eigen::VectorXd &grad) const;
-    };
-
-    /**
-     * @brief WaypointsCostProtocol
-     * Functor to compute cost based on DISCRETE waypoints (q).
-     * This is separate from the integral cost along the continuous curve.
-     */
-    struct WaypointsCostProtocol
-    {
-        /**
-         * @param waypoints  The full list of waypoints [q0, q1, ... qN] (Physical space)
-         * @param grad_q     [Output] Gradient w.r.t each waypoint (Matrix: (N+1) x DIM)
-         * Rows correspond to q0, q1, ... qN
-         * @return           Cost value
-         */
-        double operator()(const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &waypoints,
-                          Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &grad_q) const;
-    };
-#endif
-
     namespace Concepts
     {
-        template <typename T>
-        concept TimeMapLike = requires(const T &map, double tau, double T, double gradT)
+        // Time map protocol:
+        // toTime(tau), toTau(time_value), backward(tau, time_value, gradT)
+        template <typename MapT>
+        concept TimeMapLike = requires(const MapT &map,
+                                       double tau,
+                                       double time_value,
+                                       double gradT)
         {
             { map.toTime(tau) } -> std::convertible_to<double>;
-            { map.toTau(T) } -> std::convertible_to<double>;
-            { map.backward(tau, T, gradT) } -> std::convertible_to<double>;
+            { map.toTau(time_value) } -> std::convertible_to<double>;
+            { map.backward(tau, time_value, gradT) } -> std::convertible_to<double>;
         };
 
+        // Spatial map protocol:
+        // getUnconstrainedDim(index), toPhysical(xi, index),
+        // toUnconstrained(p, index), backwardGrad(xi, grad_p, index)
         template <typename T, int DIM>
         concept SpatialMapLike = requires(const T &map,
                                           const Eigen::VectorXd &xi,
@@ -150,18 +46,24 @@ namespace SplineTrajectory
             { map.backwardGrad(xi, grad_p, index) } -> std::convertible_to<Eigen::VectorXd>;
         };
 
+        // Executor protocol:
+        // operator()(int start, int end, Func f)
         template <typename T>
         concept ExecutorLike = requires(const T &executor)
         {
             executor(0, 1, [](int) {});
         };
 
+        // Time cost protocol:
+        // operator()(const vector<double>& Ts, VectorXd& grad) -> double
         template <typename T>
         concept TimeCostLike = requires(T &&f, const std::vector<double> &Ts, Eigen::VectorXd &grad)
         {
             { std::forward<T>(f)(Ts, grad) } -> std::convertible_to<double>;
         };
 
+        // Waypoints cost protocol:
+        // operator()(const WaypointsType&, MatrixXd& grad_q) -> double
         template <typename T, typename WaypointsType>
         concept WaypointsCostLike = requires(T &&f,
                                              const WaypointsType &waypoints,
@@ -170,6 +72,8 @@ namespace SplineTrajectory
             { std::forward<T>(f)(waypoints, grad_q) } -> std::convertible_to<double>;
         };
 
+        // Integral cost protocol:
+        // operator()(t, t_global, segment_index, p, v, a, j, s, gp, gv, ga, gj, gs, gt) -> double
         template <typename T, typename VecT>
         concept IntegralCostLike = requires(T &&f,
                                             double t,
