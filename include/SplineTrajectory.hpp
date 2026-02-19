@@ -128,11 +128,25 @@ namespace SplineTrajectory
 
     namespace detail
     {
-        template <int DIM, typename WorkspaceType, typename... GradRows>
-        inline void accumulateDerivativeGrads(WorkspaceType &workspace, int row_idx, const GradRows &... grads)
+        template <int DIM, typename WorkspaceType, typename Grad0>
+        inline void accumulateDerivativeGrads(WorkspaceType &workspace, int row_idx, const Grad0 &g0)
         {
-            int offset = 0;
-            ((workspace.row(row_idx).segment(offset, DIM) += grads, offset += DIM), ...);
+            workspace.row(row_idx).template segment<DIM>(0) += g0;
+        }
+
+        template <int DIM, typename WorkspaceType, typename Grad0, typename Grad1>
+        inline void accumulateDerivativeGrads(WorkspaceType &workspace, int row_idx, const Grad0 &g0, const Grad1 &g1)
+        {
+            workspace.row(row_idx).template segment<DIM>(0) += g0;
+            workspace.row(row_idx).template segment<DIM>(DIM) += g1;
+        }
+
+        template <int DIM, typename WorkspaceType, typename Grad0, typename Grad1, typename Grad2>
+        inline void accumulateDerivativeGrads(WorkspaceType &workspace, int row_idx, const Grad0 &g0, const Grad1 &g1, const Grad2 &g2)
+        {
+            workspace.row(row_idx).template segment<DIM>(0) += g0;
+            workspace.row(row_idx).template segment<DIM>(DIM) += g1;
+            workspace.row(row_idx).template segment<DIM>(2 * DIM) += g2;
         }
 
         template <int BLOCK_SIZE, int DIM, typename WorkspaceType>
@@ -243,16 +257,46 @@ namespace SplineTrajectory
                 auto rhs_i = rhs_mod.template middleRows<BLOCK_SIZE>(BLOCK_SIZE * i);
 
                 Eigen::Matrix<double, BLOCK_SIZE, DIM> rhs_temp;
-                for (int j = 0; j < DIM; ++j)
+                if constexpr (BLOCK_SIZE == 2)
                 {
-                    for (int r = 0; r < BLOCK_SIZE; ++r)
+                    const double u00 = u_blocks_cache(i, 0), u01 = u_blocks_cache(i, 1);
+                    const double u10 = u_blocks_cache(i, 2), u11 = u_blocks_cache(i, 3);
+                    for (int j = 0; j < DIM; ++j)
                     {
-                        double acc = rhs_i(r, j);
-                        for (int c = 0; c < BLOCK_SIZE; ++c)
+                        const double s0 = sol_next(0, j);
+                        const double s1 = sol_next(1, j);
+                        rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1);
+                        rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1);
+                    }
+                }
+                else if constexpr (BLOCK_SIZE == 3)
+                {
+                    const double u00 = u_blocks_cache(i, 0), u01 = u_blocks_cache(i, 1), u02 = u_blocks_cache(i, 2);
+                    const double u10 = u_blocks_cache(i, 3), u11 = u_blocks_cache(i, 4), u12 = u_blocks_cache(i, 5);
+                    const double u20 = u_blocks_cache(i, 6), u21 = u_blocks_cache(i, 7), u22 = u_blocks_cache(i, 8);
+                    for (int j = 0; j < DIM; ++j)
+                    {
+                        const double s0 = sol_next(0, j);
+                        const double s1 = sol_next(1, j);
+                        const double s2 = sol_next(2, j);
+                        rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1 + u02 * s2);
+                        rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1 + u12 * s2);
+                        rhs_temp(2, j) = rhs_i(2, j) - (u20 * s0 + u21 * s1 + u22 * s2);
+                    }
+                }
+                else
+                {
+                    for (int j = 0; j < DIM; ++j)
+                    {
+                        for (int r = 0; r < BLOCK_SIZE; ++r)
                         {
-                            acc -= u_blocks_cache(i, r * BLOCK_SIZE + c) * sol_next(c, j);
+                            double acc = rhs_i(r, j);
+                            for (int c = 0; c < BLOCK_SIZE; ++c)
+                            {
+                                acc -= u_blocks_cache(i, r * BLOCK_SIZE + c) * sol_next(c, j);
+                            }
+                            rhs_temp(r, j) = acc;
                         }
-                        rhs_temp(r, j) = acc;
                     }
                 }
                 BlockOpsType::multiplyBlockNxD(d_inv_cache, i, rhs_temp, sol_block);
