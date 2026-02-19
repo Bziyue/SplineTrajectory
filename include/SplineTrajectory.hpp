@@ -452,6 +452,61 @@ namespace SplineTrajectory
             state.j = raw_grad.row(2).transpose();
         }
 
+        template <int DIM, typename MatrixType>
+        inline void initBoundaryStateVA(const BoundaryConditions<DIM> &boundary,
+                                        int last_row,
+                                        MatrixType &vel,
+                                        MatrixType &acc,
+                                        Eigen::Matrix<double, 2, DIM> &boundary_left,
+                                        Eigen::Matrix<double, 2, DIM> &boundary_right)
+        {
+            const auto start_v = boundary.start_velocity.transpose();
+            const auto start_a = boundary.start_acceleration.transpose();
+            const auto end_v = boundary.end_velocity.transpose();
+            const auto end_a = boundary.end_acceleration.transpose();
+
+            vel.row(0) = start_v;
+            acc.row(0) = start_a;
+            vel.row(last_row) = end_v;
+            acc.row(last_row) = end_a;
+
+            boundary_left.row(0) = start_v;
+            boundary_left.row(1) = start_a;
+            boundary_right.row(0) = end_v;
+            boundary_right.row(1) = end_a;
+        }
+
+        template <int DIM, typename MatrixType>
+        inline void initBoundaryStateVAJ(const BoundaryConditions<DIM> &boundary,
+                                         int last_row,
+                                         MatrixType &vel,
+                                         MatrixType &acc,
+                                         MatrixType &jerk,
+                                         Eigen::Matrix<double, 3, DIM> &boundary_left,
+                                         Eigen::Matrix<double, 3, DIM> &boundary_right)
+        {
+            const auto start_v = boundary.start_velocity.transpose();
+            const auto start_a = boundary.start_acceleration.transpose();
+            const auto start_j = boundary.start_jerk.transpose();
+            const auto end_v = boundary.end_velocity.transpose();
+            const auto end_a = boundary.end_acceleration.transpose();
+            const auto end_j = boundary.end_jerk.transpose();
+
+            vel.row(0) = start_v;
+            acc.row(0) = start_a;
+            jerk.row(0) = start_j;
+            vel.row(last_row) = end_v;
+            acc.row(last_row) = end_a;
+            jerk.row(last_row) = end_j;
+
+            boundary_left.row(0) = start_v;
+            boundary_left.row(1) = start_a;
+            boundary_left.row(2) = start_j;
+            boundary_right.row(0) = end_v;
+            boundary_right.row(1) = end_a;
+            boundary_right.row(2) = end_j;
+        }
+
         template <int BLOCK_SIZE, int DIM>
         struct BlockOps
         {
@@ -1085,45 +1140,51 @@ namespace SplineTrajectory
         }
 
     private:
-        inline void initializeInternal(const std::vector<double> &breakpoints,
-                                       const MatrixType &coefficients,
-                                       int num_coefficients)
+        inline void resetToUninitialized()
+        {
+            num_segments_ = 0;
+            num_coeffs_ = 0;
+            is_initialized_ = false;
+            breakpoints_.clear();
+            coefficients_.resize(0, DIM);
+            invalidateDerivativeCaches();
+        }
+
+        inline bool isValidInitialization(const std::vector<double> &breakpoints,
+                                          const MatrixType &coefficients,
+                                          int num_coefficients) const
         {
             if (breakpoints.size() < 2)
             {
-                num_segments_ = 0;
-                num_coeffs_ = 0;
-                is_initialized_ = false;
-                breakpoints_.clear();
-                coefficients_.resize(0, DIM);
-                invalidateDerivativeCaches();
-                return;
+                return false;
             }
 
-            long expected_rows = static_cast<long>(breakpoints.size() - 1) * num_coefficients;
+            const Eigen::Index expected_rows =
+                static_cast<Eigen::Index>(breakpoints.size() - 1) * static_cast<Eigen::Index>(num_coefficients);
             if (coefficients.rows() != expected_rows)
             {
-                num_segments_ = 0;
-                num_coeffs_ = 0;
-                is_initialized_ = false;
-                breakpoints_.clear();
-                coefficients_.resize(0, DIM);
-                invalidateDerivativeCaches();
-                return;
+                return false;
             }
 
             if constexpr (kHasFixedOrder)
             {
                 if (num_coefficients <= 0 || num_coefficients > kOrderHint)
                 {
-                    num_segments_ = 0;
-                    num_coeffs_ = 0;
-                    is_initialized_ = false;
-                    breakpoints_.clear();
-                    coefficients_.resize(0, DIM);
-                    invalidateDerivativeCaches();
-                    return;
+                    return false;
                 }
+            }
+
+            return true;
+        }
+
+        inline void initializeInternal(const std::vector<double> &breakpoints,
+                                       const MatrixType &coefficients,
+                                       int num_coefficients)
+        {
+            if (!isValidInitialization(breakpoints, coefficients, num_coefficients))
+            {
+                resetToUninitialized();
+                return;
             }
 
             breakpoints_ = breakpoints;
@@ -2499,21 +2560,12 @@ namespace SplineTrajectory
             const int n = num_segments_ + 1;
             p_out.resize(n, DIM);
             q_out.resize(n, DIM);
-
-            p_out.row(0) = boundary_.start_velocity.transpose();
-            q_out.row(0) = boundary_.start_acceleration.transpose();
-            p_out.row(n - 1) = boundary_.end_velocity.transpose();
-            q_out.row(n - 1) = boundary_.end_acceleration.transpose();
+            Eigen::Matrix<double, 2, DIM> B_left, B_right;
+            detail::initBoundaryStateVA<DIM>(boundary_, n - 1, p_out, q_out, B_left, B_right);
 
             const int num_blocks = n - 2;
             if (num_blocks <= 0)
                 return;
-
-            Eigen::Matrix<double, 2, DIM> B_left, B_right;
-            B_left.row(0) = boundary_.start_velocity.transpose();
-            B_left.row(1) = boundary_.start_acceleration.transpose();
-            B_right.row(0) = boundary_.end_velocity.transpose();
-            B_right.row(1) = boundary_.end_acceleration.transpose();
 
             detail::factorAndSolveBlockSystem<2, DIM, BlockOps2>(
                 num_blocks,
@@ -3256,27 +3308,12 @@ namespace SplineTrajectory
             p_out.resize(n, DIM);
             q_out.resize(n, DIM);
             s_out.resize(n, DIM);
-
-            p_out.row(0) = boundary_.start_velocity.transpose();
-            q_out.row(0) = boundary_.start_acceleration.transpose();
-            s_out.row(0) = boundary_.start_jerk.transpose();
-
-            p_out.row(n - 1) = boundary_.end_velocity.transpose();
-            q_out.row(n - 1) = boundary_.end_acceleration.transpose();
-            s_out.row(n - 1) = boundary_.end_jerk.transpose();
+            Eigen::Matrix<double, 3, DIM> B_left, B_right;
+            detail::initBoundaryStateVAJ<DIM>(boundary_, n - 1, p_out, q_out, s_out, B_left, B_right);
 
             const int num_blocks = n - 2;
             if (num_blocks <= 0)
                 return;
-
-            Eigen::Matrix<double, 3, DIM> B_left, B_right;
-            B_left.row(0) = boundary_.start_velocity.transpose();
-            B_left.row(1) = boundary_.start_acceleration.transpose();
-            B_left.row(2) = boundary_.start_jerk.transpose();
-
-            B_right.row(0) = boundary_.end_velocity.transpose();
-            B_right.row(1) = boundary_.end_acceleration.transpose();
-            B_right.row(2) = boundary_.end_jerk.transpose();
 
             detail::factorAndSolveBlockSystem<3, DIM, BlockOps3>(
                 num_blocks,
