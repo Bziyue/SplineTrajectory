@@ -124,6 +124,51 @@ namespace SplineTrajectory
         double operator()(const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &waypoints,
                           Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &grad_q) const;
     };
+
+    /**
+     * @brief AuxiliaryStateMap Protocol [NEW]
+     * Adds an optional extra optimization variable block that can modify the
+     * effective spline state before evaluation, and map gradients back after
+     * spline back-propagation.
+     *
+     * Typical use cases:
+     * - A shared total-time variable that overrides segment times
+     * - A trajectory splice/start-state variable sampled from an external motion
+     * - Other low-dimensional variables that affect waypoints / boundary states
+     *
+     * The optimizer owns the canonical reference state. The auxiliary map:
+     * 1) provides the initial unconstrained auxiliary variables
+     * 2) applies them onto the working state before spline.update(...)
+     * 3) pulls gradients back from the working state after spline.propagateGrad(...)
+     */
+    struct AuxiliaryStateMapProtocol
+    {
+        // Dimension of the auxiliary optimization variable block.
+        int getDimension() const;
+
+        // Create initial unconstrained auxiliary variables from the reference state.
+        Eigen::VectorXd getInitialValue(const std::vector<double> &ref_times,
+                                        const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &ref_waypoints,
+                                        double ref_start_time,
+                                        const BoundaryConditions<3> &ref_bc) const;
+
+        // Apply the auxiliary variables onto the working state before spline update.
+        void apply(const Eigen::VectorXd &z,
+                   std::vector<double> &times,
+                   Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &waypoints,
+                   double &start_time,
+                   BoundaryConditions<3> &bc) const;
+
+        // Back-propagate gradients from the working state to z.
+        double backward(const Eigen::VectorXd &z,
+                        const QuinticSplineND<3> &spline,
+                        const std::vector<double> &times,
+                        const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &waypoints,
+                        double start_time,
+                        const BoundaryConditions<3> &bc,
+                        QuinticSplineND<3>::Gradients &grads,
+                        Eigen::VectorXd &grad_z) const;
+    };
 #endif
 
     namespace TypeTraits
@@ -212,6 +257,34 @@ namespace SplineTrajectory
                 std::declval<VecT &>(),                  // gs
                 std::declval<double &>()                 // gt
             )))
+        >> : std::true_type {};
+
+        template <typename T, int DIM, typename SplineType, typename = void>
+        struct HasAuxiliaryStateMapInterface : std::false_type {};
+
+        template <typename T, int DIM, typename SplineType>
+        struct HasAuxiliaryStateMapInterface<T, DIM, SplineType, void_t<
+            decltype(static_cast<int>(std::declval<T>().getDimension())),
+            decltype(std::declval<T>().getInitialValue(
+                std::declval<const std::vector<double> &>(),
+                std::declval<const typename SplineType::MatrixType &>(),
+                std::declval<double>(),
+                std::declval<const BoundaryConditions<DIM> &>())),
+            decltype(std::declval<T>().apply(
+                std::declval<const Eigen::VectorXd &>(),
+                std::declval<std::vector<double> &>(),
+                std::declval<typename SplineType::MatrixType &>(),
+                std::declval<double &>(),
+                std::declval<BoundaryConditions<DIM> &>())),
+            decltype(static_cast<double>(std::declval<T>().backward(
+                std::declval<const Eigen::VectorXd &>(),
+                std::declval<const SplineType &>(),
+                std::declval<const std::vector<double> &>(),
+                std::declval<const typename SplineType::MatrixType &>(),
+                std::declval<double>(),
+                std::declval<const BoundaryConditions<DIM> &>(),
+                std::declval<typename SplineType::Gradients &>(),
+                std::declval<Eigen::VectorXd &>())))
         >> : std::true_type {};
     }
 
@@ -333,6 +406,44 @@ namespace SplineTrajectory
         }
     };
 
+    template <int DIM, typename SplineType>
+    struct VoidAuxiliaryStateMap
+    {
+        using WaypointsType = typename SplineType::MatrixType;
+        using Gradients = typename SplineType::Gradients;
+
+        int getDimension() const { return 0; }
+
+        Eigen::VectorXd getInitialValue(const std::vector<double> & /*ref_times*/,
+                                        const WaypointsType & /*ref_waypoints*/,
+                                        double /*ref_start_time*/,
+                                        const BoundaryConditions<DIM> & /*ref_bc*/) const
+        {
+            return Eigen::VectorXd();
+        }
+
+        void apply(const Eigen::VectorXd & /*z*/,
+                   std::vector<double> & /*times*/,
+                   WaypointsType & /*waypoints*/,
+                   double & /*start_time*/,
+                   BoundaryConditions<DIM> & /*bc*/) const
+        {
+        }
+
+        double backward(const Eigen::VectorXd & /*z*/,
+                        const SplineType & /*spline*/,
+                        const std::vector<double> & /*times*/,
+                        const WaypointsType & /*waypoints*/,
+                        double /*start_time*/,
+                        const BoundaryConditions<DIM> & /*bc*/,
+                        Gradients & /*grads*/,
+                        Eigen::VectorXd &grad_z) const
+        {
+            grad_z.resize(0);
+            return 0.0;
+        }
+    };
+
     struct OptimizationFlags
     {
         bool start_p = false;
@@ -348,7 +459,8 @@ namespace SplineTrajectory
     template <int DIM,
               typename SplineType = QuinticSplineND<DIM>,
               typename TimeMap = QuadInvTimeMap,
-              typename SpatialMap = IdentitySpatialMap<DIM>>
+              typename SpatialMap = IdentitySpatialMap<DIM>,
+              typename AuxiliaryStateMap = VoidAuxiliaryStateMap<DIM, SplineType>>
     class SplineOptimizer
     {
         static_assert(TypeTraits::HasTimeMapInterface<TimeMap>::value,
@@ -361,6 +473,10 @@ namespace SplineTrajectory
         static_assert(TypeTraits::HasSpatialMapInterface<SpatialMap, DIM>::value,
                       "\n[SplineOptimizer Error] The provided 'SpatialMap' type does not satisfy the required interface.\n"
                       "It must implement toPhysical, toUnconstrained, and backwardGrad methods.\n");
+
+        static_assert(TypeTraits::HasAuxiliaryStateMapInterface<AuxiliaryStateMap, DIM, SplineType>::value,
+                      "\n[SplineOptimizer Error] The provided 'AuxiliaryStateMap' type does not satisfy the required interface.\n"
+                      "It must implement getDimension, getInitialValue, apply, and backward methods.\n");
 
     public:
         using VectorType = typename SplineType::VectorType;
@@ -430,15 +546,18 @@ namespace SplineTrajectory
 
         TimeMap default_time_map_;
         SpatialMap default_spatial_map_;
+        AuxiliaryStateMap default_auxiliary_state_map_;
 
         const TimeMap* active_time_map_ = nullptr;
         const SpatialMap* active_spatial_map_ = nullptr;
+        const AuxiliaryStateMap* active_auxiliary_state_map_ = nullptr;
 
         mutable std::unique_ptr<Workspace> internal_ws_;
         
         mutable std::string last_error_message_;
         mutable std::vector<SpatialVariableLayout> spatial_layout_;
         mutable int derivatives_offset_ = 0;
+        mutable int auxiliary_offset_ = 0;
         mutable int total_dimension_ = 0;
         mutable bool layout_dirty_ = true;
         
@@ -505,6 +624,7 @@ namespace SplineTrajectory
             if (num_segments_ <= 0)
             {
                 derivatives_offset_ = 0;
+                auxiliary_offset_ = 0;
                 total_dimension_ = 0;
                 layout_dirty_ = false;
                 return;
@@ -524,7 +644,8 @@ namespace SplineTrajectory
             }
 
             derivatives_offset_ = offset;
-            total_dimension_ = derivatives_offset_ + countOptimizedDerivativeBlocks() * DIM;
+            auxiliary_offset_ = derivatives_offset_ + countOptimizedDerivativeBlocks() * DIM;
+            total_dimension_ = auxiliary_offset_ + active_auxiliary_state_map_->getDimension();
             layout_dirty_ = false;
         }
 
@@ -544,6 +665,7 @@ namespace SplineTrajectory
         {
             active_time_map_ = &default_time_map_;
             active_spatial_map_ = &default_spatial_map_;
+            active_auxiliary_state_map_ = &default_auxiliary_state_map_;
         }
 
         SplineOptimizer(const SplineOptimizer &other)
@@ -558,8 +680,10 @@ namespace SplineTrajectory
               integral_num_steps_(other.integral_num_steps_),
               default_time_map_(other.default_time_map_),
               default_spatial_map_(other.default_spatial_map_),
+              default_auxiliary_state_map_(other.default_auxiliary_state_map_),
               spatial_layout_(other.spatial_layout_),
               derivatives_offset_(other.derivatives_offset_),
+              auxiliary_offset_(other.auxiliary_offset_),
               total_dimension_(other.total_dimension_),
               layout_dirty_(other.layout_dirty_)
         {
@@ -569,6 +693,9 @@ namespace SplineTrajectory
             active_spatial_map_ = (other.active_spatial_map_ == &other.default_spatial_map_)
                                   ? &default_spatial_map_
                                   : other.active_spatial_map_;
+            active_auxiliary_state_map_ = (other.active_auxiliary_state_map_ == &other.default_auxiliary_state_map_)
+                                          ? &default_auxiliary_state_map_
+                                          : other.active_auxiliary_state_map_;
 
             if (other.internal_ws_)
                 internal_ws_ = std::unique_ptr<Workspace>(new Workspace(*other.internal_ws_));
@@ -589,8 +716,10 @@ namespace SplineTrajectory
                 integral_num_steps_ = other.integral_num_steps_;
                 default_time_map_ = other.default_time_map_;
                 default_spatial_map_ = other.default_spatial_map_;
+                default_auxiliary_state_map_ = other.default_auxiliary_state_map_;
                 spatial_layout_ = other.spatial_layout_;
                 derivatives_offset_ = other.derivatives_offset_;
+                auxiliary_offset_ = other.auxiliary_offset_;
                 total_dimension_ = other.total_dimension_;
                 layout_dirty_ = other.layout_dirty_;
 
@@ -600,6 +729,9 @@ namespace SplineTrajectory
                 active_spatial_map_ = (other.active_spatial_map_ == &other.default_spatial_map_)
                                       ? &default_spatial_map_
                                       : other.active_spatial_map_;
+                active_auxiliary_state_map_ = (other.active_auxiliary_state_map_ == &other.default_auxiliary_state_map_)
+                                              ? &default_auxiliary_state_map_
+                                              : other.active_auxiliary_state_map_;
 
                 if (other.internal_ws_)
                     internal_ws_ = std::unique_ptr<Workspace>(new Workspace(*other.internal_ws_));
@@ -627,6 +759,17 @@ namespace SplineTrajectory
         void setSpatialMap(const SpatialMap* map)
         {
             active_spatial_map_ = (map != nullptr) ? map : &default_spatial_map_;
+            markLayoutDirty();
+        }
+
+        /**
+         * @brief Set the AuxiliaryStateMap for optional extra optimization variables.
+         * @param map Pointer to an AuxiliaryStateMap instance (can be nullptr to reset to default).
+         * The optimizer does not take ownership; the map must remain valid.
+         */
+        void setAuxiliaryStateMap(const AuxiliaryStateMap* map)
+        {
+            active_auxiliary_state_map_ = (map != nullptr) ? map : &default_auxiliary_state_map_;
             markLayoutDirty();
         }
 
@@ -831,6 +974,13 @@ namespace SplineTrajectory
                 offset += DIM;
             });
 
+            const int aux_dim = active_auxiliary_state_map_->getDimension();
+            if (aux_dim > 0)
+            {
+                x.segment(auxiliary_offset_, aux_dim) =
+                    active_auxiliary_state_map_->getInitialValue(ref_times_, ref_waypoints_, start_time_, ref_bc_);
+            }
+
             return x;
         }
 
@@ -891,6 +1041,7 @@ namespace SplineTrajectory
             }
 
             BoundaryConditions<DIM> current_bc = ref_bc_;
+            double current_start_time = start_time_;
             int offset = derivatives_offset_;
             auto apply_derivatives_forward = [&](auto&& op) {
 
@@ -908,7 +1059,19 @@ namespace SplineTrajectory
                 offset += DIM;
             });
 
-            ws_ref.spline.update(ws_ref.cache_times, ws_ref.cache_waypoints, start_time_, current_bc);
+            const int aux_dim = active_auxiliary_state_map_->getDimension();
+            Eigen::VectorXd auxiliary_vars;
+            if (aux_dim > 0)
+            {
+                auxiliary_vars = x.segment(auxiliary_offset_, aux_dim);
+                active_auxiliary_state_map_->apply(auxiliary_vars,
+                                                   ws_ref.cache_times,
+                                                   ws_ref.cache_waypoints,
+                                                   current_start_time,
+                                                   current_bc);
+            }
+
+            ws_ref.spline.update(ws_ref.cache_times, ws_ref.cache_waypoints, current_start_time, current_bc);
 
             ws_ref.user_gdT_buffer.setZero();
             ws_ref.cache_gdT.setZero();
@@ -918,6 +1081,7 @@ namespace SplineTrajectory
             ws_ref.cache_gdC.setZero();
             calculateIntegralCost(ws_ref, ws_ref.cache_gdC, ws_ref.cache_gdT, total_cost, 
                                   std::forward<IntegralCostFunc>(integral_cost_func),
+                                  current_start_time,
                                   executor);
 
             ws_ref.spline.propagateGrad(ws_ref.cache_gdC, ws_ref.cache_gdT, ws_ref.grads);
@@ -956,6 +1120,25 @@ namespace SplineTrajectory
                 ws_ref.grads.end.v += rho_energy_ * ws_ref.energy_grads.end.v;
                 if constexpr (SplineType::ORDER >= 5) ws_ref.grads.end.a += rho_energy_ * ws_ref.energy_grads.end.a;
                 if constexpr (SplineType::ORDER >= 7) ws_ref.grads.end.j += rho_energy_ * ws_ref.energy_grads.end.j;
+            }
+
+            if (aux_dim > 0)
+            {
+                Eigen::VectorXd auxiliary_grad;
+                total_cost += active_auxiliary_state_map_->backward(auxiliary_vars,
+                                                                    ws_ref.spline,
+                                                                    ws_ref.cache_times,
+                                                                    ws_ref.cache_waypoints,
+                                                                    current_start_time,
+                                                                    current_bc,
+                                                                    ws_ref.grads,
+                                                                    auxiliary_grad);
+                if (auxiliary_grad.size() != aux_dim)
+                {
+                    auxiliary_grad.conservativeResize(aux_dim);
+                    auxiliary_grad.setZero();
+                }
+                grad_out.segment(auxiliary_offset_, aux_dim) = auxiliary_grad;
             }
 
             // Time gradient: backward through time map
@@ -1159,12 +1342,14 @@ namespace SplineTrajectory
         }
 
         template <typename IntegralFunc, typename Executor>
-        void calculateIntegralCost(Workspace &ws, MatrixType &gdC, Eigen::VectorXd &gdT, double &cost, 
-                                   IntegralFunc &&integral_cost, const Executor& executor) const
+        void calculateIntegralCost(Workspace &ws, MatrixType &gdC, Eigen::VectorXd &gdT, double &cost,
+                                   IntegralFunc &&integral_cost,
+                                   double start_time,
+                                   const Executor& executor) const
         {
             const auto &coeffs = ws.spline.getTrajectory().getCoefficients();
             
-            double running_time = start_time_;
+            double running_time = start_time;
             for(int i = 0; i < num_segments_; ++i) {
                 ws.segment_start_times[i] = running_time;
                 running_time += ws.cache_times[i];
