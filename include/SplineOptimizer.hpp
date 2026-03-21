@@ -73,6 +73,7 @@ namespace SplineTrajectory
          * @param t         Relative time inside the segment [0, T]
          * @param t_global  Global time from start of trajectory    
          * @param i         Segment index
+         * @param step_in_seg Segment-local integration sample index
          * @param p         Position vector (dim)
          * @param v         Velocity vector (dim)
          * @param a         Acceleration vector (dim)
@@ -86,7 +87,7 @@ namespace SplineTrajectory
          * @param gt        [Output] Gradient w.r.t Explicit Time (e.g. dynamic obstacles)
          * @return          Scalar cost value to be accumulated
          */
-        double operator()(double t, double t_global, int i,
+        double operator()(double t, double t_global, int i, int step_in_seg,
                           const Eigen::VectorXd &p, const Eigen::VectorXd &v,
                           const Eigen::VectorXd &a, const Eigen::VectorXd &j, const Eigen::VectorXd &s,
                           Eigen::VectorXd &gp, Eigen::VectorXd &gv, Eigen::VectorXd &ga,
@@ -288,6 +289,7 @@ namespace SplineTrajectory
                 std::declval<double>(),                  // t (relative)
                 std::declval<double>(),                  // t_global
                 std::declval<int>(),                     // segment_index
+                std::declval<int>(),                     // step_in_seg
                 std::declval<const VecT &>(),            // p
                 std::declval<const VecT &>(),            // v
                 std::declval<const VecT &>(),            // a
@@ -1503,7 +1505,7 @@ namespace SplineTrajectory
                     VectorType gs = VectorType::Zero();
                     double gt = 0.0;
 
-                    double c_val = integral_cost(t, t_global, i, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
+                    double c_val = integral_cost(t, t_global, i, k, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
 
                     local_acc_cost += c_val * common_weight;
 
