@@ -1,322 +1,203 @@
 # SplineTrajectory
 
-SplineTrajectory 是一个高性能、纯头文件的 C++ 库，用于生成平滑的N维样条轨迹。该库提供了与 **MINCO 等效** 的三次、五次和七次样条插值，并支持边界条件，是机器人学、路径规划和轨迹生成应用的理想选择。
+一个纯头文件的 C++ 库，用于生成平滑的 N 维最小控制量样条轨迹。它与 [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER) 在数学上等价，并在实现上采用 O(N) 的块三对角求解结构，同时提供全控制参数梯度传播、能量解析梯度以及面向组件化优化的接口。
 
-[English](README.md) | **中文**
+[English](README_SplineTrajectory_EN.md) | **中文**
 
-## 核心特性
+## ✨ 概览
 
-- **与MINCO等效**: 实现与MINCO相同的最小化加速度、加加速度(Jerk)和加加加速度(Snap)轨迹。   
-- **高性能**: 使用专门的 **块三对角矩阵求解器** (托马斯算法) 代替通用的LU分解，性能超越传统方法。
-- **基于模板**: 完全模板化，支持 **任意维度** (1D到ND)，并进行编译时优化。
-- **灵活高效**: 支持多种时间规格，优化的分段批量求值，并提供导数 (速度、加速度、Jerk、Snap)。
-- **集成Eigen**: 无缝使用 Eigen 库进行所有线性代数运算。
-- **纯头文件**: 只需包含头文件即可轻松集成到任何项目中。
+核心内容包括：
 
-## 环境要求
+- 三次、五次、七次最小控制量样条
+- 基于块三对角求解器的 O(N) 轨迹构造
+- 面向时间段、空间点和边界状态的伴随法梯度传播
+- 基于哈密顿量守恒和变分法推导的能量解析梯度
+- 一个通用的 `SplineOptimizer`，支持时间映射、空间映射、代价接口和附加优化变量的组件化组织
+
+样条类型与 MINCO 的对应关系如下：
+
+| 样条类型 | 多项式阶次 | 最小化目标 | MINCO 对应 |
+| --- | --- | --- | --- |
+| 三次样条 | 3 阶 | 加速度 | MINCO S2 |
+| 五次样条 | 5 阶 | Jerk | MINCO S3 |
+| 七次样条 | 7 阶 | Snap | MINCO S4 |
+
+## 🔁 梯度传播
+
+🔁 提供了面向主要控制参数的伴随法梯度传播机制，覆盖：
+
+- 时间段 `T`
+- 空间点 `P`
+- 起终点边界状态，包括速度、加速度、jerk 等导数条件
+
+在底层接口上，`propagateGrad(gdC, gdT)` 可以将定义在多项式系数和时间上的梯度直接反传回这些控制参数。
+
+在实际优化任务中，更常用的是 `SplineOptimizer` 这一层。对于大多数积分型代价，可以直接在采样状态上定义代价，由优化器内部完成：
+
+- 数值积分
+- 对系数 `C` 的梯度组装
+- 对时间 `T` 的梯度计算
+- 向时间变量、空间点、边界状态和附加变量继续反传
+
+很多情况下，用户只需要提供采样点上 `p / v / a / j` 的局部梯度，必要时再补充 `s` 和显式全局时间项。
+
+## ⚡ 能量解析梯度
+
+⚡ 对于最小加速度、最小 jerk、最小 snap 这类纯能量项，还提供了一条独立的解析梯度路径。它基于哈密顿量守恒和变分法推导，可直接得到控制参数上的全导数。
+
+主要结果包括：
+
+- 时间梯度可以通过分段边界信息在 O(1) 时间内直接获得
+- 空间点梯度可以通过连接点处最高阶导数的跳变量直接构造
+
+这条路径不需要先计算能量对 `C` 和 `T` 的偏导，再额外走一遍通用伴随传播。因此在纯能量优化场景下，它比通用传播路径更直接，也更快。
+
+## 🧩 SplineOptimizer
+
+🧩 `SplineOptimizer` 是建立在样条与梯度传播机制之上的通用优化器，采用组件化的接口组织方式，主要包括：
+
+- `TimeMap`，用于将无约束变量映射到正时间段
+- `SpatialMap`，用于将无约束变量映射到物理空间点、走廊或 polytope 约束状态
+- 积分型、离散路点型、整条轨迹型代价接口
+- `AuxiliaryStateMap`，用于表达共享时间变量、拼接状态或其他低维附加优化变量
+- 面向 L-BFGS 等优化器的统一目标函数组织方式
+
+这套结构的重点在于让代价逻辑尽量停留在物理状态空间内，而将时间映射、空间映射、积分和梯度组装收进优化器内部处理。
+
+## 📌 与 MINCO 的对比
+
+SplineTrajectory 与 MINCO 处理的是同一类样条问题，差异主要体现在实现效率和接口组织上：
+
+| 特性 | SplineTrajectory | MINCO |
+| --- | --- | --- |
+| 算法 | 块三对角求解器（Thomas） | LU 分解 |
+| 构造速度 | 更快 | 基准 |
+| 梯度传播 | 更快（复用分解缓存） | 基准 |
+| 能量梯度 | 解析 + 伴随 | 仅伴随 |
+| 边界状态梯度 | 包含 | 未提供 |
+| 优化器代价接口 | 局部状态梯度 -> 自动组装 `dL/dC`、`dL/dT` | 未内置 |
+| 空间维度 | 任意（模板化） | 固定 3D |
+| 求值方式 | 分段批量 + 系数缓存 | 标准求值 |
+
+SplineTrajectory 在轨迹生成和求值方面也优于 [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer)。
+
+## 📈 性能基准
+
+📈 轨迹构造速度（2 至 10^5 段）
+
+![轨迹构造速度](docs/images/construction_speed.png)
+
+📈 梯度反向传播速度（2 至 10^5 段）
+
+![梯度反向传播速度](docs/images/backprop_speed.png)
+
+📈 能量解析梯度计算速度（2 至 10^5 段）
+
+![能量解析梯度计算速度](docs/images/analytic_grad_speed.png)
+
+## 🛠️ 重构项目
+
+🛠️ 以下规划器已经基于 SplineTrajectory 与 SplineOptimizer 完成重构：
+
+| 项目 | 简介 | 原始仓库 | 重构版 |
+| --- | --- | --- | --- |
+| **EGO-Planner-v2** | 无人机集群规划（Science Robotics） | [ZJU-FAST-Lab](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2) | [重构版](https://github.com/Bziyue/EGO-Planner-v2) |
+| **GCOPTER** | 几何约束多旋翼轨迹优化（IEEE T-RO） | [ZJU-FAST-Lab](https://github.com/ZJU-FAST-Lab/GCOPTER) | [重构版](https://github.com/Bziyue/GCOPTER) |
+| **SUPER** | 安全高速 MAV 导航（Science Robotics） | [HKU-MaRS](https://github.com/hku-mars/SUPER) | [重构版](https://github.com/Bziyue/SUPER) |
+| **DDR-opt** | 差速驱动机器人通用轨迹优化（IEEE T-ASE） | [ZJU-FAST-Lab](https://github.com/ZJU-FAST-Lab/DDR-opt) | [重构版](https://github.com/Bziyue/DDR-opt) |
+
+这些重构版采用的是同一套思路：代价项主要写在物理状态空间里，而时间映射、空间映射、积分组装和梯度传播交给共享的优化框架处理。DDR-opt 还进一步使用了整条轨迹代价接口和附加状态变量接口来表达耦合优化问题。
+
+## 📦 环境要求
 
 - C++11 或更高版本
 - Eigen 3.3 或更高版本
-- CMake 3.10+ (用于编译示例和测试)
+- CMake 3.10+，用于示例和测试
 
-## 快速开始
+## 🚀 快速开始
+
+🚀
 
 ```bash
 git clone https://github.com/Bziyue/SplineTrajectory.git
-# git clone git@github.com:Bziyue/SplineTrajectory.git
-
 cd SplineTrajectory
 
-# Install Eigen3 (if not installed)
+# 如有需要，先安装 Eigen3
 sudo apt install libeigen3-dev
 
-# Build and test
+# 编译
 mkdir build && cd build
 cmake ..
 make
 
-# Run performance comparisons
+# 性能测试
 ./test_cubic_spline_vs_minco_nd
 ./test_quintic_spline_vs_minco_nd
 ./test_septic_spline_vs_minco_nd
 
-# Run examples
-./basic_cubic_spline
-./quintic_spline_comparison
-./robot_trajectory_planning
-./test_with_min_jerk_3d
-./test_with_min_snap_3d
-```
-SplineTrajectory 在轨迹生成和求值方面也优于 [large_scale_traj_optimizer](https://github.com/ZJU-FAST-Lab/large_scale_traj_optimizer) 。查看测试结果，请运行 `./test_with_min_jerk_3d`。
-
-如果需要一个集成了此库的完整运动规划工具包，请查看 [ST-opt-tools](https://github.com/MarineRock10/ST-opt-tools)。这是一个运动规划工具包，具有 ESDF 建图、A* 路径规划和与 SplineTrajectory 库集成的 L-BFGS 轨迹优化功能。
-
-## 与MINCO的对比
-该库在数学上与MINCO等效，但采用了更高效的算法实现。
-| 特性         | SplineTrajectory                             | MINCO                      |
-| --------------- | -------------------------------------------- | -------------------------- |
-| **算法**   | **追赶法** (块三对角矩阵求解)     | LU分解          |
-| **性能** | 更快的轨迹生成和求值           | 基准                   |
-| **核心理论** |夹持样条（最小范数定理）       | 最小化控制能量     |
-| **灵活性** | 完全模板化，支持**任意维度** | 固定为三维 |
-| **求值**  | 优化的分段批量与系数缓存机制求值         | 标准线性查找求值        |
-
-## 梯度传播 (Gradient Propagation)
-本库实现了 **MINCO 等效的梯度传播机制**，支持基于自定义代价函数的轨迹优化。
-
-* **能量梯度**: 可通过 `getEnergyPartialGradByCoeffs` 和 `getEnergyPartialGradByTimes` 获取控制能量关于系数 ($C$) 和段时间 ($T$) 的偏导数。
-* **反向传播**: `propagateGrad(gdC, gdT)` 函数可以将定义在系数和时间上的 *任意梯度* 反向传播回航点 ($P$) 和时间段 ($T$)。
-* **一致性验证**: 经测试，传播后的能量梯度与解析解 (`getEnergyGradInnerP` 和 `getEnergyGradTimes`) 完全一致。
-
-您可以查看测试代码 `test_Grad.cpp`，并通过运行以下命令来验证梯度的一致性和性能：
-```bash
+# 梯度测试
 ./test_Grad
-```
-## 样条类型与最小能量对应
-该库通过最小化一个具有明确物理意义的目标函数（即某阶导数范数的平方积分），来生成最优的样条轨迹。
-| Spline Type             | MINCO Equivalent     | 
-| ----------------------- | -------------------- | 
-| **三次样条**  | 最小化加速度 | 
-| **五次样条** | 最小化加加速度         | 
-| **七次样条**| 最小化加加加速度          |
-
----
-## 使用示例
-这是一个创建和评估3D轨迹的简明示例。
-```cpp
-#include "SplineTrajectory.hpp"
-#include <iostream>
-#include <vector>
-#include <Eigen/Dense>
-#include <iomanip>
-
-int main() {
-    using namespace SplineTrajectory;
-
-    std::cout << "=== SplineTrajectory 全接口使用示例 ===" << std::endl;
-
-    // 1. 定义3D航点和边界条件
-    SplineVector<SplinePoint3d> waypoints = {
-        {0.0, 0.0, 0.0}, {1.0, 2.0, 1.0}, {3.0, 1.0, 2.0}, {4.0, 3.0, 0.5}, {5.0, 0.5, 1.5}
-    };
-    BoundaryConditions<3> boundary; //默认速度、加速度、加加速度为0
-    // 定义详细的边界条件（包含速度、加速度、Jerk）
-    // 或者 BoundaryConditions<3> boundary(SplinePoint3d(0.1, 0.0, 0.0),SplinePoint3d(0.2, 0.0, 0.1)); 默认加速度和加加速度为0
-    boundary.start_velocity = SplinePoint3d(0.1, 0.0, 0.0); // 三次样条只会用到速度作为边界条件 
-    boundary.end_velocity = SplinePoint3d(0.2, 0.0, 0.1);
-    boundary.start_acceleration = SplinePoint3d(0.0, 0.0, 0.0);// 五次样条使用速度、加速度
-    boundary.end_acceleration = SplinePoint3d(0.0, 0.0, 0.0);
-    boundary.start_jerk = SplinePoint3d(0.0, 0.0, 0.0); // 七次样条使用速度、加速度、加加速度
-    boundary.end_jerk = SplinePoint3d(0.0, 0.0, 0.0);
-
-    std::cout << "\n--- 构造方式对比 ---" << std::endl;
-    
-    // 2. 使用时间点构造样条（多种样条类型对比）
-    std::vector<double> time_points = {0.0, 1.0, 2.5, 4.0, 6.0};
-    CubicSpline3D cubic_from_points(time_points, waypoints, boundary);
-    QuinticSpline3D quintic_from_points(time_points, waypoints, boundary);
-    SepticSpline3D septic_from_points(time_points, waypoints, boundary);
-
-    // 使用时间段构造样条
-    std::vector<double> time_segments = {1.0, 1.5, 1.5, 2.0}; // 段时长
-    double start_time = 0.0;
-    CubicSpline3D cubic_from_segments(time_segments, waypoints, start_time, boundary);
-    QuinticSpline3D quintic_from_segments(time_segments, waypoints, start_time, boundary);
-    SepticSpline3D septic_from_segments(time_segments, waypoints, start_time, boundary);
-
-    // 3. 更新操作示例
-    std::cout << "\n--- 更新操作 ---" << std::endl;
-    CubicSpline3D spline_for_update;
-    std::cout << "初始化状态: " << spline_for_update.isInitialized() << std::endl;
-    
-    // 使用时间点更新
-    spline_for_update.update(time_points, waypoints, boundary);
-    std::cout << "时间点更新后状态: " << spline_for_update.isInitialized() << std::endl;
-    
-    // 使用时间段更新
-    spline_for_update.update(time_segments, waypoints, start_time, boundary);
-    std::cout << "时间段更新后状态: " << spline_for_update.isInitialized() << std::endl;
-
-    // 4. 获取基本信息
-    auto& trajectory = cubic_from_points.getTrajectory();
-    std::cout << "\n--- 基本信息 ---" << std::endl;
-    std::cout << "样条维度: " << cubic_from_points.getDimension() << std::endl;
-    std::cout << "起始时间: " << cubic_from_points.getStartTime() << std::endl;
-    std::cout << "结束时间: " << cubic_from_points.getEndTime() << std::endl;
-    std::cout << "轨迹时长: " << cubic_from_points.getDuration() << std::endl;
-    std::cout << "航点数量: " << cubic_from_points.getNumPoints() << std::endl;
-    std::cout << "样条段数: " << cubic_from_points.getNumSegments() << std::endl;
-    std::cout << "样条阶数: " << trajectory.getOrder() << std::endl;
-
-    // 5. 单点求值 - evaluate通用接口
-    std::cout << "\n--- 单点evaluate通用求值 ---" << std::endl;
-    double t_eval = 2.5;
-    auto pos_eval = trajectory.evaluate(t_eval, 0);      // 位置（0阶导数）
-    auto vel_eval = trajectory.evaluate(t_eval, 1);      // 速度（1阶导数）
-    auto acc_eval = trajectory.evaluate(t_eval, 2);      // 加速度（2阶导数）
-    auto jerk_eval = trajectory.evaluate(t_eval, 3);     // Jerk（3阶导数）
-    auto snap_eval = trajectory.evaluate(t_eval, 4);     // Snap（4阶导数）
-    
-    std::cout << std::fixed << std::setprecision(3);
-    std::cout << "t=" << t_eval << " 位置: " << pos_eval.transpose() << std::endl;
-    std::cout << "t=" << t_eval << " 速度: " << vel_eval.transpose() << std::endl;
-    std::cout << "t=" << t_eval << " 加速度: " << acc_eval.transpose() << std::endl;
-
-    // 6. 单点求值 - get系列函数重命名接口
-    std::cout << "\n--- 单点get系列求值 ---" << std::endl;
-    auto pos_get = trajectory.getPos(t_eval);
-    auto vel_get = trajectory.getVel(t_eval);
-    auto acc_get = trajectory.getAcc(t_eval);
-    auto jerk_get = trajectory.getJerk(t_eval);
-    auto snap_get = trajectory.getSnap(t_eval);
-    
-    std::cout << "get接口 t=" << t_eval << " 位置: " << pos_get.transpose() << std::endl;
-    std::cout << "get接口 t=" << t_eval << " 速度: " << vel_get.transpose() << std::endl;
-
-    // 7. 批量求值 - 传入vector<double>
-    std::cout << "\n--- 批量求值vector<double> ---" << std::endl;
-    std::vector<double> eval_times = {0.5, 1.5, 2.5, 3.5, 5.0};
-    
-    // evaluate通用接口批量求值
-    auto pos_batch_eval = trajectory.evaluate(eval_times, 0);
-    auto vel_batch_eval = trajectory.evaluate(eval_times, 1);
-    
-    // get系列批量求值
-    auto pos_batch_get = trajectory.getPos(eval_times);
-    auto vel_batch_get = trajectory.getVel(eval_times);
-    auto acc_batch_get = trajectory.getAcc(eval_times);
-    auto jerk_batch_get = trajectory.getJerk(eval_times);
-    auto snap_batch_get = trajectory.getSnap(eval_times);
-    
-    std::cout << "批量求值点数: " << pos_batch_get.size() << std::endl;
-    for (size_t i = 0; i < eval_times.size(); ++i) {
-        std::cout << "t=" << eval_times[i] << " 位置: " << pos_batch_get[i].transpose() << std::endl;
-    }
-
-    // 8. 时间范围求值（包含结束时间） - evaluate带范围
-    std::cout << "\n--- 时间范围evaluate求值 ---" << std::endl;
-    double start_t = 0.0, end_t = 6.0, dt = 0.5;
-    auto pos_range_eval = trajectory.evaluate(start_t, end_t, dt, 0);
-    auto vel_range_eval = trajectory.evaluate(start_t, end_t, dt, 1);
-    
-    std::cout << "范围求值[" << start_t << ", " << end_t << "], dt=" << dt 
-              << ", 点数: " << pos_range_eval.size() << std::endl;
-
-    // 9. 时间范围求值（包含结束时间） - get系列带范围
-    std::cout << "\n--- 时间范围get系列求值 ---" << std::endl;
-    auto pos_range_get = trajectory.getPos(start_t, end_t, dt);
-    auto vel_range_get = trajectory.getVel(start_t, end_t, dt);
-    auto acc_range_get = trajectory.getAcc(start_t, end_t, dt);
-    auto jerk_range_get = trajectory.getJerk(start_t, end_t, dt);
-    auto snap_range_get = trajectory.getSnap(start_t, end_t, dt);
-    
-    std::cout << "get系列范围求值点数: " << pos_range_get.size() << std::endl;
-
-    // 10. 生成时间序列（包含轨迹结束时间）
-    std::cout << "\n--- 生成时间序列 ---" << std::endl;
-    // 注意：generateTimeSequence会包含轨迹的结束时间点
-    auto time_seq_full = trajectory.generateTimeSequence(0.8); // 从开始到结束，dt=0.8
-    auto time_seq_range = trajectory.generateTimeSequence(1.0, 5.0, 0.7); // 指定范围，dt=0.7
-    
-    std::cout << "完整时间序列(dt=0.8): " << time_seq_full.size() << " 点，最后时间: " 
-              << time_seq_full.back() << " (轨迹结束时间: " << trajectory.getEndTime() << ")" << std::endl;
-    std::cout << "范围时间序列(1.0-5.0, dt=0.7): " << time_seq_range.size() << " 点，最后时间: " 
-              << time_seq_range.back() << std::endl;
-
-    // 11. 段化时间序列（高性能，包含轨迹结束时间）
-    std::cout << "\n--- 段化时间序列求值 ---" << std::endl;
-    // 注意：generateSegmentedTimeSequence也会包含轨迹的结束时间点
-    auto segmented_seq = trajectory.generateSegmentedTimeSequence(0.0, 6.0, 0.1);
-    std::cout << "段化序列总点数: " << segmented_seq.getTotalSize() 
-              << " (包含轨迹结束时间)" << std::endl;
-    std::cout << "段数: " << segmented_seq.segments.size() << std::endl;
-    
-    // 使用段化序列进行高性能批量求值
-    auto pos_segmented_eval = trajectory.evaluateSegmented(segmented_seq, 0);
-    auto vel_segmented_eval = trajectory.evaluateSegmented(segmented_seq, 1);
-    
-    // get系列段化求值
-    auto pos_segmented_get = trajectory.getPos(segmented_seq);
-    auto vel_segmented_get = trajectory.getVel(segmented_seq);
-    auto acc_segmented_get = trajectory.getAcc(segmented_seq);
-    auto jerk_segmented_get = trajectory.getJerk(segmented_seq);
-    auto snap_segmented_get = trajectory.getSnap(segmented_seq);
-    
-    std::cout << "段化get系列求值点数: " << pos_segmented_get.size() << std::endl;
-
-    // 12. 轨迹分析
-    std::cout << "\n--- 轨迹分析 ---" << std::endl;
-    double traj_length = trajectory.getTrajectoryLength();
-    double traj_length_custom = trajectory.getTrajectoryLength(2.0, 4.0, 0.05);
-    double cumulative_length = trajectory.getCumulativeLength(3.0);
-    
-    std::cout << "轨迹总长度: " << traj_length << std::endl;
-    std::cout << "段[2.0, 4.0]长度: " << traj_length_custom << std::endl;
-    std::cout << "累积长度到t=3.0: " << cumulative_length << std::endl;
-
-    // 13. 导数轨迹
-    std::cout << "\n--- 导数轨迹 ---" << std::endl;
-    auto vel_trajectory = trajectory.derivative(1);  // 速度轨迹（1阶导数）
-    auto acc_trajectory = trajectory.derivative(2);  // 加速度轨迹（2阶导数）
-    
-    std::cout << "速度轨迹阶数: " << vel_trajectory.getOrder() << std::endl;
-    std::cout << "加速度轨迹阶数: " << acc_trajectory.getOrder() << std::endl;
-
-    // 14. 获取内部数据
-    std::cout << "\n--- 获取内部数据 ---" << std::endl;
-    auto space_points = cubic_from_points.getSpacePoints();
-    auto time_segments_data = cubic_from_points.getTimeSegments();
-    auto cumulative_times = cubic_from_points.getCumulativeTimes();
-    auto boundary_conditions = cubic_from_points.getBoundaryConditions();
-    auto trajectory_copy = cubic_from_points.getTrajectoryCopy();
-    auto ppoly_ref = cubic_from_points.getPPoly();
-    
-    std::cout << "空间点数量: " << space_points.size() << std::endl;
-    std::cout << "时间段数量: " << time_segments_data.size() << std::endl;
-    std::cout << "累积时间数量: " << cumulative_times.size() << std::endl;
-
-    // 15. 能量计算
-    std::cout << "\n--- 能量计算 ---" << std::endl;
-    double cubic_energy = cubic_from_points.getEnergy();
-    double quintic_energy = quintic_from_points.getEnergy();
-    double septic_energy = septic_from_points.getEnergy();
-    
-    std::cout << "三次样条能量: " << cubic_energy << std::endl;
-    std::cout << "五次样条能量: " << quintic_energy << std::endl;
-    std::cout << "七次样条能量: " << septic_energy << std::endl;
-
-    // 16. PPolyND静态方法
-    std::cout << "\n--- PPolyND静态方法 ---" << std::endl;
-    std::vector<double> test_breakpoints = {0.0, 1.0, 2.0, 3.0};
-    auto zero_poly = PPoly3D::zero(test_breakpoints, 3);
-    SplinePoint3d constant_val(1.0, 2.0, 3.0);
-    auto constant_poly = PPoly3D::constant(test_breakpoints, constant_val);
-    
-    std::cout << "零多项式在t=1.5: " << zero_poly.getPos(1.5).transpose() << std::endl;
-    std::cout << "常数多项式在t=1.5: " << constant_poly.getPos(1.5).transpose() << std::endl;
-
-    std::cout << "\n=== 示例完成 ===" << std::endl;
-    return 0;
-    //编译：g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o SplineTrajectoryExample
-}
-```
-```bash
-g++ -std=c++11 -O3 -I/usr/include/eigen3 -I. SplineTrajectoryExample.cpp -o SplineTrajectoryExample
+./test_cost_grad
+./test_bc_grad
 ```
 
-## 未来计划
+如果需要完整的运动规划工具链，可以参考 [ST-opt-tools](https://github.com/MarineRock10/ST-opt-tools)，其中集成了 ESDF 建图、A* 路径规划和 L-BFGS 轨迹优化。
 
-- [x] 增加与MINCO等效的梯度传播机制
-- [x] 实现对夹持七次样条的支持 (Septic Spline, Minimum Snap)
-- [ ] 实现对N维非均匀B样条的支持
-- [ ] 实现从夹持样条到非均匀B样条的精确转换
+## 🧰 主要功能
 
-## 许可证
+### 🛤️ 轨迹构造
 
-本项目采用 MIT 许可证 - 详情请见 [LICENSE](LICENSE) 文件。
+- 通过时间点或时间段配合边界条件构造样条
+- 使用默认零导数边界，或完全自定义的夹持边界
+- 通过 `update()` 高效更新已有样条
 
-## 致谢
+### 📍 求值
 
-- 使用 [Eigen](http://eigen.tuxfamily.org/) 进行线性代数运算
-- 灵感来源于 [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER) 轨迹优化
-- 基于 **经典样条插值理论** 和 **最小范数定理**
+- 单点、批量和区间求值
+- 分段批量求值与系数缓存
+- 导数轨迹提取
+
+### 🔁 梯度
+
+- `propagateGrad(gdC, gdT)`，用于定义在系数和时间上的梯度
+- `SplineOptimizer::evaluate(...)`，用于定义在采样轨迹状态上的积分型代价
+- `getEnergyGradInnerP()` 和 `getEnergyGradTimes()`，用于能量解析梯度
+- `getEnergyPartialGradByCoeffs()` 和 `getEnergyPartialGradByTimes()`，用于能量偏导
+- 起终点导数条件对应的边界状态梯度
+
+### 📐 轨迹分析
+
+- 全程或区间轨迹长度
+- 任意时刻的累积弧长
+- 能量计算
+
+## ✅ 梯度验证
+
+✅ 仓库中包含多组梯度验证测试：
+
+- `test_Grad`，验证伴随传播与解析能量梯度的一致性
+- `test_cost_grad`，验证自动积分与传播后的任意代价梯度与有限差分一致
+- `test_bc_grad`，验证边界状态梯度
+
+这些测试用于确认伴随路径、解析路径与数值检查之间的一致性。
+
+## 📚 文档
+
+`examples/` 目录中包含构造、求值、梯度传播和优化器接入示例。
+
+## 🔭 未来计划
+
+- [x] 与 MINCO 等价的梯度传播
+- [x] 夹持七次样条支持
+- [ ] N 维非均匀 B 样条支持
+- [ ] 夹持样条到非均匀 B 样条的精确转换
+
+## 📄 许可证
+
+MIT License，详见 [LICENSE](LICENSE)。
+
+## 🙏 致谢
+
+- [Eigen](http://eigen.tuxfamily.org/) 提供线性代数支持
+- [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER) 提供问题背景与对照
+- 经典样条插值理论和最小范数视角
