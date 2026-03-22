@@ -2,7 +2,7 @@
 
 一个纯头文件的 C++ 库，用于生成平滑的 N 维最小控制量样条轨迹。它与 [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER) 在数学上等价，并在实现上采用 O(N) 的块三对角求解结构，同时提供全控制参数梯度传播、能量解析梯度以及面向组件化优化的接口。
 
-[English](README_SplineTrajectory_EN.md) | **中文**
+[English](README.md) | **中文**
 
 ## ✨ 概览
 

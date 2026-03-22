@@ -2,7 +2,7 @@
 
 Header-only C++ library for smooth N-dimensional minimum-control-effort spline trajectories. It is mathematically equivalent to [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER), with an O(N) block-tridiagonal solver, full-parameter gradient propagation, analytic energy gradients, and a componentized optimizer interface for cubic, quintic, and septic splines.
 
-**English** | [中文](README_SplineTrajectory_ZH.md)
+**English** | [中文](README_zh.md)
 
 ## ✨ Overview
 
