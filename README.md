@@ -63,6 +63,87 @@ Energy optimization therefore does not need to first form partials with respect 
 
 This organization keeps penalty definitions close to physical state space, while time mapping, spatial mapping, integral assembly, and gradient propagation stay inside the optimizer.
 
+Minimal usage now follows an explicit workspace and explicit status/result style:
+
+```cpp
+#include "SplineOptimizer.hpp"
+
+using Optimizer = SplineTrajectory::SplineOptimizer<3>;
+using Waypoints = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
+
+struct TimeCost
+{
+    double operator()(const std::vector<double>& Ts, Eigen::VectorXd& grad) const
+    {
+        grad = Eigen::Map<const Eigen::VectorXd>(Ts.data(), static_cast<Eigen::Index>(Ts.size()));
+        return 0.5 * grad.squaredNorm();
+    }
+};
+
+struct IntegralCost
+{
+    double operator()(double,
+                      double,
+                      int,
+                      int,
+                      const Eigen::Vector3d&,
+                      const Eigen::Vector3d& v,
+                      const Eigen::Vector3d&,
+                      const Eigen::Vector3d&,
+                      const Eigen::Vector3d&,
+                      Eigen::Vector3d& gp,
+                      Eigen::Vector3d& gv,
+                      Eigen::Vector3d& ga,
+                      Eigen::Vector3d& gj,
+                      Eigen::Vector3d& gs,
+                      double& gt) const
+    {
+        gp.setZero();
+        gv = v;
+        ga.setZero();
+        gj.setZero();
+        gs.setZero();
+        gt = 0.0;
+        return 0.5 * v.squaredNorm();
+    }
+};
+
+Optimizer optimizer;
+Optimizer::Workspace workspace;
+
+std::vector<double> durations{1.0, 1.2};
+Waypoints waypoints(3, 3);
+waypoints << 0.0, 0.0, 0.0,
+             1.0, 0.0, 0.0,
+             2.0, 1.0, 0.0;
+
+SplineTrajectory::BoundaryConditions<3> bc;
+
+auto init_status = optimizer.setInitState(durations, waypoints, 0.0, bc);
+if (!init_status)
+{
+    std::cerr << init_status.message << std::endl;
+    return;
+}
+
+TimeCost time_cost;
+IntegralCost integral_cost;
+auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost, workspace);
+
+Eigen::VectorXd x = optimizer.generateInitialGuess();
+Eigen::VectorXd grad;
+
+auto eval_result = optimizer.evaluate(x, grad, spec);
+if (!eval_result)
+{
+    std::cerr << eval_result.message << std::endl;
+    return;
+}
+
+std::cout << "cost = " << eval_result.cost << std::endl;
+const auto& spline = optimizer.getWorkingSpline(workspace);
+```
+
 ## 📌 Comparison with MINCO
 
 SplineTrajectory solves the same spline problem as MINCO. The main differences are in implementation efficiency and interface design:
@@ -109,7 +190,7 @@ Across these refactors, costs are written on physical states, while time mapping
 
 ## 📦 Requirements
 
-- C++11 or later
+- C++17 or later
 - Eigen 3.3 or later
 - CMake 3.10+ for examples and tests
 
@@ -159,7 +240,7 @@ For a complete motion-planning toolkit built around this library, see [ST-opt-to
 ### 🔁 Gradients
 
 - `propagateGrad(gdC, gdT)` for gradients defined on coefficients and times
-- `SplineOptimizer::evaluate(...)` for integral costs defined on sampled trajectory states
+- `SplineOptimizer::evaluate(...)` for sampled-state costs, returning `EvaluationResult { ok, code, cost, message }`
 - `getEnergyGradInnerP()` and `getEnergyGradTimes()` for analytic energy gradients
 - `getEnergyPartialGradByCoeffs()` and `getEnergyPartialGradByTimes()` for energy partials
 - boundary-state gradients for start and end derivatives
@@ -183,6 +264,7 @@ These tests verify consistency among the adjoint path, the analytic path, and nu
 ## 📚 Documentation
 
 See the `examples/` directory for usage examples covering construction, evaluation, gradient propagation, and optimizer integration.
+For optimizer callable protocols and integration details, see [`include/SplineOptimizerProtocols.md`](include/SplineOptimizerProtocols.md).
 
 ## 🔭 Future Plans
 

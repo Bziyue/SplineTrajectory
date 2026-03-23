@@ -64,6 +64,87 @@
 
 这套结构的重点在于让代价逻辑尽量停留在物理状态空间内，而将时间映射、空间映射、积分和梯度组装收进优化器内部处理。
 
+当前推荐的最小调用方式是“显式 workspace + 显式状态返回”：
+
+```cpp
+#include "SplineOptimizer.hpp"
+
+using Optimizer = SplineTrajectory::SplineOptimizer<3>;
+using Waypoints = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
+
+struct TimeCost
+{
+    double operator()(const std::vector<double>& Ts, Eigen::VectorXd& grad) const
+    {
+        grad = Eigen::Map<const Eigen::VectorXd>(Ts.data(), static_cast<Eigen::Index>(Ts.size()));
+        return 0.5 * grad.squaredNorm();
+    }
+};
+
+struct IntegralCost
+{
+    double operator()(double,
+                      double,
+                      int,
+                      int,
+                      const Eigen::Vector3d&,
+                      const Eigen::Vector3d& v,
+                      const Eigen::Vector3d&,
+                      const Eigen::Vector3d&,
+                      const Eigen::Vector3d&,
+                      Eigen::Vector3d& gp,
+                      Eigen::Vector3d& gv,
+                      Eigen::Vector3d& ga,
+                      Eigen::Vector3d& gj,
+                      Eigen::Vector3d& gs,
+                      double& gt) const
+    {
+        gp.setZero();
+        gv = v;
+        ga.setZero();
+        gj.setZero();
+        gs.setZero();
+        gt = 0.0;
+        return 0.5 * v.squaredNorm();
+    }
+};
+
+Optimizer optimizer;
+Optimizer::Workspace workspace;
+
+std::vector<double> durations{1.0, 1.2};
+Waypoints waypoints(3, 3);
+waypoints << 0.0, 0.0, 0.0,
+             1.0, 0.0, 0.0,
+             2.0, 1.0, 0.0;
+
+SplineTrajectory::BoundaryConditions<3> bc;
+
+auto init_status = optimizer.setInitState(durations, waypoints, 0.0, bc);
+if (!init_status)
+{
+    std::cerr << init_status.message << std::endl;
+    return;
+}
+
+TimeCost time_cost;
+IntegralCost integral_cost;
+auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost, workspace);
+
+Eigen::VectorXd x = optimizer.generateInitialGuess();
+Eigen::VectorXd grad;
+
+auto eval_result = optimizer.evaluate(x, grad, spec);
+if (!eval_result)
+{
+    std::cerr << eval_result.message << std::endl;
+    return;
+}
+
+std::cout << "cost = " << eval_result.cost << std::endl;
+const auto& spline = optimizer.getWorkingSpline(workspace);
+```
+
 ## 📌 与 MINCO 的对比
 
 SplineTrajectory 与 MINCO 处理的是同一类样条问题，差异主要体现在实现效率和接口组织上：
@@ -110,7 +191,7 @@ SplineTrajectory 在轨迹生成和求值方面也优于 [large_scale_traj_optim
 
 ## 📦 环境要求
 
-- C++11 或更高版本
+- C++17 或更高版本
 - Eigen 3.3 或更高版本
 - CMake 3.10+，用于示例和测试
 
@@ -160,7 +241,7 @@ make
 ### 🔁 梯度
 
 - `propagateGrad(gdC, gdT)`，用于定义在系数和时间上的梯度
-- `SplineOptimizer::evaluate(...)`，用于定义在采样轨迹状态上的积分型代价
+- `SplineOptimizer::evaluate(...)`，用于采样轨迹状态上的代价，返回 `EvaluationResult { ok, code, cost, message }`
 - `getEnergyGradInnerP()` 和 `getEnergyGradTimes()`，用于能量解析梯度
 - `getEnergyPartialGradByCoeffs()` 和 `getEnergyPartialGradByTimes()`，用于能量偏导
 - 起终点导数条件对应的边界状态梯度
@@ -184,6 +265,7 @@ make
 ## 📚 文档
 
 `examples/` 目录中包含构造、求值、梯度传播和优化器接入示例。
+优化器接口协议和接入约定见 [`include/SplineOptimizerProtocols.md`](include/SplineOptimizerProtocols.md)。
 
 ## 🔭 未来计划
 
