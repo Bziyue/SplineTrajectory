@@ -332,16 +332,19 @@ namespace SplineTrajectory
         }
     };
 
-    struct OptimizationFlags
+    struct BoundaryDerivativeMask
     {
-        bool start_p = false;
-        bool start_v = false;
-        bool start_a = false;
-        bool start_j = false;
-        bool end_p = false;
-        bool end_v = false;
-        bool end_a = false;
-        bool end_j = false;
+        bool v = false;
+        bool a = false;
+        bool j = false;
+    };
+
+    struct OptimizationMask
+    {
+        std::vector<uint8_t> time;
+        std::vector<uint8_t> waypoints;
+        BoundaryDerivativeMask start;
+        BoundaryDerivativeMask end;
     };
 
     template <int DIM,
@@ -402,6 +405,8 @@ namespace SplineTrajectory
             }
         };
 
+        struct WorkingState;
+        struct EvaluationBuffers;
         struct Workspace;
 
         template <typename TimeCostFunc,
@@ -443,16 +448,31 @@ namespace SplineTrajectory
          * @brief Workspace holds all mutable state required during optimization.
          * Callers must provide one workspace per evaluation context.
          */
-        struct Workspace
+        struct WorkingState
         {
             EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
             SplineType spline;
-            std::vector<double> working_times;
-            WaypointsType working_waypoints;
-            BoundaryConditions<DIM> working_bc;
-            double working_start_time = 0.0;
+            std::vector<double> times;
+            WaypointsType waypoints;
+            BoundaryConditions<DIM> bc;
+            double start_time = 0.0;
             Eigen::VectorXd auxiliary_vars;
+
+            void resize(int num_segments)
+            {
+                if (static_cast<int>(times.size()) != num_segments)
+                {
+                    times.resize(num_segments);
+                    waypoints.resize(num_segments + 1, DIM);
+                    auxiliary_vars.resize(0);
+                }
+            }
+        };
+
+        struct EvaluationBuffers
+        {
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
             Eigen::VectorXd grad_times;
             MatrixType grad_coeffs;
@@ -472,10 +492,8 @@ namespace SplineTrajectory
 
             void resize(int num_segments)
             {
-                if (static_cast<int>(working_times.size()) != num_segments)
+                if (grad_times.size() != num_segments)
                 {
-                    working_times.resize(num_segments);
-                    working_waypoints.resize(num_segments + 1, DIM);
                     grad_times.resize(num_segments);
                     time_cost_grad_buffer.resize(num_segments);
                     grad_coeffs.resize(num_segments * SplineType::COEFF_NUM, DIM);
@@ -485,9 +503,22 @@ namespace SplineTrajectory
                     sample_time_grad_buffer.resize(0);
                     segment_begin_times.resize(num_segments);
                     segment_cost_buffer.resize(num_segments);
-                    auxiliary_vars.resize(0);
                     integral_samples.clear();
                 }
+            }
+        };
+
+        struct Workspace
+        {
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+            WorkingState state;
+            EvaluationBuffers buffers;
+
+            void resize(int num_segments)
+            {
+                state.resize(num_segments);
+                buffers.resize(num_segments);
             }
         };
 
@@ -525,11 +556,36 @@ namespace SplineTrajectory
         };
 
     private:
-        struct SpatialVariableLayout
+        struct TimeVariableLayout
+        {
+            int segment_index = 0;
+            int offset = 0;
+        };
+
+        struct PointVariableLayout
         {
             int point_index = 0;
             int offset = 0;
             int dof = 0;
+        };
+
+        enum class BoundaryDerivativeSlot
+        {
+            StartV,
+            StartA,
+            StartJ,
+            EndV,
+            EndA,
+            EndJ
+        };
+
+        struct DecisionVariableLayout
+        {
+            std::vector<TimeVariableLayout> time;
+            std::vector<PointVariableLayout> waypoints;
+            int boundary_derivatives_offset = 0;
+            int auxiliary_offset = 0;
+            int total_dimension = 0;
         };
 
         std::vector<double> ref_times_;
@@ -537,7 +593,9 @@ namespace SplineTrajectory
         BoundaryConditions<DIM> ref_bc_;
         double start_time_ = 0.0;
 
-        OptimizationFlags flags_;
+        OptimizationMask optimization_mask_;
+        bool has_explicit_time_mask_ = false;
+        bool has_explicit_waypoint_mask_ = false;
         int num_segments_ = 0;
         bool is_valid_ = false;
 
@@ -552,10 +610,7 @@ namespace SplineTrajectory
         const SpatialMap* active_spatial_map_ = nullptr;
         const AuxiliaryStateMap* active_auxiliary_state_map_ = nullptr;
 
-        mutable std::vector<SpatialVariableLayout> spatial_layout_;
-        mutable int derivatives_offset_ = 0;
-        mutable int auxiliary_offset_ = 0;
-        mutable int total_dimension_ = 0;
+        mutable DecisionVariableLayout layout_;
         mutable bool layout_dirty_ = true;
         
         void markLayoutDirty()
@@ -563,73 +618,134 @@ namespace SplineTrajectory
             layout_dirty_ = true;
         }
 
-        bool isSpatialOptimized(int idx) const
+        void normalizeOptimizationMask()
         {
-            if (idx == 0)
+            if (num_segments_ <= 0)
             {
-                return flags_.start_p;
+                return;
             }
-            if (idx == num_segments_)
+
+            if (!has_explicit_time_mask_)
             {
-                return flags_.end_p;
+                optimization_mask_.time.assign(num_segments_, static_cast<uint8_t>(1));
             }
-            return true;
+
+            if (!has_explicit_waypoint_mask_)
+            {
+                optimization_mask_.waypoints.assign(num_segments_ + 1, static_cast<uint8_t>(0));
+                for (int i = 1; i < num_segments_; ++i)
+                {
+                    optimization_mask_.waypoints[i] = static_cast<uint8_t>(1);
+                }
+            }
+        }
+
+        bool isTimeOptimized(int idx) const
+        {
+            assert(static_cast<size_t>(num_segments_) == optimization_mask_.time.size());
+            return idx >= 0 &&
+                   idx < static_cast<int>(optimization_mask_.time.size()) &&
+                   optimization_mask_.time[idx] != 0;
+        }
+
+        bool isWaypointOptimized(int idx) const
+        {
+            assert(static_cast<size_t>(num_segments_ + 1) == optimization_mask_.waypoints.size());
+            return idx >= 0 &&
+                   idx < static_cast<int>(optimization_mask_.waypoints.size()) &&
+                   optimization_mask_.waypoints[idx] != 0;
+        }
+
+        template <typename Fn>
+        void forEachOptimizedBoundaryDerivativeSlot(Fn &&fn) const
+        {
+            if (optimization_mask_.start.v) fn(BoundaryDerivativeSlot::StartV);
+            if constexpr (SplineType::ORDER >= 5)
+            {
+                if (optimization_mask_.start.a) fn(BoundaryDerivativeSlot::StartA);
+            }
+            if constexpr (SplineType::ORDER >= 7)
+            {
+                if (optimization_mask_.start.j) fn(BoundaryDerivativeSlot::StartJ);
+            }
+
+            if (optimization_mask_.end.v) fn(BoundaryDerivativeSlot::EndV);
+            if constexpr (SplineType::ORDER >= 5)
+            {
+                if (optimization_mask_.end.a) fn(BoundaryDerivativeSlot::EndA);
+            }
+            if constexpr (SplineType::ORDER >= 7)
+            {
+                if (optimization_mask_.end.j) fn(BoundaryDerivativeSlot::EndJ);
+            }
         }
 
         int countOptimizedDerivativeBlocks() const
         {
             int blocks = 0;
-            if (flags_.start_v) ++blocks;
+            if (optimization_mask_.start.v) ++blocks;
             if constexpr (SplineType::ORDER >= 5)
             {
-                if (flags_.start_a) ++blocks;
+                if (optimization_mask_.start.a) ++blocks;
             }
             if constexpr (SplineType::ORDER >= 7)
             {
-                if (flags_.start_j) ++blocks;
+                if (optimization_mask_.start.j) ++blocks;
             }
 
-            if (flags_.end_v) ++blocks;
+            if (optimization_mask_.end.v) ++blocks;
             if constexpr (SplineType::ORDER >= 5)
             {
-                if (flags_.end_a) ++blocks;
+                if (optimization_mask_.end.a) ++blocks;
             }
             if constexpr (SplineType::ORDER >= 7)
             {
-                if (flags_.end_j) ++blocks;
+                if (optimization_mask_.end.j) ++blocks;
             }
             return blocks;
         }
 
         void rebuildLayoutCache() const
         {
-            spatial_layout_.clear();
+            layout_.time.clear();
+            layout_.waypoints.clear();
 
             if (num_segments_ <= 0)
             {
-                derivatives_offset_ = 0;
-                auxiliary_offset_ = 0;
-                total_dimension_ = 0;
+                layout_.boundary_derivatives_offset = 0;
+                layout_.auxiliary_offset = 0;
+                layout_.total_dimension = 0;
                 layout_dirty_ = false;
                 return;
             }
 
-            int offset = num_segments_;
+            int offset = 0;
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                if (!isTimeOptimized(i))
+                {
+                    continue;
+                }
+
+                layout_.time.push_back(TimeVariableLayout{i, offset});
+                ++offset;
+            }
+
             for (int i = 0; i <= num_segments_; ++i)
             {
-                if (!isSpatialOptimized(i))
+                if (!isWaypointOptimized(i))
                 {
                     continue;
                 }
 
                 const int dof = active_spatial_map_->getUnconstrainedDim(i);
-                spatial_layout_.push_back(SpatialVariableLayout{i, offset, dof});
+                layout_.waypoints.push_back(PointVariableLayout{i, offset, dof});
                 offset += dof;
             }
 
-            derivatives_offset_ = offset;
-            auxiliary_offset_ = derivatives_offset_ + countOptimizedDerivativeBlocks() * DIM;
-            total_dimension_ = auxiliary_offset_ + active_auxiliary_state_map_->getDimension();
+            layout_.boundary_derivatives_offset = offset;
+            layout_.auxiliary_offset = layout_.boundary_derivatives_offset + countOptimizedDerivativeBlocks() * DIM;
+            layout_.total_dimension = layout_.auxiliary_offset + active_auxiliary_state_map_->getDimension();
             layout_dirty_ = false;
         }
 
@@ -729,6 +845,7 @@ namespace SplineTrajectory
             ref_waypoints_ = waypoints;
             ref_bc_ = bc;
             num_segments_ = static_cast<int>(ref_times_.size());
+            normalizeOptimizationMask();
             markLayoutDirty();
 
             const Status status = checkValidity();
@@ -736,11 +853,34 @@ namespace SplineTrajectory
             return status;
         }
 
-        void setOptimizationFlags(const OptimizationFlags &flags)
+        static OptimizationMask makeFullOptimizationMask(int num_segments)
         {
-            flags_ = flags;
-            markLayoutDirty();
+            OptimizationMask mask;
+            mask.time.assign(num_segments, static_cast<uint8_t>(1));
+            mask.waypoints.assign(num_segments + 1, static_cast<uint8_t>(1));
+            return mask;
         }
+
+        Status setOptimizationMask(const OptimizationMask &mask)
+        {
+            optimization_mask_ = mask;
+            has_explicit_time_mask_ = !mask.time.empty();
+            has_explicit_waypoint_mask_ = !mask.waypoints.empty();
+            normalizeOptimizationMask();
+            markLayoutDirty();
+
+            if (num_segments_ <= 0)
+            {
+                is_valid_ = false;
+                return makeOkStatus();
+            }
+
+            const Status status = checkValidity();
+            is_valid_ = status.ok;
+            return status;
+        }
+
+        const OptimizationMask &getOptimizationMask() const { return optimization_mask_; }
         void setEnergyWeights(double rho_energy) { rho_energy_ = rho_energy; }
         Status setIntegralNumSteps(int steps)
         {
@@ -755,12 +895,12 @@ namespace SplineTrajectory
 
         void setRecordIntegralSamples(bool enable, Workspace &workspace) const
         {
-            workspace.record_integral_samples = enable;
+            workspace.buffers.record_integral_samples = enable;
         }
 
         const IntegralSampleBuffer &getRecordedIntegralSamples(const Workspace &workspace) const
         {
-            return workspace.integral_samples;
+            return workspace.buffers.integral_samples;
         }
 
         /**
@@ -781,72 +921,7 @@ namespace SplineTrajectory
          */
         Status checkValidity() const
         {
-            std::vector<std::string> errors;
-            
-            if (num_segments_ <= 0) {
-                errors.push_back("Invalid segment count: num_segments_ <= 0");
-            }
-            
-            if (ref_times_.size() != static_cast<size_t>(num_segments_)) {
-                errors.push_back("Size mismatch: ref_times_.size() = " + std::to_string(ref_times_.size()) + 
-                                 " != num_segments_ = " + std::to_string(num_segments_));
-            }
-            
-            if (ref_waypoints_.rows() != num_segments_ + 1) {
-                errors.push_back("Size mismatch: ref_waypoints_.rows() = " + std::to_string(ref_waypoints_.rows()) + 
-                                 " != num_segments_ + 1 = " + std::to_string(num_segments_ + 1));
-            }
-            
-            if (!std::isfinite(start_time_)) {
-                errors.push_back("Start time is not finite (NaN or Inf)");
-            }
-            
-            for (size_t i = 0; i < ref_times_.size(); ++i) {
-                double t = ref_times_[i];
-                if (!std::isfinite(t)) {
-                    errors.push_back("Time segment [" + std::to_string(i) + "] is not finite: " + std::to_string(t));
-                } else if (t < MIN_VALID_DURATION) {
-                    errors.push_back("Time segment [" + std::to_string(i) + "] is too small: " + 
-                                     std::to_string(t) + " < " + std::to_string(MIN_VALID_DURATION));
-                }
-            }
-            
-            for (int i = 0; i < ref_waypoints_.rows(); ++i) {
-                if (!ref_waypoints_.row(i).array().isFinite().all()) {
-                    errors.push_back("Waypoint row [" + std::to_string(i) + "] contains NaN or Inf");
-                }
-            }
-            
-            if (!ref_bc_.start_velocity.array().isFinite().all()) {
-                errors.push_back("Start velocity contains NaN or Inf");
-            }
-            if (!ref_bc_.end_velocity.array().isFinite().all()) {
-                errors.push_back("End velocity contains NaN or Inf");
-            }
-            
-            if constexpr (SplineType::ORDER >= 5) {
-                if (!ref_bc_.start_acceleration.array().isFinite().all()) {
-                    errors.push_back("Start acceleration contains NaN or Inf");
-                }
-                if (!ref_bc_.end_acceleration.array().isFinite().all()) {
-                    errors.push_back("End acceleration contains NaN or Inf");
-                }
-            }
-            
-            if constexpr (SplineType::ORDER >= 7) {
-                if (!ref_bc_.start_jerk.array().isFinite().all()) {
-                    errors.push_back("Start jerk contains NaN or Inf");
-                }
-                if (!ref_bc_.end_jerk.array().isFinite().all()) {
-                    errors.push_back("End jerk contains NaN or Inf");
-                }
-            }
-            
-            if (!errors.empty()) {
-                return makeValidationStatus(errors);
-            }
-
-            return makeOkStatus();
+            return validateConfiguration(true);
         }
 
         int getDimension() const { return calculateDimension(); }
@@ -857,45 +932,45 @@ namespace SplineTrajectory
          */
         Eigen::VectorXd generateInitialGuess() const
         {
-            ensureLayoutCache();
-            int dim = total_dimension_;
-            Eigen::VectorXd x(dim);
-            for (int i = 0; i < num_segments_; ++i)
+            return encodeReferenceState();
+        }
+
+        Eigen::VectorXd encodeReferenceState() const
+        {
+            const Eigen::VectorXd auxiliary_initial =
+                active_auxiliary_state_map_->getInitialValue(ref_times_, ref_waypoints_, start_time_, ref_bc_);
+            return encodeMaskedDecisionVariables(ref_times_, ref_waypoints_, ref_bc_, auxiliary_initial);
+        }
+
+        Status encodeWorkingState(const Workspace &workspace, Eigen::VectorXd &x_out) const
+        {
+            const auto &state = workspace.state;
+            if (state.times.size() != ref_times_.size() ||
+                state.waypoints.rows() != ref_waypoints_.rows())
             {
-                x(i) = active_time_map_->toTau(ref_times_[i]);
+                return makeErrorStatus(
+                    ErrorCode::InvalidOptimizerState,
+                    "[SplineOptimizer Error] Workspace state is not initialized or does not match the current reference state.");
             }
 
-            for (const auto &var : spatial_layout_)
-            {
-                x.segment(var.offset, var.dof) =
-                    active_spatial_map_->toUnconstrained(ref_waypoints_.row(var.point_index).transpose(), var.point_index);
-            }
-
-            BoundaryConditions<DIM> bc = ref_bc_;
-            int offset = derivatives_offset_;
-            auto apply_derivatives = [&](auto&& op) {
-                if (flags_.start_v) op(bc.start_velocity);
-                if constexpr (SplineType::ORDER >= 5) if (flags_.start_a) op(bc.start_acceleration);
-                if constexpr (SplineType::ORDER >= 7) if (flags_.start_j) op(bc.start_jerk);
-                
-                if (flags_.end_v) op(bc.end_velocity);
-                if constexpr (SplineType::ORDER >= 5) if (flags_.end_a) op(bc.end_acceleration);
-                if constexpr (SplineType::ORDER >= 7) if (flags_.end_j) op(bc.end_jerk);
-            };
-
-            apply_derivatives([&](const VectorType& v) {
-                x.segment<DIM>(offset) = v;
-                offset += DIM;
-            });
-
+            Eigen::VectorXd auxiliary_vars = state.auxiliary_vars;
             const int aux_dim = active_auxiliary_state_map_->getDimension();
-            if (aux_dim > 0)
+            if (aux_dim <= 0)
             {
-                x.segment(auxiliary_offset_, aux_dim) =
-                    active_auxiliary_state_map_->getInitialValue(ref_times_, ref_waypoints_, start_time_, ref_bc_);
+                auxiliary_vars.resize(0);
+            }
+            else if (auxiliary_vars.size() != aux_dim)
+            {
+                return makeErrorStatus(
+                    ErrorCode::InvalidOptimizerState,
+                    "[SplineOptimizer Error] Workspace auxiliary variable dimension does not match the active AuxiliaryStateMap.");
             }
 
-            return x;
+            x_out = encodeMaskedDecisionVariables(workspace.state.times,
+                                                  workspace.state.waypoints,
+                                                  workspace.state.bc,
+                                                  auxiliary_vars);
+            return makeOkStatus();
         }
 
     private:
@@ -941,68 +1016,159 @@ namespace SplineTrajectory
             };
         }
 
-        void decodeDecisionVariables(const Eigen::VectorXd &x, Workspace &ws) const
+        Eigen::VectorXd encodeMaskedDecisionVariables(const std::vector<double> &times,
+                                                      const WaypointsType &waypoints,
+                                                      const BoundaryConditions<DIM> &bc,
+                                                      const Eigen::VectorXd &auxiliary_vars) const
         {
-            for (int i = 0; i < num_segments_; ++i)
+            ensureLayoutCache();
+            Eigen::VectorXd x = Eigen::VectorXd::Zero(layout_.total_dimension);
+
+            for (const auto &var : layout_.time)
             {
-                ws.working_times[i] = active_time_map_->toTime(x(i));
+                x(var.offset) = active_time_map_->toTau(times[var.segment_index]);
             }
 
-            ws.working_waypoints = ref_waypoints_;
-            for (const auto &var : spatial_layout_)
+            for (const auto &var : layout_.waypoints)
             {
-                ws.working_waypoints.row(var.point_index) =
+                x.segment(var.offset, var.dof) =
+                    active_spatial_map_->toUnconstrained(waypoints.row(var.point_index).transpose(), var.point_index);
+            }
+
+            int offset = layout_.boundary_derivatives_offset;
+            forEachOptimizedBoundaryDerivativeSlot([&](BoundaryDerivativeSlot slot) {
+                switch (slot)
+                {
+                    case BoundaryDerivativeSlot::StartV:
+                        x.template segment<DIM>(offset) = bc.start_velocity;
+                        break;
+                    case BoundaryDerivativeSlot::StartA:
+                        if constexpr (SplineType::ORDER >= 5)
+                        {
+                            x.template segment<DIM>(offset) = bc.start_acceleration;
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::StartJ:
+                        if constexpr (SplineType::ORDER >= 7)
+                        {
+                            x.template segment<DIM>(offset) = bc.start_jerk;
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::EndV:
+                        x.template segment<DIM>(offset) = bc.end_velocity;
+                        break;
+                    case BoundaryDerivativeSlot::EndA:
+                        if constexpr (SplineType::ORDER >= 5)
+                        {
+                            x.template segment<DIM>(offset) = bc.end_acceleration;
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::EndJ:
+                        if constexpr (SplineType::ORDER >= 7)
+                        {
+                            x.template segment<DIM>(offset) = bc.end_jerk;
+                        }
+                        break;
+                }
+                offset += DIM;
+            });
+
+            const int aux_dim = active_auxiliary_state_map_->getDimension();
+            if (aux_dim > 0)
+            {
+                assert(auxiliary_vars.size() == aux_dim &&
+                       "[SplineOptimizer Error] Auxiliary variable dimension mismatch during encoding.");
+                x.segment(layout_.auxiliary_offset, aux_dim) = auxiliary_vars;
+            }
+
+            return x;
+        }
+
+        void decodeMaskedDecisionVariables(const Eigen::VectorXd &x, WorkingState &state) const
+        {
+            state.times = ref_times_;
+            for (const auto &var : layout_.time)
+            {
+                state.times[var.segment_index] = active_time_map_->toTime(x(var.offset));
+            }
+
+            state.waypoints = ref_waypoints_;
+            for (const auto &var : layout_.waypoints)
+            {
+                state.waypoints.row(var.point_index) =
                     active_spatial_map_->toPhysical(x.segment(var.offset, var.dof), var.point_index).transpose();
             }
 
-            ws.working_bc = ref_bc_;
-            ws.working_start_time = start_time_;
+            state.bc = ref_bc_;
+            state.start_time = start_time_;
 
-            int offset = derivatives_offset_;
-            auto applyDerivativeState = [&](auto &&op) {
-                if (flags_.start_v) op(ws.working_bc.start_velocity);
-                if constexpr (SplineType::ORDER >= 5) if (flags_.start_a) op(ws.working_bc.start_acceleration);
-                if constexpr (SplineType::ORDER >= 7) if (flags_.start_j) op(ws.working_bc.start_jerk);
-
-                if (flags_.end_v) op(ws.working_bc.end_velocity);
-                if constexpr (SplineType::ORDER >= 5) if (flags_.end_a) op(ws.working_bc.end_acceleration);
-                if constexpr (SplineType::ORDER >= 7) if (flags_.end_j) op(ws.working_bc.end_jerk);
-            };
-
-            applyDerivativeState([&](VectorType &target) {
-                target = x.template segment<DIM>(offset);
+            int offset = layout_.boundary_derivatives_offset;
+            forEachOptimizedBoundaryDerivativeSlot([&](BoundaryDerivativeSlot slot) {
+                switch (slot)
+                {
+                    case BoundaryDerivativeSlot::StartV:
+                        state.bc.start_velocity = x.template segment<DIM>(offset);
+                        break;
+                    case BoundaryDerivativeSlot::StartA:
+                        if constexpr (SplineType::ORDER >= 5)
+                        {
+                            state.bc.start_acceleration = x.template segment<DIM>(offset);
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::StartJ:
+                        if constexpr (SplineType::ORDER >= 7)
+                        {
+                            state.bc.start_jerk = x.template segment<DIM>(offset);
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::EndV:
+                        state.bc.end_velocity = x.template segment<DIM>(offset);
+                        break;
+                    case BoundaryDerivativeSlot::EndA:
+                        if constexpr (SplineType::ORDER >= 5)
+                        {
+                            state.bc.end_acceleration = x.template segment<DIM>(offset);
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::EndJ:
+                        if constexpr (SplineType::ORDER >= 7)
+                        {
+                            state.bc.end_jerk = x.template segment<DIM>(offset);
+                        }
+                        break;
+                }
                 offset += DIM;
             });
         }
 
-        void applyAuxiliaryVariables(const Eigen::VectorXd &x, Workspace &ws) const
+        void applyAuxiliaryVariables(const Eigen::VectorXd &x, WorkingState &state) const
         {
             const int auxiliary_dim = active_auxiliary_state_map_->getDimension();
             if (auxiliary_dim > 0)
             {
-                ws.auxiliary_vars = x.segment(auxiliary_offset_, auxiliary_dim);
-                active_auxiliary_state_map_->apply(ws.auxiliary_vars,
-                                                   ws.working_times,
-                                                   ws.working_waypoints,
-                                                   ws.working_start_time,
-                                                   ws.working_bc);
+                state.auxiliary_vars = x.segment(layout_.auxiliary_offset, auxiliary_dim);
+                active_auxiliary_state_map_->apply(state.auxiliary_vars,
+                                                   state.times,
+                                                   state.waypoints,
+                                                   state.start_time,
+                                                   state.bc);
             }
             else
             {
-                ws.auxiliary_vars.resize(0);
+                state.auxiliary_vars.resize(0);
             }
         }
 
-        void updateWorkingSpline(Workspace &ws) const
+        void updateWorkingSpline(WorkingState &state) const
         {
-            ws.spline.update(ws.working_times, ws.working_waypoints, ws.working_start_time, ws.working_bc);
+            state.spline.update(state.times, state.waypoints, state.start_time, state.bc);
         }
 
-        void prepareWorkingState(const Eigen::VectorXd &x, Workspace &ws) const
+        void decodeAndBuildWorkingState(const Eigen::VectorXd &x, Workspace &ws) const
         {
-            decodeDecisionVariables(x, ws);
-            applyAuxiliaryVariables(x, ws);
-            updateWorkingSpline(ws);
+            decodeMaskedDecisionVariables(x, ws.state);
+            applyAuxiliaryVariables(x, ws.state);
+            updateWorkingSpline(ws.state);
         }
 
         void resetEvaluationState(Eigen::Index gradient_size,
@@ -1016,11 +1182,13 @@ namespace SplineTrajectory
         template <typename TimeCostFunc>
         double accumulateTimeCost(const TimeCostFunc &time_cost, Workspace &ws) const
         {
-            ws.time_cost_grad_buffer.setZero();
-            ws.grad_times.setZero();
+            auto &state = ws.state;
+            auto &buffers = ws.buffers;
+            buffers.time_cost_grad_buffer.setZero();
+            buffers.grad_times.setZero();
 
-            double total_cost = time_cost(ws.working_times, ws.time_cost_grad_buffer);
-            ws.grad_times += ws.time_cost_grad_buffer;
+            double total_cost = time_cost(state.times, buffers.time_cost_grad_buffer);
+            buffers.grad_times += buffers.time_cost_grad_buffer;
             return total_cost;
         }
 
@@ -1031,37 +1199,39 @@ namespace SplineTrajectory
                                                 const Executor &executor) const
         {
             using SampleCost = typename std::decay<SampleCostFunc>::type;
+            auto &state = ws.state;
+            auto &buffers = ws.buffers;
 
             double total_cost = 0.0;
-            ws.grad_coeffs.setZero();
+            buffers.grad_coeffs.setZero();
 
             const bool need_integral_samples =
-                ws.record_integral_samples || !std::is_same_v<SampleCost, VoidSampleCost>;
-            accumulateIntegralCost(ws, ws.grad_coeffs, ws.grad_times, total_cost,
+                buffers.record_integral_samples || !std::is_same_v<SampleCost, VoidSampleCost>;
+            accumulateIntegralCost(ws, buffers.grad_coeffs, buffers.grad_times, total_cost,
                                    integral_cost,
-                                   ws.working_start_time,
+                                   state.start_time,
                                    need_integral_samples,
                                    executor);
 
             if constexpr (!std::is_same_v<SampleCost, VoidSampleCost>)
             {
                 const Eigen::Index sample_count =
-                    static_cast<Eigen::Index>(ws.integral_samples.size());
+                    static_cast<Eigen::Index>(buffers.integral_samples.size());
 
-                ws.sample_position_grad_buffer.resize(DIM, sample_count);
-                ws.sample_position_grad_buffer.setZero();
-                ws.sample_time_grad_buffer.resize(sample_count);
-                ws.sample_time_grad_buffer.setZero();
+                buffers.sample_position_grad_buffer.resize(DIM, sample_count);
+                buffers.sample_position_grad_buffer.setZero();
+                buffers.sample_time_grad_buffer.resize(sample_count);
+                buffers.sample_time_grad_buffer.setZero();
 
-                total_cost += sample_cost(ws.integral_samples,
-                                          ws.sample_position_grad_buffer,
-                                          ws.sample_time_grad_buffer);
+                total_cost += sample_cost(buffers.integral_samples,
+                                          buffers.sample_position_grad_buffer,
+                                          buffers.sample_time_grad_buffer);
 
-                accumulateSampleCostGradients(ws.integral_samples,
-                                              ws.sample_position_grad_buffer,
-                                              ws.sample_time_grad_buffer,
-                                              ws.grad_coeffs,
-                                              ws.grad_times);
+                accumulateSampleCostGradients(buffers.integral_samples,
+                                              buffers.sample_position_grad_buffer,
+                                              buffers.sample_time_grad_buffer,
+                                              buffers.grad_coeffs,
+                                              buffers.grad_times);
             }
 
             return total_cost;
@@ -1070,18 +1240,22 @@ namespace SplineTrajectory
         template <typename TrajectoryCostFunc>
         double accumulateTrajectoryCost(const TrajectoryCostFunc &trajectory_cost, Workspace &ws) const
         {
-            return trajectory_cost(ws.spline,
-                                   ws.working_times,
-                                   ws.working_waypoints,
-                                   ws.working_start_time,
-                                   ws.working_bc,
-                                   ws.grads);
+            auto &state = ws.state;
+            auto &buffers = ws.buffers;
+            return trajectory_cost(state.spline,
+                                   state.times,
+                                   state.waypoints,
+                                   state.start_time,
+                                   state.bc,
+                                   buffers.grads);
         }
 
         template <typename WaypointsCostFunc>
         double accumulateWaypointCost(const WaypointsCostFunc &waypoints_cost, Workspace &ws) const
         {
             using WaypointsCost = typename std::decay<WaypointsCostFunc>::type;
+            auto &state = ws.state;
+            auto &buffers = ws.buffers;
             if constexpr (std::is_same_v<WaypointsCost, VoidWaypointsCost>)
             {
                 return 0.0;
@@ -1090,16 +1264,16 @@ namespace SplineTrajectory
             {
                 const int num_inner_points = std::max(0, num_segments_ - 1);
 
-                ws.waypoint_grad_buffer.setZero();
+                buffers.waypoint_grad_buffer.setZero();
                 const double waypoint_cost_value =
-                    waypoints_cost(ws.working_waypoints, ws.waypoint_grad_buffer);
+                    waypoints_cost(state.waypoints, buffers.waypoint_grad_buffer);
 
-                ws.grads.start.p += ws.waypoint_grad_buffer.row(0).transpose();
+                buffers.grads.start.p += buffers.waypoint_grad_buffer.row(0).transpose();
                 if (num_inner_points > 0)
                 {
-                    ws.grads.inner_points += ws.waypoint_grad_buffer.block(1, 0, num_inner_points, DIM);
+                    buffers.grads.inner_points += buffers.waypoint_grad_buffer.block(1, 0, num_inner_points, DIM);
                 }
-                ws.grads.end.p += ws.waypoint_grad_buffer.row(num_segments_).transpose();
+                buffers.grads.end.p += buffers.waypoint_grad_buffer.row(num_segments_).transpose();
 
                 return waypoint_cost_value;
             }
@@ -1107,30 +1281,32 @@ namespace SplineTrajectory
 
         double accumulateEnergyCost(Workspace &ws) const
         {
+            auto &state = ws.state;
+            auto &buffers = ws.buffers;
             if (rho_energy_ <= 0.0)
             {
                 return 0.0;
             }
 
             const int num_inner_points = std::max(0, num_segments_ - 1);
-            const double energy = ws.spline.getEnergy();
-            ws.spline.getEnergyGrad(ws.energy_grads);
+            const double energy = state.spline.getEnergy();
+            state.spline.getEnergyGrad(buffers.energy_grads);
 
-            ws.grads.times += rho_energy_ * ws.energy_grads.times;
+            buffers.grads.times += rho_energy_ * buffers.energy_grads.times;
             if (num_inner_points > 0)
             {
-                ws.grads.inner_points += rho_energy_ * ws.energy_grads.inner_points;
+                buffers.grads.inner_points += rho_energy_ * buffers.energy_grads.inner_points;
             }
 
-            ws.grads.start.p += rho_energy_ * ws.energy_grads.start.p;
-            ws.grads.start.v += rho_energy_ * ws.energy_grads.start.v;
-            if constexpr (SplineType::ORDER >= 5) ws.grads.start.a += rho_energy_ * ws.energy_grads.start.a;
-            if constexpr (SplineType::ORDER >= 7) ws.grads.start.j += rho_energy_ * ws.energy_grads.start.j;
+            buffers.grads.start.p += rho_energy_ * buffers.energy_grads.start.p;
+            buffers.grads.start.v += rho_energy_ * buffers.energy_grads.start.v;
+            if constexpr (SplineType::ORDER >= 5) buffers.grads.start.a += rho_energy_ * buffers.energy_grads.start.a;
+            if constexpr (SplineType::ORDER >= 7) buffers.grads.start.j += rho_energy_ * buffers.energy_grads.start.j;
 
-            ws.grads.end.p += rho_energy_ * ws.energy_grads.end.p;
-            ws.grads.end.v += rho_energy_ * ws.energy_grads.end.v;
-            if constexpr (SplineType::ORDER >= 5) ws.grads.end.a += rho_energy_ * ws.energy_grads.end.a;
-            if constexpr (SplineType::ORDER >= 7) ws.grads.end.j += rho_energy_ * ws.energy_grads.end.j;
+            buffers.grads.end.p += rho_energy_ * buffers.energy_grads.end.p;
+            buffers.grads.end.v += rho_energy_ * buffers.energy_grads.end.v;
+            if constexpr (SplineType::ORDER >= 5) buffers.grads.end.a += rho_energy_ * buffers.energy_grads.end.a;
+            if constexpr (SplineType::ORDER >= 7) buffers.grads.end.j += rho_energy_ * buffers.energy_grads.end.j;
 
             return rho_energy_ * energy;
         }
@@ -1143,14 +1319,16 @@ namespace SplineTrajectory
                 return 0.0;
             }
 
+            auto &state = ws.state;
+            auto &buffers = ws.buffers;
             Eigen::VectorXd grad_aux;
-            const double auxiliary_cost = active_auxiliary_state_map_->backward(ws.auxiliary_vars,
-                                                                                ws.spline,
-                                                                                ws.working_times,
-                                                                                ws.working_waypoints,
-                                                                                ws.working_start_time,
-                                                                                ws.working_bc,
-                                                                                ws.grads,
+            const double auxiliary_cost = active_auxiliary_state_map_->backward(state.auxiliary_vars,
+                                                                                state.spline,
+                                                                                state.times,
+                                                                                state.waypoints,
+                                                                                state.start_time,
+                                                                                state.bc,
+                                                                                buffers.grads,
                                                                                 grad_aux);
             if (grad_aux.size() != auxiliary_dim)
             {
@@ -1158,64 +1336,120 @@ namespace SplineTrajectory
                 grad_aux.conservativeResize(auxiliary_dim);
                 grad_aux.setZero();
             }
-            grad_out.segment(auxiliary_offset_, auxiliary_dim) = grad_aux;
+            grad_out.segment(layout_.auxiliary_offset, auxiliary_dim) = grad_aux;
             return auxiliary_cost;
         }
 
         void propagateSplineGradients(Workspace &ws) const
         {
-            ws.spline.propagateGrad(ws.grad_coeffs, ws.grad_times, ws.grads);
+            ws.state.spline.propagateGrad(ws.buffers.grad_coeffs, ws.buffers.grad_times, ws.buffers.grads);
         }
 
         void writeDecisionGradient(const Eigen::VectorXd &x,
                                    Eigen::VectorXd &grad_out,
                                    const Workspace &ws) const
         {
-            for (int i = 0; i < num_segments_; ++i)
+            const auto &state = ws.state;
+            const auto &buffers = ws.buffers;
+
+            for (const auto &var : layout_.time)
             {
-                const double tau = x(i);
-                const double T = ws.working_times[i];
-                const double gradT = ws.grads.times(i);
-                grad_out(i) = active_time_map_->backward(tau, T, gradT);
+                const double tau = x(var.offset);
+                const double T = state.times[var.segment_index];
+                const double gradT = buffers.grads.times(var.segment_index);
+                grad_out(var.offset) = active_time_map_->backward(tau, T, gradT);
             }
 
-            for (const auto &var : spatial_layout_)
+            for (const auto &var : layout_.waypoints)
             {
                 const auto xi = x.segment(var.offset, var.dof);
 
                 if (var.point_index == 0)
                 {
                     grad_out.segment(var.offset, var.dof) =
-                        active_spatial_map_->backwardGrad(xi, ws.grads.start.p, 0);
+                        active_spatial_map_->backwardGrad(xi, buffers.grads.start.p, 0);
                 }
                 else if (var.point_index == num_segments_)
                 {
                     grad_out.segment(var.offset, var.dof) =
-                        active_spatial_map_->backwardGrad(xi, ws.grads.end.p, var.point_index);
+                        active_spatial_map_->backwardGrad(xi, buffers.grads.end.p, var.point_index);
                 }
                 else
                 {
-                    VectorType grad_inner_point = ws.grads.inner_points.row(var.point_index - 1).transpose();
+                    VectorType grad_inner_point = buffers.grads.inner_points.row(var.point_index - 1).transpose();
                     grad_out.segment(var.offset, var.dof) =
                         active_spatial_map_->backwardGrad(xi, grad_inner_point, var.point_index);
                 }
             }
 
-            int offset = derivatives_offset_;
-            auto writeDerivativeGradient = [&](auto &&op) {
-                if (flags_.start_v) op(ws.grads.start.v);
-                if constexpr (SplineType::ORDER >= 5) if (flags_.start_a) op(ws.grads.start.a);
-                if constexpr (SplineType::ORDER >= 7) if (flags_.start_j) op(ws.grads.start.j);
-
-                if (flags_.end_v) op(ws.grads.end.v);
-                if constexpr (SplineType::ORDER >= 5) if (flags_.end_a) op(ws.grads.end.a);
-                if constexpr (SplineType::ORDER >= 7) if (flags_.end_j) op(ws.grads.end.j);
-            };
-
-            writeDerivativeGradient([&](const VectorType &gradient) {
-                grad_out.template segment<DIM>(offset) = gradient;
+            int offset = layout_.boundary_derivatives_offset;
+            forEachOptimizedBoundaryDerivativeSlot([&](BoundaryDerivativeSlot slot) {
+                switch (slot)
+                {
+                    case BoundaryDerivativeSlot::StartV:
+                        grad_out.template segment<DIM>(offset) = buffers.grads.start.v;
+                        break;
+                    case BoundaryDerivativeSlot::StartA:
+                        if constexpr (SplineType::ORDER >= 5)
+                        {
+                            grad_out.template segment<DIM>(offset) = buffers.grads.start.a;
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::StartJ:
+                        if constexpr (SplineType::ORDER >= 7)
+                        {
+                            grad_out.template segment<DIM>(offset) = buffers.grads.start.j;
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::EndV:
+                        grad_out.template segment<DIM>(offset) = buffers.grads.end.v;
+                        break;
+                    case BoundaryDerivativeSlot::EndA:
+                        if constexpr (SplineType::ORDER >= 5)
+                        {
+                            grad_out.template segment<DIM>(offset) = buffers.grads.end.a;
+                        }
+                        break;
+                    case BoundaryDerivativeSlot::EndJ:
+                        if constexpr (SplineType::ORDER >= 7)
+                        {
+                            grad_out.template segment<DIM>(offset) = buffers.grads.end.j;
+                        }
+                        break;
+                }
                 offset += DIM;
             });
+        }
+
+        template <typename TimeCostFunc,
+                  typename IntegralCostFunc,
+                  typename SampleCostFunc,
+                  typename Executor>
+        double accumulateForwardCosts(const TimeCostFunc &time_cost,
+                                      const IntegralCostFunc &integral_cost,
+                                      const SampleCostFunc &sample_cost,
+                                      Workspace &ws,
+                                      const Executor &executor) const
+        {
+            double total_cost = 0.0;
+            total_cost += accumulateTimeCost(time_cost, ws);
+            total_cost += accumulateIntegralAndSampleCosts(integral_cost, sample_cost, ws, executor);
+            return total_cost;
+        }
+
+        template <typename WaypointsCostFunc,
+                  typename TrajectoryCostFunc>
+        double accumulatePostPropagationCosts(const WaypointsCostFunc &waypoints_cost,
+                                             const TrajectoryCostFunc &trajectory_cost,
+                                             Eigen::VectorXd &grad_out,
+                                             Workspace &ws) const
+        {
+            double total_cost = 0.0;
+            total_cost += accumulateTrajectoryCost(trajectory_cost, ws);
+            total_cost += accumulateWaypointCost(waypoints_cost, ws);
+            total_cost += accumulateEnergyCost(ws);
+            total_cost += backpropagateAuxiliaryGradient(grad_out, ws);
+            return total_cost;
         }
 
         template <typename TimeCostFunc,
@@ -1254,17 +1488,13 @@ namespace SplineTrajectory
 
             Workspace &ws = spec.workspace;
             resetEvaluationState(x.size(), grad_out, ws);
-            prepareWorkingState(x, ws);
+            decodeAndBuildWorkingState(x, ws);
 
-            double total_cost = 0.0;
-            total_cost += accumulateTimeCost(spec.time_cost, ws);
-            total_cost += accumulateIntegralAndSampleCosts(spec.integral_cost, spec.sample_cost, ws, spec.executor);
+            double total_cost =
+                accumulateForwardCosts(spec.time_cost, spec.integral_cost, spec.sample_cost, ws, spec.executor);
 
             propagateSplineGradients(ws);
-            total_cost += accumulateTrajectoryCost(spec.trajectory_cost, ws);
-            total_cost += accumulateWaypointCost(spec.waypoints_cost, ws);
-            total_cost += accumulateEnergyCost(ws);
-            total_cost += backpropagateAuxiliaryGradient(grad_out, ws);
+            total_cost += accumulatePostPropagationCosts(spec.waypoints_cost, spec.trajectory_cost, grad_out, ws);
 
             writeDecisionGradient(x, grad_out, ws);
             return total_cost;
@@ -1299,7 +1529,7 @@ namespace SplineTrajectory
          */
         const SplineType &getWorkingSpline(const Workspace &workspace) const
         {
-            return workspace.spline;
+            return workspace.state.spline;
         }
 
         struct GradientCheckResult
@@ -1436,7 +1666,154 @@ namespace SplineTrajectory
         int calculateDimension() const
         {
             ensureLayoutCache();
-            return total_dimension_;
+            return layout_.total_dimension;
+        }
+
+        void appendMaskCapabilityErrors(std::vector<std::string> &errors) const
+        {
+            if constexpr (SplineType::ORDER < 5)
+            {
+                if (optimization_mask_.start.a || optimization_mask_.end.a)
+                {
+                    errors.push_back("OptimizationMask requests acceleration optimization, "
+                                     "but this spline order does not expose acceleration boundary variables.");
+                }
+            }
+
+            if constexpr (SplineType::ORDER < 7)
+            {
+                if (optimization_mask_.start.j || optimization_mask_.end.j)
+                {
+                    errors.push_back("OptimizationMask requests jerk optimization, "
+                                     "but this spline order does not expose jerk boundary variables.");
+                }
+            }
+        }
+
+        void appendValidationErrors(std::vector<std::string> &errors, bool require_initialized_state) const
+        {
+            appendMaskCapabilityErrors(errors);
+
+            if (require_initialized_state)
+            {
+                if (num_segments_ <= 0)
+                {
+                    errors.push_back("Invalid segment count: num_segments_ <= 0");
+                }
+
+                if (ref_times_.size() != static_cast<size_t>(num_segments_))
+                {
+                    errors.push_back("Size mismatch: ref_times_.size() = " + std::to_string(ref_times_.size()) +
+                                     " != num_segments_ = " + std::to_string(num_segments_));
+                }
+
+                if (ref_waypoints_.rows() != num_segments_ + 1)
+                {
+                    errors.push_back("Size mismatch: ref_waypoints_.rows() = " + std::to_string(ref_waypoints_.rows()) +
+                                     " != num_segments_ + 1 = " + std::to_string(num_segments_ + 1));
+                }
+
+                if (!std::isfinite(start_time_))
+                {
+                    errors.push_back("Start time is not finite (NaN or Inf)");
+                }
+            }
+
+            if (num_segments_ > 0)
+            {
+                if (!optimization_mask_.time.empty() &&
+                    optimization_mask_.time.size() != static_cast<size_t>(num_segments_))
+                {
+                    errors.push_back("OptimizationMask.time size mismatch: " +
+                                     std::to_string(optimization_mask_.time.size()) +
+                                     " != num_segments_ = " + std::to_string(num_segments_));
+                }
+
+                if (!optimization_mask_.waypoints.empty() &&
+                    optimization_mask_.waypoints.size() != static_cast<size_t>(num_segments_ + 1))
+                {
+                    errors.push_back("OptimizationMask.waypoints size mismatch: " +
+                                     std::to_string(optimization_mask_.waypoints.size()) +
+                                     " != num_segments_ + 1 = " + std::to_string(num_segments_ + 1));
+                }
+            }
+            else if (!optimization_mask_.time.empty())
+            {
+                errors.push_back("OptimizationMask.time can only be sized after setInitState() establishes segment count.");
+            }
+            else if (!optimization_mask_.waypoints.empty())
+            {
+                errors.push_back("OptimizationMask.waypoints can only be sized after setInitState() establishes segment count.");
+            }
+
+            if (require_initialized_state)
+            {
+                for (size_t i = 0; i < ref_times_.size(); ++i)
+                {
+                    double t = ref_times_[i];
+                    if (!std::isfinite(t))
+                    {
+                        errors.push_back("Time segment [" + std::to_string(i) + "] is not finite: " + std::to_string(t));
+                    }
+                    else if (t < MIN_VALID_DURATION)
+                    {
+                        errors.push_back("Time segment [" + std::to_string(i) + "] is too small: " +
+                                         std::to_string(t) + " < " + std::to_string(MIN_VALID_DURATION));
+                    }
+                }
+
+                for (int i = 0; i < ref_waypoints_.rows(); ++i)
+                {
+                    if (!ref_waypoints_.row(i).array().isFinite().all())
+                    {
+                        errors.push_back("Waypoint row [" + std::to_string(i) + "] contains NaN or Inf");
+                    }
+                }
+
+                if (!ref_bc_.start_velocity.array().isFinite().all())
+                {
+                    errors.push_back("Start velocity contains NaN or Inf");
+                }
+                if (!ref_bc_.end_velocity.array().isFinite().all())
+                {
+                    errors.push_back("End velocity contains NaN or Inf");
+                }
+
+                if constexpr (SplineType::ORDER >= 5)
+                {
+                    if (!ref_bc_.start_acceleration.array().isFinite().all())
+                    {
+                        errors.push_back("Start acceleration contains NaN or Inf");
+                    }
+                    if (!ref_bc_.end_acceleration.array().isFinite().all())
+                    {
+                        errors.push_back("End acceleration contains NaN or Inf");
+                    }
+                }
+
+                if constexpr (SplineType::ORDER >= 7)
+                {
+                    if (!ref_bc_.start_jerk.array().isFinite().all())
+                    {
+                        errors.push_back("Start jerk contains NaN or Inf");
+                    }
+                    if (!ref_bc_.end_jerk.array().isFinite().all())
+                    {
+                        errors.push_back("End jerk contains NaN or Inf");
+                    }
+                }
+            }
+        }
+
+        Status validateConfiguration(bool require_initialized_state) const
+        {
+            std::vector<std::string> errors;
+            appendValidationErrors(errors, require_initialized_state);
+            if (!errors.empty())
+            {
+                return makeValidationStatus(errors);
+            }
+            return makeOkStatus();
         }
 
         template <typename TimeCostFunc,
@@ -1640,32 +2017,34 @@ namespace SplineTrajectory
                                     bool record_samples,
                                     const Executor& executor) const
         {
-            const auto &coeffs = ws.spline.getTrajectory().getCoefficients();
+            auto &state = ws.state;
+            auto &buffers = ws.buffers;
+            const auto &coeffs = state.spline.getTrajectory().getCoefficients();
 
             double running_time = start_time;
             for(int i = 0; i < num_segments_; ++i) {
-                ws.segment_begin_times[i] = running_time;
-                running_time += ws.working_times[i];
+                buffers.segment_begin_times[i] = running_time;
+                running_time += state.times[i];
             }
 
-            std::fill(ws.segment_cost_buffer.begin(), ws.segment_cost_buffer.end(), 0.0);
+            std::fill(buffers.segment_cost_buffer.begin(), buffers.segment_cost_buffer.end(), 0.0);
 
-            ws.global_time_grad_buffer.setZero();
+            buffers.global_time_grad_buffer.setZero();
 
             int K = integral_num_steps_;
             double inv_K = 1.0 / K;
 
             if (record_samples)
             {
-                ws.integral_samples.resize(num_segments_ * (K + 1));
+                buffers.integral_samples.resize(num_segments_ * (K + 1));
             }
             else
             {
-                ws.integral_samples.clear();
+                buffers.integral_samples.clear();
             }
 
             executor(0, num_segments_, [&](int i) {
-                double T = ws.working_times[i];
+                double T = state.times[i];
                 double dt = T * inv_K;
                 int base_row = i * SplineType::COEFF_NUM;
 
@@ -1680,7 +2059,7 @@ namespace SplineTrajectory
                 local_acc_gdC.setZero();
 
                 Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p, b_v, b_a, b_j, b_s, b_c;
-                double current_segment_start_time = ws.segment_begin_times[i];
+                double current_segment_start_time = buffers.segment_begin_times[i];
 
                 for (int k = 0; k <= K; ++k)
                 {
@@ -1714,7 +2093,7 @@ namespace SplineTrajectory
                     if (record_samples)
                     {
                         const int sample_index = i * (K + 1) + k;
-                        IntegralSample &sample = ws.integral_samples[sample_index];
+                        IntegralSample &sample = buffers.integral_samples[sample_index];
                         sample.seg_idx = i;
                         sample.step_in_seg = k;
                         sample.sample_buffer_index = sample_index;
@@ -1747,22 +2126,22 @@ namespace SplineTrajectory
                     local_acc_explicit_time_grad += gt * common_weight;
                 }
 
-                ws.segment_cost_buffer[i] = local_acc_cost;
+                buffers.segment_cost_buffer[i] = local_acc_cost;
 
                 grad_times(i) += local_acc_gdT;
-                ws.global_time_grad_buffer(i) += local_acc_explicit_time_grad;
+                buffers.global_time_grad_buffer(i) += local_acc_explicit_time_grad;
 
                 grad_coeffs.template block(base_row, 0, SplineType::COEFF_NUM, DIM) += local_acc_gdC;
             });
 
             for(int i = 0; i < num_segments_; ++i) {
-                cost += ws.segment_cost_buffer[i];
+                cost += buffers.segment_cost_buffer[i];
             }
 
             double accumulator = 0.0;
             for (int i = num_segments_ - 1; i > 0; --i)
             {
-                accumulator += ws.global_time_grad_buffer(i);
+                accumulator += buffers.global_time_grad_buffer(i);
                 grad_times(i - 1) += accumulator;
             }
         }
