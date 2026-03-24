@@ -880,6 +880,25 @@ namespace SplineTrajectory
             return status;
         }
 
+        void clearOptimizationMask()
+        {
+            optimization_mask_ = OptimizationMask{};
+            has_explicit_time_mask_ = false;
+            has_explicit_waypoint_mask_ = false;
+            normalizeOptimizationMask();
+            markLayoutDirty();
+
+            if (num_segments_ > 0)
+            {
+                const Status status = checkValidity();
+                is_valid_ = status.ok;
+            }
+            else
+            {
+                is_valid_ = false;
+            }
+        }
+
         const OptimizationMask &getOptimizationMask() const { return optimization_mask_; }
         void setEnergyWeights(double rho_energy) { rho_energy_ = rho_energy; }
         Status setIntegralNumSteps(int steps)
