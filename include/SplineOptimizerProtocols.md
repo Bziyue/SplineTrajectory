@@ -204,12 +204,43 @@ if (!result)
 Setup and validation style APIs use `Status`:
 
 ```cpp
-auto status = optimizer.setInitState(durations, waypoints, 0.0, bc);
+Optimizer::ProblemDefinition problem;
+problem.time_segments = durations;
+problem.waypoints = waypoints;
+problem.start_time = 0.0;
+problem.bc = bc;
+
+auto status = optimizer.setProblem(problem);
 if (!status)
 {
     std::cerr << static_cast<int>(status.code) << std::endl;
     std::cerr << status.message << std::endl;
 }
+```
+
+If you want an explicit mask for just this problem, attach it directly to the
+problem definition so the next problem does not inherit the old mask:
+
+```cpp
+Optimizer::OptimizationMask mask;
+mask.time.assign(durations.size(), static_cast<uint8_t>(1));
+mask.waypoints.assign(durations.size() + 1, static_cast<uint8_t>(1));
+mask.waypoints.front() = static_cast<uint8_t>(0);
+mask.waypoints.back() = static_cast<uint8_t>(0);
+
+problem.mask = mask;
+
+auto status = optimizer.setProblem(problem);
+```
+
+If your upstream pipeline provides absolute time points instead of durations,
+build the problem with the helper and still use the same `setProblem(...)`
+entrypoint:
+
+```cpp
+std::vector<double> time_points = {0.0, 1.2, 2.7, 4.0};
+auto problem = Optimizer::makeProblemFromTimePoints(time_points, waypoints, bc);
+auto status = optimizer.setProblem(problem);
 ```
 
 Evaluation uses `EvaluationResult` with the same error code pattern:

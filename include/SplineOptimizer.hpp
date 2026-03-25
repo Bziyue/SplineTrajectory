@@ -11,6 +11,7 @@
 #include <utility>   
 #include <sstream>  
 #include <cassert>
+#include <optional>
 
 namespace SplineTrajectory
 {
@@ -375,6 +376,15 @@ namespace SplineTrajectory
         using WaypointsType = MatrixType;
         using SampleGradMatrix = Eigen::Matrix<double, DIM, Eigen::Dynamic>;
 
+        struct ProblemDefinition
+        {
+            std::vector<double> time_segments;
+            WaypointsType waypoints;
+            double start_time = 0.0;
+            BoundaryConditions<DIM> bc;
+            std::optional<OptimizationMask> mask;
+        };
+
         struct IntegralSample
         {
             EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -618,7 +628,26 @@ namespace SplineTrajectory
             layout_dirty_ = true;
         }
 
-        void normalizeOptimizationMask()
+        void setProblemOptimizationMask(const OptimizationMask *mask)
+        {
+            if (mask != nullptr)
+            {
+                optimization_mask_ = *mask;
+                has_explicit_time_mask_ = !mask->time.empty();
+                has_explicit_waypoint_mask_ = !mask->waypoints.empty();
+            }
+            else
+            {
+                optimization_mask_ = OptimizationMask{};
+                has_explicit_time_mask_ = false;
+                has_explicit_waypoint_mask_ = false;
+            }
+
+            resolveActiveOptimizationMask();
+            markLayoutDirty();
+        }
+
+        void resolveActiveOptimizationMask()
         {
             if (num_segments_ <= 0)
             {
@@ -806,51 +835,44 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Initialize using Absolute Time Points.
-         * Converts time points to segments.
+         * @brief Initialize the optimizer with a full problem definition.
          * @return Validation status for the new reference state.
          */
-        Status setInitState(const std::vector<double> &t_points,
-                            const WaypointsType &waypoints,
-                            const BoundaryConditions<DIM> &bc)
+        Status setProblem(const ProblemDefinition &problem)
         {
-            if (t_points.empty())
-            {
-                is_valid_ = false;
-                return makeErrorStatus(ErrorCode::ValidationFailed,
-                                       "Input time points vector is empty");
-            }
-
-            std::vector<double> time_segments;
-            time_segments.reserve(t_points.size() - 1);
-            for (size_t i = 1; i < t_points.size(); ++i)
-            {
-                time_segments.push_back(t_points[i] - t_points[i - 1]);
-            }
-
-            return setInitState(time_segments, waypoints, t_points.front(), bc);
-        }
-
-        /**
-         * @brief Initialize using Time Segments (Durations).
-         * @return Validation status for the new reference state.
-         */
-        Status setInitState(const std::vector<double> &time_segments,
-                            const WaypointsType &waypoints,
-                            double start_time,
-                            const BoundaryConditions<DIM> &bc)
-        {
-            start_time_ = start_time;
-            ref_times_ = time_segments;
-            ref_waypoints_ = waypoints;
-            ref_bc_ = bc;
+            start_time_ = problem.start_time;
+            ref_times_ = problem.time_segments;
+            ref_waypoints_ = problem.waypoints;
+            ref_bc_ = problem.bc;
             num_segments_ = static_cast<int>(ref_times_.size());
-            normalizeOptimizationMask();
-            markLayoutDirty();
+            setProblemOptimizationMask(problem.mask ? &(*problem.mask) : nullptr);
 
             const Status status = checkValidity();
             is_valid_ = status.ok;
             return status;
+        }
+
+        static ProblemDefinition makeProblemFromTimePoints(const std::vector<double> &time_points,
+                                                           const WaypointsType &waypoints,
+                                                           const BoundaryConditions<DIM> &bc,
+                                                           std::optional<OptimizationMask> mask = std::nullopt)
+        {
+            ProblemDefinition problem;
+            problem.waypoints = waypoints;
+            problem.bc = bc;
+            problem.mask = std::move(mask);
+
+            if (!time_points.empty())
+            {
+                problem.start_time = time_points.front();
+                problem.time_segments.reserve(time_points.size() - 1);
+                for (size_t i = 1; i < time_points.size(); ++i)
+                {
+                    problem.time_segments.push_back(time_points[i] - time_points[i - 1]);
+                }
+            }
+
+            return problem;
         }
 
         static OptimizationMask makeFullOptimizationMask(int num_segments)
@@ -861,45 +883,7 @@ namespace SplineTrajectory
             return mask;
         }
 
-        Status setOptimizationMask(const OptimizationMask &mask)
-        {
-            optimization_mask_ = mask;
-            has_explicit_time_mask_ = !mask.time.empty();
-            has_explicit_waypoint_mask_ = !mask.waypoints.empty();
-            normalizeOptimizationMask();
-            markLayoutDirty();
-
-            if (num_segments_ <= 0)
-            {
-                is_valid_ = false;
-                return makeOkStatus();
-            }
-
-            const Status status = checkValidity();
-            is_valid_ = status.ok;
-            return status;
-        }
-
-        void clearOptimizationMask()
-        {
-            optimization_mask_ = OptimizationMask{};
-            has_explicit_time_mask_ = false;
-            has_explicit_waypoint_mask_ = false;
-            normalizeOptimizationMask();
-            markLayoutDirty();
-
-            if (num_segments_ > 0)
-            {
-                const Status status = checkValidity();
-                is_valid_ = status.ok;
-            }
-            else
-            {
-                is_valid_ = false;
-            }
-        }
-
-        const OptimizationMask &getOptimizationMask() const { return optimization_mask_; }
+        const OptimizationMask &getActiveOptimizationMask() const { return optimization_mask_; }
         void setEnergyWeights(double rho_energy) { rho_energy_ = rho_energy; }
         Status setIntegralNumSteps(int steps)
         {
@@ -1758,11 +1742,11 @@ namespace SplineTrajectory
             }
             else if (!optimization_mask_.time.empty())
             {
-                errors.push_back("OptimizationMask.time can only be sized after setInitState() establishes segment count.");
+                errors.push_back("OptimizationMask.time can only be sized after setProblem() establishes segment count.");
             }
             else if (!optimization_mask_.waypoints.empty())
             {
-                errors.push_back("OptimizationMask.waypoints can only be sized after setInitState() establishes segment count.");
+                errors.push_back("OptimizationMask.waypoints can only be sized after setProblem() establishes segment count.");
             }
 
             if (require_initialized_state)
