@@ -385,6 +385,15 @@ namespace SplineTrajectory
             std::optional<OptimizationMask> mask;
         };
 
+        struct OptimizerConfig
+        {
+            const TimeMap *time_map = nullptr;
+            const SpatialMap *spatial_map = nullptr;
+            const AuxiliaryStateMap *auxiliary_state_map = nullptr;
+            double rho_energy = 0.0;
+            int integral_num_steps = 64;
+        };
+
         struct IntegralSample
         {
             EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -792,9 +801,8 @@ namespace SplineTrajectory
     public:
         SplineOptimizer()
         {
-            active_time_map_ = &default_time_map_;
-            active_spatial_map_ = &default_spatial_map_;
-            active_auxiliary_state_map_ = &default_auxiliary_state_map_;
+            OptimizerConfig config;
+            setConfig(config);
         }
 
         SplineOptimizer(const SplineOptimizer &) = delete;
@@ -802,36 +810,43 @@ namespace SplineTrajectory
         SplineOptimizer(SplineOptimizer &&) = delete;
         SplineOptimizer &operator=(SplineOptimizer &&) = delete;
 
-        /**
-         * @brief Set the TimeMap to use for time transformations.
-         * @param map Pointer to a TimeMap instance (can be nullptr to reset to default).
-         * The optimizer does not take ownership; the map must remain valid.
-         */
-        void setTimeMap(const TimeMap* map)
+        Status setConfig(const OptimizerConfig &config)
         {
-            active_time_map_ = (map != nullptr) ? map : &default_time_map_;
+            if (config.integral_num_steps <= 0)
+            {
+                is_valid_ = false;
+                return makeErrorStatus(ErrorCode::InvalidIntegralSteps,
+                                       "[SplineOptimizer Error] integral_num_steps must be positive.");
+            }
+
+            active_time_map_ = (config.time_map != nullptr) ? config.time_map : &default_time_map_;
+            active_spatial_map_ = (config.spatial_map != nullptr) ? config.spatial_map : &default_spatial_map_;
+            active_auxiliary_state_map_ =
+                (config.auxiliary_state_map != nullptr) ? config.auxiliary_state_map : &default_auxiliary_state_map_;
+            rho_energy_ = config.rho_energy;
+            integral_num_steps_ = config.integral_num_steps;
+            markLayoutDirty();
+
+            if (num_segments_ > 0)
+            {
+                const Status status = checkValidity();
+                is_valid_ = status.ok;
+                return status;
+            }
+
+            is_valid_ = false;
+            return makeOkStatus();
         }
 
-        /**
-         * @brief Set the SpatialMap to use for spatial transformations.
-         * @param map Pointer to a SpatialMap instance (can be nullptr to reset to default).
-         * The optimizer does not take ownership; the map must remain valid.
-         */
-        void setSpatialMap(const SpatialMap* map)
+        OptimizerConfig getActiveConfig() const
         {
-            active_spatial_map_ = (map != nullptr) ? map : &default_spatial_map_;
-            markLayoutDirty();
-        }
-
-        /**
-         * @brief Set the AuxiliaryStateMap for optional extra optimization variables.
-         * @param map Pointer to an AuxiliaryStateMap instance (can be nullptr to reset to default).
-         * The optimizer does not take ownership; the map must remain valid.
-         */
-        void setAuxiliaryStateMap(const AuxiliaryStateMap* map)
-        {
-            active_auxiliary_state_map_ = (map != nullptr) ? map : &default_auxiliary_state_map_;
-            markLayoutDirty();
+            OptimizerConfig config;
+            config.time_map = active_time_map_;
+            config.spatial_map = active_spatial_map_;
+            config.auxiliary_state_map = active_auxiliary_state_map_;
+            config.rho_energy = rho_energy_;
+            config.integral_num_steps = integral_num_steps_;
+            return config;
         }
 
         /**
@@ -884,17 +899,6 @@ namespace SplineTrajectory
         }
 
         const OptimizationMask &getActiveOptimizationMask() const { return optimization_mask_; }
-        void setEnergyWeights(double rho_energy) { rho_energy_ = rho_energy; }
-        Status setIntegralNumSteps(int steps)
-        {
-            if (steps <= 0)
-            {
-                return makeErrorStatus(ErrorCode::InvalidIntegralSteps,
-                                       "[SplineOptimizer Error] integral_num_steps must be positive.");
-            }
-            integral_num_steps_ = steps;
-            return makeOkStatus();
-        }
 
         void setRecordIntegralSamples(bool enable, Workspace &workspace) const
         {

@@ -204,6 +204,11 @@ if (!result)
 Setup and validation style APIs use `Status`:
 
 ```cpp
+Optimizer::OptimizerConfig config;
+config.rho_energy = 0.05;
+config.integral_num_steps = 32;
+optimizer.setConfig(config);
+
 Optimizer::ProblemDefinition problem;
 problem.time_segments = durations;
 problem.waypoints = waypoints;
