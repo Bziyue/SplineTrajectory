@@ -9,8 +9,8 @@ These are reference interfaces only:
 
 The current optimizer API also uses a few small integration types:
 
-- `Workspace`: caller-owned mutable state used during evaluation
-- `EvaluateSpec`: binds cost functors, executor, and workspace
+- `OptimizationContext`: caller-owned prepared problem plus mutable runtime state
+- `EvaluateSpec`: binds cost functors, executor, and context
 - `ErrorCode`: structured failure categories for setup and evaluation
 - `Status`: returned by setup/validation style APIs
 - `EvaluationResult`: returned by `evaluate(...)`
@@ -19,7 +19,7 @@ The current optimizer API also uses a few small integration types:
 Typical flow:
 
 1. create and initialize a `SplineOptimizer`
-2. create one `Workspace` per evaluation context
+2. create one `OptimizationContext` per evaluation context
 3. build an `EvaluateSpec` with `makeEvaluateSpec(...)`
 4. call `evaluate(...)` and inspect `EvaluationResult::ok`
 
@@ -185,16 +185,24 @@ struct AuxiliaryStateMapProtocol
 
 ## Runtime Integration Notes
 
-`SplineOptimizer` no longer owns an internal workspace. Callers should provide one workspace per active evaluation context:
+`SplineOptimizer` no longer owns an internal prepared problem or runtime state.
+Callers should provide one `OptimizationContext` per active evaluation flow:
 
 ```cpp
 using Optimizer = SplineTrajectory::SplineOptimizer<3>;
 
 Optimizer optimizer;
-Optimizer::Workspace workspace;
+Optimizer::OptimizationContext context;
 
-auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost, workspace);
-auto result = optimizer.evaluate(x, grad, spec);
+auto status = optimizer.prepareContext(problem, context);
+if (!status)
+{
+    std::cerr << status.message << std::endl;
+}
+
+auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost, context);
+auto x = optimizer.generateInitialGuess(context);
+auto result = optimizer.evaluate(context, x, grad, spec);
 if (!result)
 {
     std::cerr << result.message << std::endl;
@@ -215,7 +223,8 @@ problem.waypoints = waypoints;
 problem.start_time = 0.0;
 problem.bc = bc;
 
-auto status = optimizer.setProblem(problem);
+Optimizer::OptimizationContext context;
+auto status = optimizer.prepareContext(problem, context);
 if (!status)
 {
     std::cerr << static_cast<int>(status.code) << std::endl;
@@ -224,7 +233,7 @@ if (!status)
 ```
 
 If you want an explicit mask for just this problem, attach it directly to the
-problem definition so the next problem does not inherit the old mask:
+problem definition before preparing the context:
 
 ```cpp
 Optimizer::OptimizationMask mask;
@@ -235,23 +244,23 @@ mask.waypoints.back() = static_cast<uint8_t>(0);
 
 problem.mask = mask;
 
-auto status = optimizer.setProblem(problem);
+auto status = optimizer.prepareContext(problem, context);
 ```
 
 If your upstream pipeline provides absolute time points instead of durations,
-build the problem with the helper and still use the same `setProblem(...)`
+build the problem with the helper and still use the same `prepareContext(...)`
 entrypoint:
 
 ```cpp
 std::vector<double> time_points = {0.0, 1.2, 2.7, 4.0};
 auto problem = Optimizer::makeProblemFromTimePoints(time_points, waypoints, bc);
-auto status = optimizer.setProblem(problem);
+auto status = optimizer.prepareContext(problem, context);
 ```
 
 Evaluation uses `EvaluationResult` with the same error code pattern:
 
 ```cpp
-auto result = optimizer.evaluate(x, grad, spec);
+auto result = optimizer.evaluate(context, x, grad, spec);
 if (!result)
 {
     std::cerr << static_cast<int>(result.code) << std::endl;
