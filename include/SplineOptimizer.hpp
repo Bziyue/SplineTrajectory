@@ -1299,14 +1299,22 @@ namespace SplineTrajectory
         template <typename TrajectoryCostFunc>
         double accumulateTrajectoryCost(const TrajectoryCostFunc &trajectory_cost, OptimizationContext &ctx) const
         {
-            auto &state = ctx.runtime.state;
-            auto &buffers = ctx.runtime.buffers;
-            return trajectory_cost(state.spline,
-                                   state.times,
-                                   state.waypoints,
-                                   state.start_time,
-                                   state.bc,
-                                   buffers.grads);
+            using TrajectoryCost = typename std::decay<TrajectoryCostFunc>::type;
+            if constexpr (std::is_same_v<TrajectoryCost, VoidTrajectoryCost<SplineType, DIM>>)
+            {
+                return 0.0;
+            }
+            else
+            {
+                auto &state = ctx.runtime.state;
+                auto &buffers = ctx.runtime.buffers;
+                return trajectory_cost(state.spline,
+                                       state.times,
+                                       state.waypoints,
+                                       state.start_time,
+                                       state.bc,
+                                       buffers.grads);
+            }
         }
 
         template <typename WaypointsCostFunc>
