@@ -356,6 +356,9 @@ namespace SplineTrajectory
               typename AuxiliaryStateMap = VoidAuxiliaryStateMap<DIM, SplineType>>
     class SplineOptimizer
     {
+        static constexpr bool HAS_AUXILIARY_STATE_MAP =
+            !std::is_same_v<AuxiliaryStateMap, VoidAuxiliaryStateMap<DIM, SplineType>>;
+
         static_assert(TypeTraits::HasTimeMapInterface<TimeMap>::value,
                       "\n[SplineOptimizer Error] The provided 'TimeMap' type does not satisfy the required interface.\n"
                       "It must implement const member methods:\n"
@@ -858,8 +861,15 @@ namespace SplineTrajectory
             ctx.prepared.layout.boundary_derivatives_offset = offset;
             ctx.prepared.layout.auxiliary_offset =
                 ctx.prepared.layout.boundary_derivatives_offset + countOptimizedDerivativeBlocks(ctx) * DIM;
-            ctx.prepared.layout.total_dimension =
-                ctx.prepared.layout.auxiliary_offset + active_auxiliary_state_map_->getDimension();
+            if constexpr (HAS_AUXILIARY_STATE_MAP)
+            {
+                ctx.prepared.layout.total_dimension =
+                    ctx.prepared.layout.auxiliary_offset + active_auxiliary_state_map_->getDimension();
+            }
+            else
+            {
+                ctx.prepared.layout.total_dimension = ctx.prepared.layout.auxiliary_offset;
+            }
         }
         
         static constexpr double MIN_VALID_DURATION = 1e-3; // 1 ms
@@ -983,11 +993,15 @@ namespace SplineTrajectory
 
         Eigen::VectorXd encodeReferenceState(const OptimizationContext &ctx) const
         {
-            const Eigen::VectorXd auxiliary_initial =
-                active_auxiliary_state_map_->getInitialValue(ctx.prepared.problem.time_segments,
-                                                             ctx.prepared.problem.waypoints,
-                                                             ctx.prepared.problem.start_time,
-                                                             ctx.prepared.problem.bc);
+            Eigen::VectorXd auxiliary_initial;
+            if constexpr (HAS_AUXILIARY_STATE_MAP)
+            {
+                auxiliary_initial =
+                    active_auxiliary_state_map_->getInitialValue(ctx.prepared.problem.time_segments,
+                                                                 ctx.prepared.problem.waypoints,
+                                                                 ctx.prepared.problem.start_time,
+                                                                 ctx.prepared.problem.bc);
+            }
             return encodeMaskedDecisionVariables(ctx,
                                                  ctx.prepared.problem.time_segments,
                                                  ctx.prepared.problem.waypoints,
@@ -1007,16 +1021,23 @@ namespace SplineTrajectory
             }
 
             Eigen::VectorXd auxiliary_vars = state.auxiliary_vars;
-            const int aux_dim = active_auxiliary_state_map_->getDimension();
-            if (aux_dim <= 0)
+            if constexpr (!HAS_AUXILIARY_STATE_MAP)
             {
                 auxiliary_vars.resize(0);
             }
-            else if (auxiliary_vars.size() != aux_dim)
+            else
             {
-                return makeErrorStatus(
-                    ErrorCode::InvalidOptimizerState,
-                    "[SplineOptimizer Error] OptimizationContext auxiliary variable dimension does not match the active AuxiliaryStateMap.");
+                const int aux_dim = active_auxiliary_state_map_->getDimension();
+                if (aux_dim <= 0)
+                {
+                    auxiliary_vars.resize(0);
+                }
+                else if (auxiliary_vars.size() != aux_dim)
+                {
+                    return makeErrorStatus(
+                        ErrorCode::InvalidOptimizerState,
+                        "[SplineOptimizer Error] OptimizationContext auxiliary variable dimension does not match the active AuxiliaryStateMap.");
+                }
             }
 
             x_out = encodeMaskedDecisionVariables(ctx,
@@ -1125,12 +1146,15 @@ namespace SplineTrajectory
                 offset += DIM;
             });
 
-            const int aux_dim = active_auxiliary_state_map_->getDimension();
-            if (aux_dim > 0)
+            if constexpr (HAS_AUXILIARY_STATE_MAP)
             {
-                assert(auxiliary_vars.size() == aux_dim &&
-                       "[SplineOptimizer Error] Auxiliary variable dimension mismatch during encoding.");
-                x.segment(ctx.prepared.layout.auxiliary_offset, aux_dim) = auxiliary_vars;
+                const int aux_dim = active_auxiliary_state_map_->getDimension();
+                if (aux_dim > 0)
+                {
+                    assert(auxiliary_vars.size() == aux_dim &&
+                           "[SplineOptimizer Error] Auxiliary variable dimension mismatch during encoding.");
+                    x.segment(ctx.prepared.layout.auxiliary_offset, aux_dim) = auxiliary_vars;
+                }
             }
 
             return x;
@@ -1199,19 +1223,26 @@ namespace SplineTrajectory
                                      const Eigen::VectorXd &x,
                                      WorkingState &state) const
         {
-            const int auxiliary_dim = active_auxiliary_state_map_->getDimension();
-            if (auxiliary_dim > 0)
+            if constexpr (!HAS_AUXILIARY_STATE_MAP)
             {
-                state.auxiliary_vars = x.segment(ctx.prepared.layout.auxiliary_offset, auxiliary_dim);
-                active_auxiliary_state_map_->apply(state.auxiliary_vars,
-                                                   state.times,
-                                                   state.waypoints,
-                                                   state.start_time,
-                                                   state.bc);
+                state.auxiliary_vars.resize(0);
             }
             else
             {
-                state.auxiliary_vars.resize(0);
+                const int auxiliary_dim = active_auxiliary_state_map_->getDimension();
+                if (auxiliary_dim > 0)
+                {
+                    state.auxiliary_vars = x.segment(ctx.prepared.layout.auxiliary_offset, auxiliary_dim);
+                    active_auxiliary_state_map_->apply(state.auxiliary_vars,
+                                                       state.times,
+                                                       state.waypoints,
+                                                       state.start_time,
+                                                       state.bc);
+                }
+                else
+                {
+                    state.auxiliary_vars.resize(0);
+                }
             }
         }
 
@@ -1384,31 +1415,38 @@ namespace SplineTrajectory
                                              Eigen::VectorXd &grad_out,
                                              OptimizationContext &work_ctx) const
         {
-            const int auxiliary_dim = active_auxiliary_state_map_->getDimension();
-            if (auxiliary_dim <= 0)
+            if constexpr (!HAS_AUXILIARY_STATE_MAP)
             {
                 return 0.0;
             }
-
-            auto &state = work_ctx.runtime.state;
-            auto &buffers = work_ctx.runtime.buffers;
-            Eigen::VectorXd grad_aux;
-            const double auxiliary_cost = active_auxiliary_state_map_->backward(state.auxiliary_vars,
-                                                                                state.spline,
-                                                                                state.times,
-                                                                                state.waypoints,
-                                                                                state.start_time,
-                                                                                state.bc,
-                                                                                buffers.grads,
-                                                                                grad_aux);
-            if (grad_aux.size() != auxiliary_dim)
+            else
             {
-                assert(false && "[SplineOptimizer Error] Auxiliary gradient dimension mismatch.");
-                grad_aux.conservativeResize(auxiliary_dim);
-                grad_aux.setZero();
+                const int auxiliary_dim = active_auxiliary_state_map_->getDimension();
+                if (auxiliary_dim <= 0)
+                {
+                    return 0.0;
+                }
+
+                auto &state = work_ctx.runtime.state;
+                auto &buffers = work_ctx.runtime.buffers;
+                Eigen::VectorXd grad_aux;
+                const double auxiliary_cost = active_auxiliary_state_map_->backward(state.auxiliary_vars,
+                                                                                    state.spline,
+                                                                                    state.times,
+                                                                                    state.waypoints,
+                                                                                    state.start_time,
+                                                                                    state.bc,
+                                                                                    buffers.grads,
+                                                                                    grad_aux);
+                if (grad_aux.size() != auxiliary_dim)
+                {
+                    assert(false && "[SplineOptimizer Error] Auxiliary gradient dimension mismatch.");
+                    grad_aux.conservativeResize(auxiliary_dim);
+                    grad_aux.setZero();
+                }
+                grad_out.segment(ctx.prepared.layout.auxiliary_offset, auxiliary_dim) = grad_aux;
+                return auxiliary_cost;
             }
-            grad_out.segment(ctx.prepared.layout.auxiliary_offset, auxiliary_dim) = grad_aux;
-            return auxiliary_cost;
         }
 
         void propagateSplineGradients(OptimizationContext &work_ctx) const
