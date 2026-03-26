@@ -12,6 +12,7 @@
 #include <sstream>  
 #include <cassert>
 #include <optional>
+#include <memory>
 
 namespace SplineTrajectory
 {
@@ -497,20 +498,116 @@ namespace SplineTrajectory
             const SampleCostFunc *sample_cost = nullptr;
             const TrajectoryCostFunc *trajectory_cost = nullptr;
             Executor executor{};
+
+            template <typename NewWaypointsCostFunc>
+            auto withWaypointsCost(NewWaypointsCostFunc &&cost) const
+                -> EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                                std::decay_t<NewWaypointsCostFunc>,
+                                SampleCostFunc, TrajectoryCostFunc, Executor>
+            {
+                static_assert(std::is_lvalue_reference_v<NewWaypointsCostFunc &&>,
+                              "[SplineOptimizer Error] 'waypoints_cost' must be an lvalue. "
+                              "Do not pass a temporary object to withWaypointsCost().");
+
+                using NewWaypointsCost = std::decay_t<NewWaypointsCostFunc>;
+                EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                             NewWaypointsCost, SampleCostFunc,
+                             TrajectoryCostFunc, Executor> spec;
+                spec.time_cost = time_cost;
+                spec.integral_cost = integral_cost;
+                spec.waypoints_cost = std::addressof(cost);
+                spec.sample_cost = sample_cost;
+                spec.trajectory_cost = trajectory_cost;
+                spec.executor = executor;
+                return spec;
+            }
+
+            template <typename NewSampleCostFunc>
+            auto withSampleCost(NewSampleCostFunc &&cost) const
+                -> EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                                WaypointsCostFunc,
+                                std::decay_t<NewSampleCostFunc>,
+                                TrajectoryCostFunc, Executor>
+            {
+                static_assert(std::is_lvalue_reference_v<NewSampleCostFunc &&>,
+                              "[SplineOptimizer Error] 'sample_cost' must be an lvalue. "
+                              "Do not pass a temporary object to withSampleCost().");
+
+                using NewSampleCost = std::decay_t<NewSampleCostFunc>;
+                EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                             WaypointsCostFunc, NewSampleCost,
+                             TrajectoryCostFunc, Executor> spec;
+                spec.time_cost = time_cost;
+                spec.integral_cost = integral_cost;
+                spec.waypoints_cost = waypoints_cost;
+                spec.sample_cost = std::addressof(cost);
+                spec.trajectory_cost = trajectory_cost;
+                spec.executor = executor;
+                return spec;
+            }
+
+            template <typename NewTrajectoryCostFunc>
+            auto withTrajectoryCost(NewTrajectoryCostFunc &&cost) const
+                -> EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                                WaypointsCostFunc, SampleCostFunc,
+                                std::decay_t<NewTrajectoryCostFunc>, Executor>
+            {
+                static_assert(std::is_lvalue_reference_v<NewTrajectoryCostFunc &&>,
+                              "[SplineOptimizer Error] 'trajectory_cost' must be an lvalue. "
+                              "Do not pass a temporary object to withTrajectoryCost().");
+
+                using NewTrajectoryCost = std::decay_t<NewTrajectoryCostFunc>;
+                EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                             WaypointsCostFunc, SampleCostFunc,
+                             NewTrajectoryCost, Executor> spec;
+                spec.time_cost = time_cost;
+                spec.integral_cost = integral_cost;
+                spec.waypoints_cost = waypoints_cost;
+                spec.sample_cost = sample_cost;
+                spec.trajectory_cost = std::addressof(cost);
+                spec.executor = executor;
+                return spec;
+            }
+
+            template <typename NewExecutor>
+            auto withExecutor(NewExecutor &&new_executor) const
+                -> EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                                WaypointsCostFunc, SampleCostFunc,
+                                TrajectoryCostFunc, std::decay_t<NewExecutor>>
+            {
+                using ExecutorType = std::decay_t<NewExecutor>;
+                EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                             WaypointsCostFunc, SampleCostFunc,
+                             TrajectoryCostFunc, ExecutorType> spec;
+                spec.time_cost = time_cost;
+                spec.integral_cost = integral_cost;
+                spec.waypoints_cost = waypoints_cost;
+                spec.sample_cost = sample_cost;
+                spec.trajectory_cost = trajectory_cost;
+                spec.executor = std::forward<NewExecutor>(new_executor);
+                return spec;
+            }
         };
 
         template <typename TimeCostFunc, typename IntegralCostFunc,
                   typename Executor = SerialExecutor>
-        static EvaluateSpec<TimeCostFunc, IntegralCostFunc, VoidWaypointsCost,
-                            VoidSampleCost, VoidTrajectoryCost<SplineType, DIM>, Executor>
-        makeEvaluateSpec(const TimeCostFunc &time_cost,
-                         const IntegralCostFunc &integral_cost,
+        static EvaluateSpec<std::decay_t<TimeCostFunc>, std::decay_t<IntegralCostFunc>, VoidWaypointsCost,
+                            VoidSampleCost, VoidTrajectoryCost<SplineType, DIM>, std::decay_t<Executor>>
+        makeEvaluateSpec(TimeCostFunc &&time_cost,
+                         IntegralCostFunc &&integral_cost,
                          const Executor &executor = Executor())
         {
-            EvaluateSpec<TimeCostFunc, IntegralCostFunc, VoidWaypointsCost,
-                         VoidSampleCost, VoidTrajectoryCost<SplineType, DIM>, Executor> spec;
-            spec.time_cost = &time_cost;
-            spec.integral_cost = &integral_cost;
+            static_assert(std::is_lvalue_reference_v<TimeCostFunc &&>,
+                          "[SplineOptimizer Error] 'time_cost' must be an lvalue. "
+                          "Do not pass a temporary object to makeEvaluateSpec().");
+            static_assert(std::is_lvalue_reference_v<IntegralCostFunc &&>,
+                          "[SplineOptimizer Error] 'integral_cost' must be an lvalue. "
+                          "Do not pass a temporary object to makeEvaluateSpec().");
+
+            EvaluateSpec<std::decay_t<TimeCostFunc>, std::decay_t<IntegralCostFunc>, VoidWaypointsCost,
+                         VoidSampleCost, VoidTrajectoryCost<SplineType, DIM>, std::decay_t<Executor>> spec;
+            spec.time_cost = std::addressof(time_cost);
+            spec.integral_cost = std::addressof(integral_cost);
             spec.executor = executor;
             return spec;
         }

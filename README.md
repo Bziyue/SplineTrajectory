@@ -63,7 +63,7 @@ Energy optimization therefore does not need to first form partials with respect 
 
 This organization keeps penalty definitions close to physical state space, while time mapping, spatial mapping, integral assembly, and gradient propagation stay inside the optimizer.
 
-Minimal usage now follows an explicit workspace and explicit status/result style:
+Minimal usage now follows an explicit context and explicit status/result style:
 
 ```cpp
 #include "SplineOptimizer.hpp"
@@ -109,7 +109,7 @@ struct IntegralCost
 };
 
 Optimizer optimizer;
-Optimizer::Workspace workspace;
+Optimizer::ProblemDefinition problem;
 
 std::vector<double> durations{1.0, 1.2};
 Waypoints waypoints(3, 3);
@@ -118,22 +118,27 @@ waypoints << 0.0, 0.0, 0.0,
              2.0, 1.0, 0.0;
 
 SplineTrajectory::BoundaryConditions<3> bc;
+problem.time_segments = durations;
+problem.waypoints = waypoints;
+problem.start_time = 0.0;
+problem.bc = bc;
 
-auto init_status = optimizer.setInitState(durations, waypoints, 0.0, bc);
-if (!init_status)
+Optimizer::OptimizationContext context;
+auto status = optimizer.prepareContext(problem, context);
+if (!status)
 {
-    std::cerr << init_status.message << std::endl;
+    std::cerr << status.message << std::endl;
     return;
 }
 
 TimeCost time_cost;
 IntegralCost integral_cost;
-auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost, workspace);
+auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
 
-Eigen::VectorXd x = optimizer.generateInitialGuess();
+Eigen::VectorXd x = optimizer.generateInitialGuess(context);
 Eigen::VectorXd grad;
 
-auto eval_result = optimizer.evaluate(x, grad, spec);
+auto eval_result = optimizer.evaluate(context, x, grad, spec);
 if (!eval_result)
 {
     std::cerr << eval_result.message << std::endl;
@@ -141,7 +146,7 @@ if (!eval_result)
 }
 
 std::cout << "cost = " << eval_result.cost << std::endl;
-const auto& spline = optimizer.getWorkingSpline(workspace);
+const auto& spline = optimizer.getWorkingSpline(context);
 ```
 
 ## 📌 Comparison with MINCO

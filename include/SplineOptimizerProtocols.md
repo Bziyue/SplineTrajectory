@@ -10,7 +10,7 @@ These are reference interfaces only:
 The current optimizer API also uses a few small integration types:
 
 - `OptimizationContext`: caller-owned prepared problem plus mutable runtime state
-- `EvaluateSpec`: binds cost functors, executor, and context
+- `EvaluateSpec`: binds borrowed cost functors and an executor
 - `ErrorCode`: structured failure categories for setup and evaluation
 - `Status`: returned by setup/validation style APIs
 - `EvaluationResult`: returned by `evaluate(...)`
@@ -22,6 +22,10 @@ Typical flow:
 2. create one `OptimizationContext` per evaluation context
 3. build an `EvaluateSpec` with `makeEvaluateSpec(...)`
 4. call `evaluate(...)` and inspect `EvaluationResult::ok`
+
+`EvaluateSpec` borrows cost objects, so cost functors passed to
+`makeEvaluateSpec(...)` and `with...Cost(...)` must be lvalues that outlive the
+spec.
 
 ## TimeMap Protocol
 
@@ -200,7 +204,7 @@ if (!status)
     std::cerr << status.message << std::endl;
 }
 
-auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost, context);
+auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
 auto x = optimizer.generateInitialGuess(context);
 auto result = optimizer.evaluate(context, x, grad, spec);
 if (!result)
@@ -266,4 +270,14 @@ if (!result)
     std::cerr << static_cast<int>(result.code) << std::endl;
     std::cerr << result.message << std::endl;
 }
+```
+
+Optional costs and a custom executor can be attached fluently:
+
+```cpp
+auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost)
+                .withWaypointsCost(waypoints_cost)
+                .withSampleCost(sample_cost)
+                .withTrajectoryCost(trajectory_cost)
+                .withExecutor(OpenMPExecutor{});
 ```

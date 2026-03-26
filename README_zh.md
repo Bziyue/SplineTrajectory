@@ -64,7 +64,7 @@
 
 这套结构的重点在于让代价逻辑尽量停留在物理状态空间内，而将时间映射、空间映射、积分和梯度组装收进优化器内部处理。
 
-当前推荐的最小调用方式是“显式 workspace + 显式状态返回”：
+当前推荐的最小调用方式是“显式 context + 显式状态返回”：
 
 ```cpp
 #include "SplineOptimizer.hpp"
@@ -110,7 +110,7 @@ struct IntegralCost
 };
 
 Optimizer optimizer;
-Optimizer::Workspace workspace;
+Optimizer::ProblemDefinition problem;
 
 std::vector<double> durations{1.0, 1.2};
 Waypoints waypoints(3, 3);
@@ -119,22 +119,27 @@ waypoints << 0.0, 0.0, 0.0,
              2.0, 1.0, 0.0;
 
 SplineTrajectory::BoundaryConditions<3> bc;
+problem.time_segments = durations;
+problem.waypoints = waypoints;
+problem.start_time = 0.0;
+problem.bc = bc;
 
-auto init_status = optimizer.setInitState(durations, waypoints, 0.0, bc);
-if (!init_status)
+Optimizer::OptimizationContext context;
+auto status = optimizer.prepareContext(problem, context);
+if (!status)
 {
-    std::cerr << init_status.message << std::endl;
+    std::cerr << status.message << std::endl;
     return;
 }
 
 TimeCost time_cost;
 IntegralCost integral_cost;
-auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost, workspace);
+auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
 
-Eigen::VectorXd x = optimizer.generateInitialGuess();
+Eigen::VectorXd x = optimizer.generateInitialGuess(context);
 Eigen::VectorXd grad;
 
-auto eval_result = optimizer.evaluate(x, grad, spec);
+auto eval_result = optimizer.evaluate(context, x, grad, spec);
 if (!eval_result)
 {
     std::cerr << eval_result.message << std::endl;
@@ -142,7 +147,7 @@ if (!eval_result)
 }
 
 std::cout << "cost = " << eval_result.cost << std::endl;
-const auto& spline = optimizer.getWorkingSpline(workspace);
+const auto& spline = optimizer.getWorkingSpline(context);
 ```
 
 ## 📌 与 MINCO 的对比
