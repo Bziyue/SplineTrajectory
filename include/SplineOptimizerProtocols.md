@@ -23,9 +23,9 @@ Typical flow:
 3. build an `EvaluateSpec` with `makeEvaluateSpec(...)`
 4. call `evaluate(...)` and inspect `EvaluationResult::ok`
 
-`EvaluateSpec` borrows cost objects, so cost functors passed to
-`makeEvaluateSpec(...)` and `with...Cost(...)` must be lvalues that outlive the
-spec.
+`EvaluateSpec` borrows cost objects through reference-like storage, so cost
+functors passed to `makeEvaluateSpec(...)` and `with...Cost(...)` must be
+lvalues that outlive the spec.
 
 ## TimeMap Protocol
 
@@ -138,6 +138,14 @@ struct SampleCostProtocol
 - `b_p`: position basis row for the spline coefficients
 - `p`, `v`: sampled position and velocity
 
+Under the current optimizer data model, `SampleCost` is a discrete cost on:
+
+- sampled position `p`
+- sampled global time `t_global`
+
+It does not currently expose independent sample-backward channels for
+`v/a/j/s`.
+
 ## TrajectoryCost Protocol
 
 ```cpp
@@ -213,6 +221,18 @@ if (!result)
 }
 ```
 
+`prepareContext(...)` snapshots the config-dependent mapper and scalar state
+needed by later evaluation, including:
+
+- `TimeMap`
+- `SpatialMap`
+- `AuxiliaryStateMap`
+- `rho_energy`
+- `integral_num_steps`
+
+Later `setConfig(...)` calls affect newly prepared contexts, but do not mutate
+existing prepared contexts.
+
 Setup and validation style APIs use `Status`:
 
 ```cpp
@@ -281,3 +301,7 @@ auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost)
                 .withTrajectoryCost(trajectory_cost)
                 .withExecutor(OpenMPExecutor{});
 ```
+
+When using `OpenMPExecutor`, the borrowed `integral_cost` object must be
+thread-safe because the same functor instance is invoked concurrently across
+segments.

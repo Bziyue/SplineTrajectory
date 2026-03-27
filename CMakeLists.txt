@@ -70,6 +70,9 @@ target_link_libraries(test_cost_grad Eigen3::Eigen)
 add_executable(test_ppolyND test_ppolyND.cpp)
 target_link_libraries(test_ppolyND Eigen3::Eigen)
 
+add_executable(test_spline_optimizer test_spline_optimizer.cpp)
+target_link_libraries(test_spline_optimizer Eigen3::Eigen)
+
 # Compiler flags
 set(COMMON_COMPILE_FLAGS -Wall -Wextra)
 set(DEBUG_FLAGS -g -O0)
@@ -88,6 +91,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(test_bc_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_cost_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_ppolyND PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
+    target_compile_options(test_spline_optimizer PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
 else()
     target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
@@ -101,6 +105,7 @@ else()
     target_compile_options(test_bc_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_cost_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_ppolyND PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+    target_compile_options(test_spline_optimizer PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
 endif()
 
 # Add chrono library for performance measurements
@@ -115,11 +120,12 @@ if(NOT WIN32)
     target_link_libraries(test_bc_grad pthread)
     target_link_libraries(test_cost_grad pthread)
     target_link_libraries(test_ppolyND pthread)
+    target_link_libraries(test_spline_optimizer pthread)
 endif()
 
 # Create custom targets for easy building
 add_custom_target(tests
-    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d test_with_min_snap_3d test_septic_spline_vs_minco_nd test_Grad test_bc_grad test_cost_grad test_ppolyND
+    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d test_with_min_snap_3d test_septic_spline_vs_minco_nd test_Grad test_bc_grad test_cost_grad test_ppolyND test_spline_optimizer
     COMMENT "Building performance tests"
 )
 
@@ -147,6 +153,7 @@ message(STATUS "    * test_with_min_snap_3d")
 message(STATUS "    * test_Grad")
 message(STATUS "    * test_ppolyND")
 message(STATUS "    * test_cost_grad")
+message(STATUS "    * test_spline_optimizer")
 message(STATUS "  - Examples:")
 message(STATUS "    * basic_cubic_spline")
 message(STATUS "    * quintic_spline_comparison") 
