@@ -72,13 +72,19 @@ struct SpatialMapProtocol
 
 ## IntegralCost Protocol
 
+An integral cost may optionally implement `beginEvaluation() const`. The optimizer
+calls it once after decoding the current decision vector and before visiting any
+integration sample. It is only for resetting adapter-owned diagnostics; adapters
+must not borrow or retain optimizer working state:
+
+```cpp
+void beginEvaluation() const;
+```
+
 ```cpp
 struct IntegralCostProtocol
 {
-    double operator()(double t,
-                      double t_global,
-                      int segment_index,
-                      int step_in_seg,
+    double operator()(const SplineTrajectory::IntegralPointInfo& point,
                       const Eigen::VectorXd& p,
                       const Eigen::VectorXd& v,
                       const Eigen::VectorXd& a,
@@ -127,14 +133,10 @@ struct SampleCostProtocol
 
 `samples` is the recorded integration buffer. Each sample provides:
 
-- `seg_idx`: segment index
-- `step_in_seg`: sample step inside the segment
-- `sample_buffer_index`: index inside the recorded sample buffer
-- `alpha`: normalized time in the segment, in `[0, 1]`
-- `t_local`: local time within the segment
-- `t_global`: absolute time
+- `point`: immutable integration metadata (`segment_index`, `segment_count`,
+  `step_index`, `step_count`, `alpha`, `segment_duration`, `step_size`,
+  `local_time`, `global_time`, and exact endpoint helpers)
 - `trap_weight`: trapezoidal integration weight factor
-- `dt`: segment integration step size
 - `b_p`: position basis row for the spline coefficients
 - `p`, `v`: sampled position and velocity
 
@@ -291,6 +293,13 @@ if (!result)
     std::cerr << result.message << std::endl;
 }
 ```
+
+LBFGS-style inner loops may use `evaluatePrepared(...)` after a successful
+`prepareContext(...)`. It skips the duplicate defensive decode performed by
+`evaluate(...)`; the context and finite decision-vector preconditions therefore
+belong to the caller. After an external optimizer returns, call
+`synchronizeWorkingState(context, x)` to rebuild only the output spline without
+paying for another complete cost/gradient integration.
 
 Optional costs and a custom executor can be attached fluently:
 
