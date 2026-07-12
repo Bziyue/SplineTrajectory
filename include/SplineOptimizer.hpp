@@ -2,6 +2,7 @@
 #define SPLINE_OPTIMIZER_HPP
 
 #include "SplineTrajectory.hpp"
+#include "IntegralPointInfo.hpp"
 #include <algorithm>
 #include <vector>
 #include <cmath>
@@ -104,11 +105,8 @@ namespace SplineTrajectory
 
         template <typename T, typename VecT>
         struct HasIntegralCostInterface<T, VecT, void_t<
-            decltype(static_cast<double>(std::declval<T>()(
-                std::declval<double>(),                  // t (relative)
-                std::declval<double>(),                  // t_global
-                std::declval<int>(),                     // segment_index
-                std::declval<int>(),                     // step_in_seg
+            decltype(static_cast<double>(std::declval<const T &>()(
+                std::declval<const IntegralPointInfo &>(),
                 std::declval<const VecT &>(),            // p
                 std::declval<const VecT &>(),            // v
                 std::declval<const VecT &>(),            // a
@@ -121,6 +119,18 @@ namespace SplineTrajectory
                 std::declval<VecT &>(),                  // gs
                 std::declval<double &>()                 // gt
             )))
+        >> : std::true_type {};
+
+        // Optional lifecycle hook for resetting adapter-owned diagnostics.
+        // It cannot borrow optimizer state and is compiled out when absent.
+        //   void beginEvaluation() const;
+        // The call is compiled out completely for costs that do not provide it.
+        template <typename T, typename = void>
+        struct HasIntegralCostBeginEvaluation : std::false_type {};
+
+        template <typename T>
+        struct HasIntegralCostBeginEvaluation<T, void_t<
+            decltype(std::declval<const T &>().beginEvaluation())
         >> : std::true_type {};
 
 
@@ -407,14 +417,8 @@ namespace SplineTrajectory
         {
             EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-            int seg_idx = 0;
-            int step_in_seg = 0;
-            int sample_buffer_index = 0;
-            double alpha = 0.0;
-            double t_local = 0.0;
-            double t_global = 0.0;
+            IntegralPointInfo point;
             double trap_weight = 0.0;
-            double dt = 0.0;
             Eigen::Matrix<double, 1, SplineType::COEFF_NUM> b_p;
             VectorType p = VectorType::Zero();
             VectorType v = VectorType::Zero();
@@ -1354,15 +1358,15 @@ namespace SplineTrajectory
         {
             ctx.runtime.resize(ctx.prepared.num_segments);
             grad_out.setZero(gradient_size);
-            ctx.runtime.buffers.grad_times.setZero();
-            ctx.runtime.buffers.grad_coeffs.setZero();
-            ctx.runtime.buffers.time_cost_grad_buffer.setZero();
-            ctx.runtime.buffers.global_time_grad_buffer.setZero();
-            ctx.runtime.buffers.waypoint_grad_buffer.setZero();
-            ctx.runtime.buffers.sample_position_grad_buffer.setZero();
-            ctx.runtime.buffers.sample_time_grad_buffer.setZero();
-            zeroSplineGradients(ctx.runtime.buffers.grads, ctx.prepared.num_segments);
-            zeroSplineGradients(ctx.runtime.buffers.energy_grads, ctx.prepared.num_segments);
+        }
+
+        template <typename IntegralCostFunc>
+        void beginIntegralCostEvaluation(const IntegralCostFunc &integral_cost) const
+        {
+            if constexpr (TypeTraits::HasIntegralCostBeginEvaluation<IntegralCostFunc>::value)
+            {
+                integral_cost.beginEvaluation();
+            }
         }
 
         template <typename TimeCostFunc>
@@ -1390,6 +1394,7 @@ namespace SplineTrajectory
 
             double total_cost = 0.0;
             buffers.grad_coeffs.setZero();
+            beginIntegralCostEvaluation(integral_cost);
 
             const bool need_integral_samples =
                 buffers.record_integral_samples || !std::is_same_v<SampleCost, VoidSampleCost>;
@@ -1710,6 +1715,54 @@ namespace SplineTrajectory
         }
 
         /**
+         * @brief Evaluate a context that has already been validated by prepareContext().
+         *
+         * This is the optimizer-loop hot path. It avoids rebuilding and validating a
+         * duplicate decoded WorkingState on every LBFGS callback. The caller must keep
+         * the context valid and pass a finite decision vector of getDimension(ctx).
+         */
+        template <typename TimeCostFunc,
+                  typename IntegralCostFunc,
+                  typename WaypointsCostFunc,
+                  typename SampleCostFunc,
+                  typename TrajectoryCostFunc,
+                  typename Executor>
+        double evaluatePrepared(
+            OptimizationContext &ctx,
+            const Eigen::VectorXd &x,
+            Eigen::VectorXd &grad_out,
+            const EvaluateSpec<TimeCostFunc, IntegralCostFunc,
+                               WaypointsCostFunc, SampleCostFunc,
+                               TrajectoryCostFunc, Executor> &spec) const
+        {
+            assert(ctx.prepared.validation.ok);
+            assert(x.size() == getDimension(ctx));
+            assert(x.allFinite());
+            return runEvaluation(ctx, x, grad_out, resolveEvaluateSpec(spec));
+        }
+
+        /** Rebuild only the working spline after an external optimizer changes x. */
+#if defined(__GNUC__) || defined(__clang__)
+        __attribute__((noinline))
+#endif
+        Status synchronizeWorkingState(OptimizationContext &ctx,
+                                       const Eigen::VectorXd &x) const
+        {
+            if (!ctx.prepared.validation.ok)
+            {
+                return makeErrorStatus(ErrorCode::InvalidOptimizerState,
+                                       "[SplineOptimizer Error] Cannot synchronize an invalid context.");
+            }
+            if (x.size() != getDimension(ctx) || !x.allFinite())
+            {
+                return makeErrorStatus(ErrorCode::DimensionMismatch,
+                                       "[SplineOptimizer Error] Invalid decision vector in synchronizeWorkingState().");
+            }
+            ctx.runtime.resize(ctx.prepared.num_segments);
+            return decodeAndBuildWorkingState(ctx, x, ctx);
+        }
+
+        /**
          * @brief Access the spline stored in a caller-provided optimization context.
          */
         const SplineType &getWorkingSpline(const OptimizationContext &ctx) const
@@ -2001,29 +2054,6 @@ namespace SplineTrajectory
             }
 
             return makeValidationStatus(errors);
-        }
-
-        void zeroBoundaryStateGrads(typename SplineType::BoundaryStateGrads &grads) const
-        {
-            grads.p.setZero();
-            grads.v.setZero();
-            if constexpr (SplineType::ORDER >= 5)
-            {
-                grads.a.setZero();
-            }
-            if constexpr (SplineType::ORDER >= 7)
-            {
-                grads.j.setZero();
-            }
-        }
-
-        void zeroSplineGradients(typename SplineType::Gradients &grads, int num_segments) const
-        {
-            const int num_inner_points = std::max(0, num_segments - 1);
-            grads.inner_points = MatrixType::Zero(num_inner_points, DIM);
-            grads.times = Eigen::VectorXd::Zero(num_segments);
-            zeroBoundaryStateGrads(grads.start);
-            zeroBoundaryStateGrads(grads.end);
         }
 
         Status validateWorkingState(const OptimizationContext &ctx,
@@ -2353,18 +2383,19 @@ namespace SplineTrajectory
             for (Eigen::Index sample_idx = 0; sample_idx < sample_count; ++sample_idx)
             {
                 const IntegralSample &sample = samples[sample_idx];
-                const int base_row = sample.seg_idx * SplineType::COEFF_NUM;
+                const int segment_index = sample.point.segment_index;
+                const int base_row = segment_index * SplineType::COEFF_NUM;
                 const VectorType grad_position = sample_position_gradients.col(sample_idx);
 
                 grad_coeffs.template block<SplineType::COEFF_NUM, DIM>(base_row, 0).noalias() +=
                     sample.b_p.transpose() * grad_position.transpose();
-                grad_times(sample.seg_idx) += grad_position.dot(sample.v) * sample.alpha;
+                grad_times(segment_index) += grad_position.dot(sample.v) * sample.point.alpha;
 
                 if (sample_idx < sample_time_gradients.size())
                 {
                     const double grad_time = sample_time_gradients(sample_idx);
-                    grad_times(sample.seg_idx) += grad_time * sample.alpha;
-                    global_time_grad(sample.seg_idx) += grad_time;
+                    grad_times(segment_index) += grad_time * sample.point.alpha;
+                    global_time_grad(segment_index) += grad_time;
                 }
             }
 
@@ -2418,7 +2449,7 @@ namespace SplineTrajectory
                 int base_row = i * SplineType::COEFF_NUM;
 
                 Eigen::Matrix<double, SplineType::COEFF_NUM, DIM> coeff_block =
-                     coeffs.template block<SplineType::COEFF_NUM, DIM>(base_row, 0);
+                    coeffs.template block<SplineType::COEFF_NUM, DIM>(base_row, 0);
 
                 double local_acc_cost = 0.0;
                 double local_acc_gdT = 0.0;
@@ -2457,20 +2488,16 @@ namespace SplineTrajectory
                     VectorType gs = VectorType::Zero();
                     double gt = 0.0;
 
-                    double c_val = integral_cost(t, t_global, i, k, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
+                    const IntegralPointInfo point{i, ctx.prepared.num_segments, k, K,
+                                                  alpha, T, dt, t, t_global};
+                    double c_val = integral_cost(point, p, v, a, j, s, gp, gv, ga, gj, gs, gt);
 
                     if (record_samples)
                     {
                         const int sample_index = i * (K + 1) + k;
                         IntegralSample &sample = buffers.integral_samples[sample_index];
-                        sample.seg_idx = i;
-                        sample.step_in_seg = k;
-                        sample.sample_buffer_index = sample_index;
-                        sample.alpha = alpha;
-                        sample.t_local = t;
-                        sample.t_global = t_global;
+                        sample.point = point;
                         sample.trap_weight = weight_trap;
-                        sample.dt = dt;
                         sample.b_p = b_p;
                         sample.p = p;
                         sample.v = v;

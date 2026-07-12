@@ -36,10 +36,7 @@ struct ZeroIntegralCost
 {
     using Vec = Eigen::Vector3d;
 
-    double operator()(double t,
-                      double t_global,
-                      int segment_index,
-                      int step_in_seg,
+    double operator()(const SplineTrajectory::IntegralPointInfo &point,
                       const Vec &p,
                       const Vec &v,
                       const Vec &a,
@@ -52,10 +49,7 @@ struct ZeroIntegralCost
                       Vec &gs,
                       double &gt) const
     {
-        (void)t;
-        (void)t_global;
-        (void)segment_index;
-        (void)step_in_seg;
+        (void)point;
         (void)p;
         (void)v;
         (void)a;
@@ -69,6 +63,34 @@ struct ZeroIntegralCost
         gt = 0.0;
         return 0.0;
     }
+};
+
+struct HookedZeroIntegralCost : ZeroIntegralCost
+{
+    void beginEvaluation() const
+    {
+        ++begin_calls;
+    }
+
+    mutable int begin_calls = 0;
+};
+
+struct RecordingZeroIntegralCost : ZeroIntegralCost
+{
+    using Vec = Eigen::Vector3d;
+
+    double operator()(const SplineTrajectory::IntegralPointInfo &point,
+                      const Vec &p, const Vec &v, const Vec &a,
+                      const Vec &j, const Vec &s,
+                      Vec &gp, Vec &gv, Vec &ga, Vec &gj, Vec &gs,
+                      double &gt) const
+    {
+        points.push_back(point);
+        return ZeroIntegralCost::operator()(point, p, v, a, j, s,
+                                            gp, gv, ga, gj, gs, gt);
+    }
+
+    mutable std::vector<SplineTrajectory::IntegralPointInfo> points;
 };
 
 struct ZeroWaypointsCost
@@ -270,6 +292,93 @@ void testCheckGradientsRestoresWorkingState()
     expectTrue(std::abs(times.front() - problem.time_segments.front()) < 1e-12,
                "checkGradients should restore the working spline state to the original decision vector.");
 }
+
+void testPreparedEvaluationAndWorkingStateSynchronization()
+{
+    using Optimizer = SplineTrajectory::SplineOptimizer<3>;
+    Optimizer optimizer;
+    Optimizer::OptimizationContext checked_context;
+    Optimizer::OptimizationContext prepared_context;
+    auto problem = makeProblem<Optimizer>(3);
+    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, checked_context)),
+               "Checked context preparation should succeed.");
+    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, prepared_context)),
+               "Prepared context preparation should succeed.");
+
+    LinearTimeCost time_cost;
+    HookedZeroIntegralCost checked_integral_cost;
+    HookedZeroIntegralCost prepared_integral_cost;
+    const auto checked_spec = Optimizer::makeEvaluateSpec(time_cost, checked_integral_cost);
+    const auto prepared_spec = Optimizer::makeEvaluateSpec(time_cost, prepared_integral_cost);
+    Eigen::VectorXd x = optimizer.generateInitialGuess(checked_context);
+    Eigen::VectorXd checked_grad;
+    Eigen::VectorXd prepared_grad;
+
+    const auto checked = optimizer.evaluate(checked_context, x, checked_grad, checked_spec);
+    const double prepared_cost =
+        optimizer.evaluatePrepared(prepared_context, x, prepared_grad, prepared_spec);
+    expectTrue(static_cast<bool>(checked), "Checked evaluation should succeed.");
+    expectTrue(std::abs(checked.cost - prepared_cost) < 1e-14,
+               "Prepared evaluation must preserve the checked cost.");
+    expectTrue((checked_grad - prepared_grad).norm() < 1e-14,
+               "Prepared evaluation must preserve the checked gradient.");
+    expectTrue(checked_integral_cost.begin_calls == 1 &&
+                   prepared_integral_cost.begin_calls == 1,
+               "Integral beginEvaluation hook should run exactly once per evaluation.");
+
+    x(0) += 0.2;
+    const auto sync = optimizer.synchronizeWorkingState(prepared_context, x);
+    expectTrue(static_cast<bool>(sync), "Working-state synchronization should succeed.");
+    const double expected_time = SplineTrajectory::QuadInvTimeMap().toTime(x(0));
+    const auto &synced_times = optimizer.getWorkingSpline(prepared_context).getTimeSegments();
+    expectTrue(std::abs(synced_times.front() - expected_time) < 1e-14,
+               "Working-state synchronization should rebuild the spline without a cost evaluation.");
+}
+
+void testIntegralPointMetadata()
+{
+    using Optimizer = SplineTrajectory::SplineOptimizer<3>;
+    Optimizer optimizer;
+    auto config = optimizer.getActiveConfig();
+    config.integral_num_steps = 2;
+    expectTrue(static_cast<bool>(optimizer.setConfig(config)),
+               "Two-step integration config should be valid.");
+
+    Optimizer::OptimizationContext context;
+    auto problem = makeProblem<Optimizer>(2);
+    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context)),
+               "Metadata test context preparation should succeed.");
+
+    LinearTimeCost time_cost;
+    RecordingZeroIntegralCost integral_cost;
+    const auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
+    Eigen::VectorXd x = optimizer.generateInitialGuess(context);
+    Eigen::VectorXd grad;
+    const auto result = optimizer.evaluate(context, x, grad, spec);
+    expectTrue(static_cast<bool>(result), "Metadata test evaluation should succeed.");
+    expectTrue(integral_cost.points.size() == 6,
+               "Two segments with K=2 must produce six quadrature visits.");
+
+    const auto &left_end = integral_cost.points[2];
+    const auto &right_start = integral_cost.points[3];
+    expectTrue(left_end.segment_index == 0 && left_end.step_index == 2 &&
+                   left_end.interiorBoundaryIndex() == 0,
+               "Left segment endpoint must map to the internal boundary exactly.");
+    expectTrue(right_start.segment_index == 1 && right_start.step_index == 0 &&
+                   right_start.interiorBoundaryIndex() == 0,
+               "Right segment start must map to the same internal boundary exactly.");
+    expectTrue(integral_cost.points.front().isTrajectoryStart() &&
+                   integral_cost.points.back().isTrajectoryEnd(),
+               "Trajectory endpoint metadata must be exact integer topology.");
+    expectTrue(std::abs(left_end.global_time - right_start.global_time) < 1e-14,
+               "Both visits of one internal boundary must share global time.");
+    expectTrue(std::abs(left_end.alpha - 1.0) < 1e-14 &&
+                   std::abs(right_start.alpha) < 1e-14,
+               "Quadrature metadata must expose the existing normalized time.");
+    expectTrue(std::abs(left_end.step_size * left_end.step_count -
+                            left_end.segment_duration) < 1e-14,
+               "Quadrature step size must come from the optimizer's decoded duration.");
+}
 } // namespace
 
 int main()
@@ -278,6 +387,8 @@ int main()
     testPreparedContextSnapshotsSpatialMap();
     testEvaluateRejectsInvalidDecodedState();
     testCheckGradientsRestoresWorkingState();
+    testPreparedEvaluationAndWorkingStateSynchronization();
+    testIntegralPointMetadata();
 
     std::cout << "test_spline_optimizer passed" << std::endl;
     return 0;
