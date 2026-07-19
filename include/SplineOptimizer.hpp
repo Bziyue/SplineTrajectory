@@ -213,6 +213,30 @@ namespace SplineTrajectory
                 std::declval<typename SplineType::Gradients &>(),
                 std::declval<Eigen::VectorXd &>())))
         >> : std::true_type {};
+
+        // Optional extended backward protocol for maps that optimize the common
+        // trajectory start time. It receives direct dL/d(start_time) in addition
+        // to the spline parameter gradients.
+        template <typename T, int DIM, typename SplineType,
+                  typename = void>
+        struct HasAuxiliaryStartTimeGradientInterface
+            : std::false_type {};
+
+        template <typename T, int DIM, typename SplineType>
+        struct HasAuxiliaryStartTimeGradientInterface<
+            T, DIM, SplineType, void_t<
+                decltype(static_cast<double>(
+                    std::declval<T>().backward(
+                        std::declval<const Eigen::VectorXd &>(),
+                        std::declval<const SplineType &>(),
+                        std::declval<const std::vector<double> &>(),
+                        std::declval<const typename SplineType::MatrixType &>(),
+                        std::declval<double>(),
+                        std::declval<const BoundaryConditions<DIM> &>(),
+                        std::declval<typename SplineType::Gradients &>(),
+                        std::declval<double>(),
+                        std::declval<Eigen::VectorXd &>())))>>
+            : std::true_type {};
     }
 
     /**
@@ -421,7 +445,9 @@ namespace SplineTrajectory
                       "\n[SplineOptimizer Error] The provided 'SpatialMap' type does not satisfy the required interface.\n"
                       "It must implement toPhysical, toUnconstrained, and backwardGrad methods.\n");
 
-        static_assert(TypeTraits::HasAuxiliaryStateMapInterface<AuxiliaryStateMap, DIM, SplineType>::value,
+        static_assert(
+                      TypeTraits::HasAuxiliaryStateMapInterface<AuxiliaryStateMap, DIM, SplineType>::value ||
+                      TypeTraits::HasAuxiliaryStartTimeGradientInterface<AuxiliaryStateMap, DIM, SplineType>::value,
                       "\n[SplineOptimizer Error] The provided 'AuxiliaryStateMap' type does not satisfy the required interface.\n"
                       "It must implement getDimension, getInitialValue, apply, and backward methods.\n");
 
@@ -536,6 +562,44 @@ namespace SplineTrajectory
         struct EvaluationBuffers;
         struct OptimizationContext;
 
+        /**
+         * Non-owning, allocation-free type erasure for costs expressed directly
+         * on polynomial coefficients and segment durations. The callback runs
+         * before the spline adjoint, so it must add to grad_coeffs/grad_times.
+         */
+        struct CoefficientCostRef
+        {
+            using Invoke = double (*)(
+                const void *, SplineType &,
+                const std::vector<double> &, double,
+                MatrixType &, Eigen::VectorXd &, double &);
+
+            const void *object = nullptr;
+            Invoke invoke = nullptr;
+
+            explicit operator bool() const noexcept
+            {
+                return invoke != nullptr;
+            }
+
+            template <typename Cost>
+            static CoefficientCostRef bind(const Cost &cost)
+            {
+                return {
+                    std::addressof(cost),
+                    [](const void *object, SplineType &spline,
+                       const std::vector<double> &times,
+                       double start_time, MatrixType &grad_coeffs,
+                       Eigen::VectorXd &grad_times,
+                       double &grad_start_time)
+                    {
+                        return (*static_cast<const Cost *>(object))(
+                            spline, times, start_time, grad_coeffs,
+                            grad_times, grad_start_time);
+                    }};
+            }
+        };
+
         template <typename TimeCostFunc,
                   typename IntegralCostFunc,
                   typename WaypointsCostFunc = VoidWaypointsCost,
@@ -549,6 +613,7 @@ namespace SplineTrajectory
             OptionalBorrowed<WaypointsCostFunc> waypoints_cost;
             OptionalBorrowed<SampleCostFunc> sample_cost;
             OptionalBorrowed<TrajectoryCostFunc> trajectory_cost;
+            CoefficientCostRef coefficient_cost;
             Executor executor{};
 
             EvaluateSpec(const TimeCostFunc &time_cost_in,
@@ -579,6 +644,7 @@ namespace SplineTrajectory
                 spec.waypoints_cost = std::cref(cost);
                 spec.sample_cost = sample_cost;
                 spec.trajectory_cost = trajectory_cost;
+                spec.coefficient_cost = coefficient_cost;
                 return spec;
             }
 
@@ -602,6 +668,7 @@ namespace SplineTrajectory
                 spec.waypoints_cost = waypoints_cost;
                 spec.sample_cost = std::cref(cost);
                 spec.trajectory_cost = trajectory_cost;
+                spec.coefficient_cost = coefficient_cost;
                 return spec;
             }
 
@@ -624,6 +691,22 @@ namespace SplineTrajectory
                 spec.waypoints_cost = waypoints_cost;
                 spec.sample_cost = sample_cost;
                 spec.trajectory_cost = std::cref(cost);
+                spec.coefficient_cost = coefficient_cost;
+                return spec;
+            }
+
+            template <typename CoefficientCostFunc>
+            auto withCoefficientCost(
+                CoefficientCostFunc &&cost) const -> EvaluateSpec
+            {
+                static_assert(
+                    std::is_lvalue_reference_v<
+                        CoefficientCostFunc &&>,
+                    "[SplineOptimizer Error] 'coefficient_cost' must be an lvalue. "
+                    "Do not pass a temporary object to withCoefficientCost().");
+                EvaluateSpec spec = *this;
+                spec.coefficient_cost =
+                    CoefficientCostRef::bind(cost);
                 return spec;
             }
 
@@ -642,6 +725,7 @@ namespace SplineTrajectory
                 spec.waypoints_cost = waypoints_cost;
                 spec.sample_cost = sample_cost;
                 spec.trajectory_cost = trajectory_cost;
+                spec.coefficient_cost = coefficient_cost;
                 return spec;
             }
         };
@@ -677,14 +761,15 @@ namespace SplineTrajectory
             double start_time = 0.0;
             Eigen::VectorXd auxiliary_vars;
 
-            void resize(int num_segments)
+            void resize(int num_segments, int auxiliary_dim)
             {
                 if (static_cast<int>(times.size()) != num_segments)
                 {
                     times.resize(num_segments);
                     waypoints.resize(num_segments + 1, DIM);
-                    auxiliary_vars.resize(0);
                 }
+                if (auxiliary_vars.size() != auxiliary_dim)
+                    auxiliary_vars.resize(auxiliary_dim);
             }
         };
 
@@ -694,6 +779,7 @@ namespace SplineTrajectory
 
             Eigen::VectorXd grad_times;
             MatrixType grad_coeffs;
+            double grad_start_time = 0.0;
             Eigen::VectorXd time_cost_grad_buffer;
 
             typename SplineType::Gradients grads;
@@ -703,12 +789,13 @@ namespace SplineTrajectory
             MatrixType waypoint_grad_buffer;
             SampleGradMatrix sample_position_grad_buffer;
             Eigen::VectorXd sample_time_grad_buffer;
+            Eigen::VectorXd auxiliary_grad_buffer;
             std::vector<double> segment_begin_times;
             std::vector<double> segment_cost_buffer;
             IntegralSampleBuffer integral_samples;
             bool record_integral_samples = false;
 
-            void resize(int num_segments)
+            void resize(int num_segments, int auxiliary_dim)
             {
                 if (grad_times.size() != num_segments)
                 {
@@ -722,7 +809,17 @@ namespace SplineTrajectory
                     segment_begin_times.resize(num_segments);
                     segment_cost_buffer.resize(num_segments);
                     integral_samples.clear();
+
+                    const int inner_points =
+                        std::max(0, num_segments - 1);
+                    grads.inner_points.resize(inner_points, DIM);
+                    grads.times.resize(num_segments);
+                    energy_grads.inner_points.resize(
+                        inner_points, DIM);
+                    energy_grads.times.resize(num_segments);
                 }
+                if (auxiliary_grad_buffer.size() != auxiliary_dim)
+                    auxiliary_grad_buffer.resize(auxiliary_dim);
             }
         };
 
@@ -751,10 +848,10 @@ namespace SplineTrajectory
             WorkingState state;
             EvaluationBuffers buffers;
 
-            void resize(int num_segments)
+            void resize(int num_segments, int auxiliary_dim)
             {
-                state.resize(num_segments);
-                buffers.resize(num_segments);
+                state.resize(num_segments, auxiliary_dim);
+                buffers.resize(num_segments, auxiliary_dim);
             }
         };
 
@@ -1109,6 +1206,22 @@ namespace SplineTrajectory
             }
 
             ctx.prepared.validation = validateConfiguration(ctx);
+            if (ctx.prepared.validation)
+            {
+                const int auxiliary_dim =
+                    getPreparedAuxiliaryStateMap(ctx).getDimension();
+                ctx.runtime.resize(
+                    ctx.prepared.num_segments, auxiliary_dim);
+
+                // Warm the fixed-topology spline storage here so the first
+                // optimizer callback has the same allocation behavior as all
+                // subsequent callbacks.
+                ctx.runtime.state.spline.update(
+                    ctx.prepared.problem.time_segments,
+                    ctx.prepared.problem.waypoints,
+                    ctx.prepared.problem.start_time,
+                    ctx.prepared.problem.bc);
+            }
             return ctx.prepared.validation;
         }
 
@@ -1247,6 +1360,7 @@ namespace SplineTrajectory
             const WaypointsCostFunc &waypoints_cost;
             const SampleCostFunc &sample_cost;
             const TrajectoryCostFunc &trajectory_cost;
+            CoefficientCostRef coefficient_cost;
             const Executor &executor;
         };
 
@@ -1270,6 +1384,7 @@ namespace SplineTrajectory
                 resolveWaypointsCost(spec.waypoints_cost),
                 resolveSampleCost(spec.sample_cost),
                 resolveTrajectoryCost(spec.trajectory_cost),
+                spec.coefficient_cost,
                 spec.executor
             };
         }
@@ -1396,7 +1511,9 @@ namespace SplineTrajectory
                                   Eigen::VectorXd &grad_out,
                                   OptimizationContext &ctx) const
         {
-            ctx.runtime.resize(ctx.prepared.num_segments);
+            ctx.runtime.resize(
+                ctx.prepared.num_segments,
+                getPreparedAuxiliaryStateMap(ctx).getDimension());
             grad_out.setZero(gradient_size);
         }
 
@@ -1416,6 +1533,7 @@ namespace SplineTrajectory
             auto &buffers = ctx.runtime.buffers;
             buffers.time_cost_grad_buffer.setZero();
             buffers.grad_times.setZero();
+            buffers.grad_start_time = 0.0;
 
             double total_cost = time_cost(state.times, buffers.time_cost_grad_buffer);
             buffers.grad_times += buffers.time_cost_grad_buffer;
@@ -1463,6 +1581,7 @@ namespace SplineTrajectory
                                               buffers.sample_time_grad_buffer,
                                               buffers.grad_coeffs,
                                               buffers.grad_times,
+                                              buffers.global_time_grad_buffer,
                                               ctx.prepared.num_segments);
             }
 
@@ -1572,15 +1691,29 @@ namespace SplineTrajectory
 
                 auto &state = work_ctx.runtime.state;
                 auto &buffers = work_ctx.runtime.buffers;
-                Eigen::VectorXd grad_aux;
-                const double auxiliary_cost = auxiliary_map.backward(state.auxiliary_vars,
-                                                                     state.spline,
-                                                                     state.times,
-                                                                     state.waypoints,
-                                                                     state.start_time,
-                                                                     state.bc,
-                                                                     buffers.grads,
-                                                                     grad_aux);
+                Eigen::VectorXd &grad_aux =
+                    buffers.auxiliary_grad_buffer;
+                double auxiliary_cost = 0.0;
+                if constexpr (
+                    TypeTraits::
+                        HasAuxiliaryStartTimeGradientInterface<
+                            AuxiliaryStateMap, DIM,
+                            SplineType>::value)
+                {
+                    auxiliary_cost = auxiliary_map.backward(
+                        state.auxiliary_vars, state.spline,
+                        state.times, state.waypoints,
+                        state.start_time, state.bc, buffers.grads,
+                        buffers.grad_start_time, grad_aux);
+                }
+                else
+                {
+                    auxiliary_cost = auxiliary_map.backward(
+                        state.auxiliary_vars, state.spline,
+                        state.times, state.waypoints,
+                        state.start_time, state.bc, buffers.grads,
+                        grad_aux);
+                }
                 if (grad_aux.size() != auxiliary_dim)
                 {
                     assert(false && "[SplineOptimizer Error] Auxiliary gradient dimension mismatch.");
@@ -1597,6 +1730,20 @@ namespace SplineTrajectory
             work_ctx.runtime.state.spline.propagateGrad(work_ctx.runtime.buffers.grad_coeffs,
                                                         work_ctx.runtime.buffers.grad_times,
                                                         work_ctx.runtime.buffers.grads);
+        }
+
+        double accumulateCoefficientCost(
+            const CoefficientCostRef &coefficient_cost,
+            OptimizationContext &ctx) const
+        {
+            if (!coefficient_cost)
+                return 0.0;
+            auto &state = ctx.runtime.state;
+            auto &buffers = ctx.runtime.buffers;
+            return coefficient_cost.invoke(
+                coefficient_cost.object, state.spline, state.times,
+                state.start_time, buffers.grad_coeffs,
+                buffers.grad_times, buffers.grad_start_time);
         }
 
         void writeDecisionGradient(const Eigen::VectorXd &x,
@@ -1722,6 +1869,8 @@ namespace SplineTrajectory
             double total_cost =
                 accumulateForwardCosts(spec.time_cost, spec.integral_cost, spec.sample_cost, ctx, spec.executor);
 
+            total_cost +=
+                accumulateCoefficientCost(spec.coefficient_cost, ctx);
             propagateSplineGradients(ctx);
             total_cost += accumulatePostPropagationCosts(ctx, spec.waypoints_cost, spec.trajectory_cost, grad_out, ctx);
 
@@ -1798,7 +1947,9 @@ namespace SplineTrajectory
                 return makeErrorStatus(ErrorCode::DimensionMismatch,
                                        "[SplineOptimizer Error] Invalid decision vector in synchronizeWorkingState().");
             }
-            ctx.runtime.resize(ctx.prepared.num_segments);
+            ctx.runtime.resize(
+                ctx.prepared.num_segments,
+                getPreparedAuxiliaryStateMap(ctx).getDimension());
             return decodeAndBuildWorkingState(ctx, x, ctx);
         }
 
@@ -2393,7 +2544,9 @@ namespace SplineTrajectory
             }
 
             WorkingState candidate_state;
-            candidate_state.resize(ctx.prepared.num_segments);
+            candidate_state.resize(
+                ctx.prepared.num_segments,
+                getPreparedAuxiliaryStateMap(ctx).getDimension());
             decodeMaskedDecisionVariables(ctx, x, candidate_state);
             applyAuxiliaryVariables(ctx, x, candidate_state);
             return validateWorkingState(ctx, x, candidate_state);
@@ -2404,6 +2557,7 @@ namespace SplineTrajectory
                                            const Eigen::VectorXd &sample_time_gradients,
                                            MatrixType &grad_coeffs,
                                            Eigen::VectorXd &grad_times,
+                                           Eigen::VectorXd &global_time_grad,
                                            int num_segments) const
         {
             const Eigen::Index sample_count = static_cast<Eigen::Index>(samples.size());
@@ -2418,7 +2572,7 @@ namespace SplineTrajectory
                 return;
             }
 
-            Eigen::VectorXd global_time_grad = Eigen::VectorXd::Zero(num_segments);
+            global_time_grad.setZero();
 
             for (Eigen::Index sample_idx = 0; sample_idx < sample_count; ++sample_idx)
             {

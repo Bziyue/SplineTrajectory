@@ -118,8 +118,7 @@ void addForwardMeasurement(std::vector<Measurement> &measurements,
             ? "Bezier" : "MINVO";
     const int controls =
         segments * (degree - derivative + 1) *
-        (basis == SplineTrajectory::ConvexHullBasis::Bezier
-             ? (1 << subdivision_depth) : 1);
+        (1 << subdivision_depth);
     const double elapsed = medianNanoseconds([&]()
     {
         const auto representation = Hull::fromPPoly(
@@ -130,6 +129,57 @@ void addForwardMeasurement(std::vector<Measurement> &measurements,
     measurements.push_back({
         category, segments, degree, derivative, basis_name,
         subdivision_depth, "forward", controls, elapsed});
+}
+
+void addWorkspaceMeasurement(
+    std::vector<Measurement> &measurements,
+    const std::string &category,
+    const PPoly &polynomial,
+    int segments,
+    int degree,
+    SplineTrajectory::ConvexHullBasis basis,
+    int derivative,
+    int subdivision_depth,
+    std::mt19937 &generator)
+{
+    const char *basis_name =
+        basis == SplineTrajectory::ConvexHullBasis::Bezier
+            ? "Bezier" : "MINVO";
+    Hull workspace;
+    workspace.resetTopology(
+        polynomial, basis, derivative, subdivision_depth);
+    workspace.update(polynomial);
+    const Matrix gradients =
+        makeGradients(workspace.controls().rows(), generator);
+    Matrix coefficient_gradients =
+        Matrix::Zero(segments * (degree + 1), 3);
+    Eigen::VectorXd duration_gradients =
+        Eigen::VectorXd::Zero(segments);
+
+    const double update_elapsed = medianNanoseconds([&]()
+    {
+        workspace.update(polynomial);
+        benchmark_sink += workspace.controls()(
+            workspace.controls().rows() - 1, 0);
+    });
+    measurements.push_back({
+        category, segments, degree, derivative, basis_name,
+        subdivision_depth, "update",
+        static_cast<int>(workspace.controls().rows()),
+        update_elapsed});
+
+    const double backward_elapsed = medianNanoseconds([&]()
+    {
+        workspace.backwardAdd(
+            gradients, coefficient_gradients,
+            duration_gradients);
+        benchmark_sink += coefficient_gradients(0, 0);
+    });
+    measurements.push_back({
+        category, segments, degree, derivative, basis_name,
+        subdivision_depth, "backward_add",
+        static_cast<int>(workspace.controls().rows()),
+        backward_elapsed});
 }
 
 void addBackwardMeasurement(std::vector<Measurement> &measurements,
@@ -249,6 +299,14 @@ int main(int argc, char **argv)
                 measurements, "segments", polynomial, segments, 5,
                 SplineTrajectory::ConvexHullBasis::MINVO,
                 derivative, 0);
+            addWorkspaceMeasurement(
+                measurements, "segments", polynomial, segments, 5,
+                SplineTrajectory::ConvexHullBasis::Bezier,
+                derivative, 0, generator);
+            addWorkspaceMeasurement(
+                measurements, "segments", polynomial, segments, 5,
+                SplineTrajectory::ConvexHullBasis::MINVO,
+                derivative, 0, generator);
         }
         addBackwardMeasurement(
             measurements, "segments", polynomial, segments, 5,
@@ -265,16 +323,25 @@ int main(int argc, char **argv)
         makePolynomial(subdivision_segments, 5, generator);
     for (int depth = 0; depth <= 4; ++depth)
     {
-        addForwardMeasurement(
-            measurements, "subdivision", subdivision_polynomial,
-            subdivision_segments, 5,
-            SplineTrajectory::ConvexHullBasis::Bezier,
-            0, depth);
-        addBackwardMeasurement(
-            measurements, "subdivision", subdivision_polynomial,
-            subdivision_segments, 5,
-            SplineTrajectory::ConvexHullBasis::Bezier,
-            0, depth, generator);
+        for (auto basis : {
+                 SplineTrajectory::ConvexHullBasis::Bezier,
+                 SplineTrajectory::ConvexHullBasis::MINVO})
+        {
+            addForwardMeasurement(
+                measurements, "subdivision",
+                subdivision_polynomial,
+                subdivision_segments, 5, basis, 0, depth);
+            addBackwardMeasurement(
+                measurements, "subdivision",
+                subdivision_polynomial,
+                subdivision_segments, 5, basis, 0, depth,
+                generator);
+            addWorkspaceMeasurement(
+                measurements, "subdivision",
+                subdivision_polynomial,
+                subdivision_segments, 5, basis, 0, depth,
+                generator);
+        }
     }
 
     constexpr int degree_segments = 64;
@@ -292,6 +359,10 @@ int main(int argc, char **argv)
             addBackwardMeasurement(
                 measurements, "degree", polynomial, degree_segments,
                 degree, basis, 0, 0, generator);
+            addWorkspaceMeasurement(
+                measurements, "degree", polynomial,
+                degree_segments, degree, basis, 0, 0,
+                generator);
         }
     }
 
@@ -328,28 +399,41 @@ int main(int argc, char **argv)
                   << " |\n";
     }
 
-    std::cout << "\nBezier subdivision, 64 quintic segments\n";
-    std::cout << "| depth | pieces | controls | forward [us] |"
-                 " backward [us] |\n";
-    std::cout << "|---:|---:|---:|---:|---:|\n";
-    for (int depth = 0; depth <= 4; ++depth)
+    std::cout << "\nSubdivision, 64 quintic segments\n";
+    std::cout << "| basis | depth | pieces | controls | one-shot [us] |"
+                 " update [us] | backwardAdd [us] |\n";
+    std::cout << "|:---|---:|---:|---:|---:|---:|---:|\n";
+    for (const std::string basis : {"Bezier", "MINVO"})
     {
-        const auto forward = findMeasurement(
-            measurements, "subdivision", subdivision_segments,
-            5, 0, "Bezier", depth, "forward");
-        const auto backward = findMeasurement(
-            measurements, "subdivision", subdivision_segments,
-            5, 0, "Bezier", depth, "backward");
-        std::cout << "| " << depth
-                  << " | " << subdivision_segments * (1 << depth)
-                  << " | " << forward.output_controls
-                  << " | " << microseconds(forward)
-                  << " | " << microseconds(backward) << " |\n";
+        for (int depth = 0; depth <= 4; ++depth)
+        {
+            const auto forward = findMeasurement(
+                measurements, "subdivision",
+                subdivision_segments, 5, 0, basis, depth,
+                "forward");
+            const auto update = findMeasurement(
+                measurements, "subdivision",
+                subdivision_segments, 5, 0, basis, depth,
+                "update");
+            const auto backward = findMeasurement(
+                measurements, "subdivision",
+                subdivision_segments, 5, 0, basis, depth,
+                "backward_add");
+            std::cout << "| " << basis << " | " << depth
+                      << " | "
+                      << subdivision_segments * (1 << depth)
+                      << " | " << forward.output_controls
+                      << " | " << microseconds(forward)
+                      << " | " << microseconds(update)
+                      << " | " << microseconds(backward)
+                      << " |\n";
+        }
     }
 
     std::cout << "\nDegree scaling, 64 segments\n";
-    std::cout << "| degree | basis | forward [us] | backward [us] |\n";
-    std::cout << "|---:|:---|---:|---:|\n";
+    std::cout << "| degree | basis | one-shot [us] | update [us] |"
+                 " backwardAdd [us] |\n";
+    std::cout << "|---:|:---|---:|---:|---:|\n";
     for (int degree : {3, 5, 7})
     {
         for (const std::string basis : {"Bezier", "MINVO"})
@@ -359,9 +443,13 @@ int main(int argc, char **argv)
                 degree, 0, basis, 0, "forward");
             const auto backward = findMeasurement(
                 measurements, "degree", degree_segments,
-                degree, 0, basis, 0, "backward");
+                degree, 0, basis, 0, "backward_add");
+            const auto update = findMeasurement(
+                measurements, "degree", degree_segments,
+                degree, 0, basis, 0, "update");
             std::cout << "| " << degree << " | " << basis
                       << " | " << microseconds(forward)
+                      << " | " << microseconds(update)
                       << " | " << microseconds(backward) << " |\n";
         }
     }

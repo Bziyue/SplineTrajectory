@@ -28,9 +28,13 @@
 #include "SplineTrajectory.hpp"
 
 #include <Eigen/Dense>
+#include <cstdint>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace SplineTrajectory
@@ -46,13 +50,14 @@ namespace SplineTrajectory
      *        physical-time derivatives.
      *
      * Rows in controls() are piece-major. Every piece owns degree()+1 consecutive
-     * rows. A Bezier subdivision depth s creates 2^s pieces for every source
-     * polynomial segment. MINVO is available for degrees 0 through 7 and does not
-     * subdivide.
+     * rows. A subdivision depth s creates 2^s pieces for every source polynomial
+     * segment. Both Bezier and MINVO can be subdivided; MINVO is available for
+     * degrees 0 through 7.
      *
-     * The object retains the source coefficients, durations, and one small basis
-     * matrix needed by backward(), but it does not retain or sample the source
-     * trajectory.
+     * Topology-only conversion matrices live in a shared immutable Kernel.
+     * Each object retains only its source values, control points, temporal
+     * metadata, and fixed-size scratch required by update()/backwardAdd(); it
+     * does not retain or sample the source trajectory.
      */
     template <int DIM>
     class ConvexHullRepresentation
@@ -78,6 +83,34 @@ namespace SplineTrajectory
             Eigen::VectorXd durations;
         };
 
+        struct Kernel
+        {
+            ConvexHullBasis basis = ConvexHullBasis::Bezier;
+            int source_num_coeffs = 0;
+            int derivative_order = 0;
+            int degree = 0;
+            int subdivision_depth = 0;
+            int leaves_per_segment = 1;
+            Eigen::MatrixXd stacked_power_to_control;
+            Eigen::MatrixXd stacked_control_to_power_adjoint;
+            Eigen::VectorXd derivative_factors;
+            Eigen::VectorXd leaf_begin_fractions;
+
+            std::size_t memoryBytes() const
+            {
+                return sizeof(Kernel) +
+                       static_cast<std::size_t>(
+                           stacked_power_to_control.size() +
+                           stacked_control_to_power_adjoint.size() +
+                           derivative_factors.size() +
+                           leaf_begin_fractions.size()) *
+                           sizeof(double);
+            }
+        };
+
+        static constexpr std::size_t kDefaultMemoryBudgetBytes =
+            std::size_t{64} * 1024 * 1024;
+
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
         ConvexHullRepresentation() = default;
@@ -93,19 +126,145 @@ namespace SplineTrajectory
                 throw std::invalid_argument("Convex-hull conversion requires an initialized PPolyND.");
             if (derivative_order < 0 || derivative_order > polynomial.getDegree())
                 throw std::invalid_argument("Derivative order must be between zero and the polynomial degree.");
-            if (subdivision_depth < 0 || subdivision_depth > 20)
-                throw std::invalid_argument("Bezier subdivision depth must be in [0, 20].");
-            if (basis == ConvexHullBasis::MINVO && subdivision_depth != 0)
-                throw std::invalid_argument("MINVO conversion does not use Bezier subdivision.");
-
             ConvexHullRepresentation result;
-            result.initialize(polynomial.getBreakpoints(),
-                              polynomial.getCoefficients(),
-                              polynomial.getNumCoeffs(),
-                              basis,
-                              derivative_order,
-                              subdivision_depth);
+            result.resetTopology(
+                polynomial.getNumSegments(), polynomial.getNumCoeffs(),
+                basis, derivative_order, subdivision_depth);
+            result.update(polynomial);
             return result;
+        }
+
+        void resetTopology(int num_source_segments,
+                           int source_num_coeffs,
+                           ConvexHullBasis basis,
+                           int derivative_order = 0,
+                           int subdivision_depth = 0,
+                           std::size_t memory_budget_bytes =
+                               kDefaultMemoryBudgetBytes)
+        {
+            if (num_source_segments <= 0 || source_num_coeffs <= 0)
+                throw std::invalid_argument(
+                    "Convex-hull topology requires positive segment and coefficient counts.");
+            if (derivative_order < 0 ||
+                derivative_order >= source_num_coeffs)
+                throw std::invalid_argument(
+                    "Derivative order must be smaller than the source coefficient count.");
+
+            const auto new_kernel = acquireKernel(
+                basis, source_num_coeffs, derivative_order,
+                subdivision_depth, memory_budget_bytes);
+            const std::size_t rows =
+                checkedProduct(
+                    checkedProduct(
+                        static_cast<std::size_t>(num_source_segments),
+                        static_cast<std::size_t>(new_kernel->leaves_per_segment)),
+                    static_cast<std::size_t>(new_kernel->degree + 1));
+            std::size_t workspace_bytes =
+                checkedProduct(
+                    checkedProduct(
+                        rows, static_cast<std::size_t>(DIM)),
+                    sizeof(double));
+            workspace_bytes = checkedAdd(
+                workspace_bytes,
+                checkedProduct(
+                    checkedProduct(
+                        checkedProduct(
+                            static_cast<std::size_t>(
+                                num_source_segments),
+                            static_cast<std::size_t>(
+                                source_num_coeffs)),
+                        static_cast<std::size_t>(DIM)),
+                    sizeof(double)));
+            workspace_bytes = checkedAdd(
+                workspace_bytes,
+                checkedProduct(
+                    checkedProduct(
+                        static_cast<std::size_t>(
+                            num_source_segments),
+                        static_cast<std::size_t>(
+                            new_kernel->degree + 1)),
+                    sizeof(double)));
+            workspace_bytes = checkedAdd(
+                workspace_bytes,
+                checkedProduct(
+                    checkedProduct(
+                        static_cast<std::size_t>(
+                            new_kernel->degree + 1),
+                        static_cast<std::size_t>(2 * DIM)),
+                    sizeof(double)));
+            workspace_bytes = checkedAdd(
+                workspace_bytes,
+                checkedProduct(
+                    static_cast<std::size_t>(
+                        num_source_segments),
+                    sizeof(double)));
+            workspace_bytes = checkedAdd(
+                workspace_bytes,
+                checkedProduct(
+                    checkedProduct(
+                        static_cast<std::size_t>(
+                            num_source_segments),
+                        static_cast<std::size_t>(
+                            new_kernel->leaves_per_segment)),
+                    sizeof(PieceInfo)));
+            if (new_kernel->memoryBytes() + workspace_bytes >
+                memory_budget_bytes)
+                throw std::length_error(
+                    "Convex-hull topology exceeds its memory budget.");
+            if (rows > static_cast<std::size_t>(
+                           std::numeric_limits<Eigen::Index>::max()))
+                throw std::length_error(
+                    "Convex-hull topology is too large for Eigen indices.");
+
+            basis_ = basis;
+            derivative_order_ = derivative_order;
+            degree_ = new_kernel->degree;
+            subdivision_depth_ = subdivision_depth;
+            leaves_per_segment_ = new_kernel->leaves_per_segment;
+            num_source_segments_ = num_source_segments;
+            source_num_coeffs_ = source_num_coeffs;
+            kernel_ = new_kernel;
+
+            controls_.resize(static_cast<Eigen::Index>(rows), DIM);
+            source_coefficients_.resize(
+                num_source_segments_ * source_num_coeffs_, DIM);
+            source_durations_.resize(num_source_segments_);
+            duration_powers_.resize(num_source_segments_, degree_ + 1);
+            normalized_derivative_.resize(degree_ + 1, DIM);
+            normalized_gradient_.resize(degree_ + 1, DIM);
+            pieces_.resize(num_source_segments_ * leaves_per_segment_);
+            initialized_ = false;
+        }
+
+        template <int ORDER>
+        void resetTopology(const PPolyND<DIM, ORDER> &polynomial,
+                           ConvexHullBasis basis,
+                           int derivative_order = 0,
+                           int subdivision_depth = 0,
+                           std::size_t memory_budget_bytes =
+                               kDefaultMemoryBudgetBytes)
+        {
+            if (!polynomial.isInitialized())
+                throw std::invalid_argument(
+                    "Convex-hull conversion requires an initialized PPolyND.");
+            resetTopology(polynomial.getNumSegments(),
+                          polynomial.getNumCoeffs(), basis,
+                          derivative_order, subdivision_depth,
+                          memory_budget_bytes);
+        }
+
+        template <int ORDER>
+        void update(const PPolyND<DIM, ORDER> &polynomial)
+        {
+            if (!polynomial.isInitialized())
+                throw std::invalid_argument(
+                    "Convex-hull conversion requires an initialized PPolyND.");
+            if (polynomial.getNumSegments() != num_source_segments_ ||
+                polynomial.getNumCoeffs() != source_num_coeffs_ ||
+                !kernel_)
+                throw std::invalid_argument(
+                    "PPolyND topology does not match resetTopology().");
+            update(polynomial.getBreakpoints(), polynomial.getCoefficients());
         }
 
         bool isInitialized() const { return initialized_; }
@@ -122,6 +281,7 @@ namespace SplineTrajectory
         const MatrixType &controls() const { return controls_; }
         const std::vector<PieceInfo> &pieces() const { return pieces_; }
         const PieceInfo &pieceInfo(int piece_index) const { return pieces_.at(piece_index); }
+        const std::shared_ptr<const Kernel> &kernel() const { return kernel_; }
 
         auto pieceControls(int piece_index) const
         {
@@ -169,56 +329,57 @@ namespace SplineTrajectory
             if (duration_gradients.size() != num_source_segments_)
                 duration_gradients.resize(num_source_segments_);
             duration_gradients.setZero();
+            backwardAdd(control_gradients, coefficient_gradients,
+                        duration_gradients);
+        }
+
+        /**
+         * @brief Allocation-free additive adjoint after resetTopology().
+         *
+         * The destination gradients must already have the exact topology. They
+         * are accumulated rather than cleared, allowing several hull costs and
+         * derivative orders to share one later spline propagateGrad() call.
+         */
+        void backwardAdd(const MatrixType &control_gradients,
+                         MatrixType &coefficient_gradients,
+                         Eigen::VectorXd &duration_gradients) const
+        {
+            if (!initialized_)
+                throw std::logic_error(
+                    "Cannot backpropagate an uninitialized representation.");
+            if (control_gradients.rows() != controls_.rows() ||
+                control_gradients.cols() != DIM)
+                throw std::invalid_argument(
+                    "Control-gradient dimensions do not match controls().");
+            if (coefficient_gradients.rows() !=
+                    num_source_segments_ * source_num_coeffs_ ||
+                coefficient_gradients.cols() != DIM ||
+                duration_gradients.size() != num_source_segments_)
+                throw std::invalid_argument(
+                    "backwardAdd() destinations must be pre-sized.");
 
             const int cp = controlsPerPiece();
-            MatrixType normalized_gradient(cp, DIM);
             for (int segment = 0; segment < num_source_segments_; ++segment)
             {
-                MatrixType base_gradient;
-                if (basis_ == ConvexHullBasis::Bezier && subdivision_depth_ > 0)
-                {
-                    std::vector<MatrixType, Eigen::aligned_allocator<MatrixType>> level;
-                    level.reserve(leaves_per_segment_);
-                    const int first_piece = segment * leaves_per_segment_;
-                    for (int leaf = 0; leaf < leaves_per_segment_; ++leaf)
-                    {
-                        level.emplace_back(control_gradients.middleRows(
-                            (first_piece + leaf) * cp, cp));
-                    }
-
-                    while (level.size() > 1)
-                    {
-                        std::vector<MatrixType, Eigen::aligned_allocator<MatrixType>> parent;
-                        parent.reserve(level.size() / 2);
-                        for (std::size_t i = 0; i < level.size(); i += 2)
-                        {
-                            parent.emplace_back(left_split_.transpose() * level[i] +
-                                                right_split_.transpose() * level[i + 1]);
-                        }
-                        level.swap(parent);
-                    }
-                    base_gradient = std::move(level.front());
-                }
-                else
-                {
-                    base_gradient = control_gradients.middleRows(segment * cp, cp);
-                }
-
-                normalized_gradient.noalias() =
-                    power_to_control_.transpose() * base_gradient;
+                const int first_row =
+                    segment * leaves_per_segment_ * cp;
+                normalized_gradient_.noalias() =
+                    kernel_->stacked_control_to_power_adjoint *
+                    control_gradients.middleRows(
+                        first_row, leaves_per_segment_ * cp);
                 const double duration = source_durations_(segment);
-                const double inv_duration = 1.0 / source_durations_(segment);
                 for (int normalized_power = 0;
                      normalized_power <= degree_;
                      ++normalized_power)
                 {
                     const int k = normalized_power + derivative_order_;
                     const double scale =
-                        fallingFactorial(k, derivative_order_) *
-                        std::pow(duration, normalized_power);
+                        kernel_->derivative_factors(normalized_power) *
+                        duration_powers_(segment, normalized_power);
                     coefficient_gradients.row(
                         segment * source_num_coeffs_ + k) +=
-                        scale * normalized_gradient.row(normalized_power);
+                        scale *
+                        normalized_gradient_.row(normalized_power);
 
                     if (normalized_power > 0)
                     {
@@ -227,12 +388,55 @@ namespace SplineTrajectory
                                 segment * source_num_coeffs_ + k);
                         duration_gradients(segment) +=
                             (static_cast<double>(normalized_power) *
-                             inv_duration * scale) *
-                            normalized_gradient.row(normalized_power)
+                             scale / duration) *
+                            normalized_gradient_.row(normalized_power)
                                 .dot(source_coefficient);
                     }
                 }
             }
+        }
+
+        /**
+         * @brief Add gradients of piece start times and durations to independent
+         * source durations and the common trajectory start time.
+         */
+        void backwardPieceTimesAdd(
+            const Eigen::Ref<const Eigen::VectorXd> &piece_start_gradients,
+            const Eigen::Ref<const Eigen::VectorXd> &piece_duration_gradients,
+            Eigen::Ref<Eigen::VectorXd> source_duration_gradients,
+            double &source_start_time_gradient) const
+        {
+            if (!initialized_ ||
+                piece_start_gradients.size() != numPieces() ||
+                piece_duration_gradients.size() != numPieces() ||
+                source_duration_gradients.size() != num_source_segments_)
+                throw std::invalid_argument(
+                    "Piece-time gradient dimensions do not match the workspace.");
+
+            double later_start_sum = 0.0;
+            for (int segment = num_source_segments_ - 1;
+                 segment >= 0; --segment)
+            {
+                double this_start_sum = 0.0;
+                double local_duration_gradient = 0.0;
+                for (int leaf = 0; leaf < leaves_per_segment_; ++leaf)
+                {
+                    const int piece =
+                        segment * leaves_per_segment_ + leaf;
+                    const double start_gradient =
+                        piece_start_gradients(piece);
+                    this_start_sum += start_gradient;
+                    local_duration_gradient +=
+                        kernel_->leaf_begin_fractions(leaf) *
+                            start_gradient +
+                        piece_duration_gradients(piece) /
+                            static_cast<double>(leaves_per_segment_);
+                }
+                source_duration_gradients(segment) +=
+                    later_start_sum + local_duration_gradient;
+                later_start_sum += this_start_sum;
+            }
+            source_start_time_gradient += later_start_sum;
         }
 
         /**
@@ -260,10 +464,11 @@ namespace SplineTrajectory
         MatrixType controls_;
         MatrixType source_coefficients_;
         Eigen::VectorXd source_durations_;
+        Eigen::MatrixXd duration_powers_;
+        mutable MatrixType normalized_gradient_;
+        MatrixType normalized_derivative_;
         std::vector<PieceInfo> pieces_;
-        Eigen::MatrixXd power_to_control_;
-        Eigen::MatrixXd left_split_;
-        Eigen::MatrixXd right_split_;
+        std::shared_ptr<const Kernel> kernel_;
 
         static double binomial(int n, int k)
         {
@@ -365,115 +570,253 @@ namespace SplineTrajectory
             return b;
         }
 
-        static void makeHalfSplitMatrices(int degree,
-                                          Eigen::MatrixXd &left,
-                                          Eigen::MatrixXd &right)
+        static std::size_t checkedProduct(std::size_t a, std::size_t b)
         {
-            const int size = degree + 1;
-            left = Eigen::MatrixXd::Zero(size, size);
-            right = Eigen::MatrixXd::Zero(size, size);
-            for (int i = 0; i <= degree; ++i)
-            {
-                const double left_scale = std::ldexp(1.0, -i);
-                for (int j = 0; j <= i; ++j)
-                    left(i, j) = binomial(i, j) * left_scale;
-
-                const int remaining = degree - i;
-                const double right_scale = std::ldexp(1.0, -remaining);
-                for (int j = i; j <= degree; ++j)
-                    right(i, j) = binomial(remaining, j - i) * right_scale;
-            }
+            if (a != 0 &&
+                b > std::numeric_limits<std::size_t>::max() / a)
+                throw std::length_error(
+                    "Convex-hull topology size overflow.");
+            return a * b;
         }
 
-        void initialize(const std::vector<double> &breakpoints,
-                        const MatrixType &coefficients,
-                        int source_num_coeffs,
-                        ConvexHullBasis basis,
-                        int derivative_order,
-                        int subdivision_depth)
+        static std::size_t checkedAdd(std::size_t a, std::size_t b)
         {
-            basis_ = basis;
-            derivative_order_ = derivative_order;
-            source_num_coeffs_ = source_num_coeffs;
-            degree_ = source_num_coeffs_ - derivative_order_ - 1;
-            subdivision_depth_ = subdivision_depth;
-            leaves_per_segment_ =
-                basis_ == ConvexHullBasis::Bezier ? (1 << subdivision_depth_) : 1;
-            num_source_segments_ = static_cast<int>(breakpoints.size()) - 1;
-            source_coefficients_ = coefficients;
-            source_durations_.resize(num_source_segments_);
+            if (b > std::numeric_limits<std::size_t>::max() - a)
+                throw std::length_error(
+                    "Convex-hull topology size overflow.");
+            return a + b;
+        }
 
-            if (basis_ == ConvexHullBasis::MINVO && degree_ > 7)
+        static std::uint64_t kernelKey(ConvexHullBasis basis,
+                                       int source_num_coeffs,
+                                       int derivative_order,
+                                       int subdivision_depth)
+        {
+            return (static_cast<std::uint64_t>(basis) << 56) |
+                   (static_cast<std::uint64_t>(source_num_coeffs) << 40) |
+                   (static_cast<std::uint64_t>(derivative_order) << 24) |
+                   static_cast<std::uint64_t>(subdivision_depth);
+        }
+
+        static std::shared_ptr<const Kernel> buildKernel(
+            ConvexHullBasis basis,
+            int source_num_coeffs,
+            int derivative_order,
+            int subdivision_depth,
+            std::size_t memory_budget_bytes)
+        {
+            if (subdivision_depth < 0)
+                throw std::invalid_argument(
+                    "Subdivision depth must be non-negative.");
+            if (subdivision_depth >=
+                std::numeric_limits<int>::digits - 1)
+                throw std::length_error(
+                    "Subdivision depth exceeds integer index capacity.");
+
+            const int degree =
+                source_num_coeffs - derivative_order - 1;
+            if (basis == ConvexHullBasis::MINVO && degree > 7)
                 throw std::invalid_argument(
                     "Exact MINVO matrices are available for polynomial degrees 0 through 7.");
 
-            power_to_control_ = powerToControlMatrix(basis_, degree_);
-            const int cp = controlsPerPiece();
-            controls_.resize(num_source_segments_ * leaves_per_segment_ * cp, DIM);
-            pieces_.clear();
-            pieces_.reserve(num_source_segments_ * leaves_per_segment_);
-            if (basis_ == ConvexHullBasis::Bezier && subdivision_depth_ > 0)
-                makeHalfSplitMatrices(degree_, left_split_, right_split_);
+            const int cp = degree + 1;
+            const int leaves = int{1} << subdivision_depth;
+            const std::size_t stacked_rows =
+                checkedProduct(static_cast<std::size_t>(leaves),
+                               static_cast<std::size_t>(cp));
+            const std::size_t matrix_elements =
+                checkedProduct(stacked_rows,
+                               static_cast<std::size_t>(cp));
+            std::size_t kernel_bytes = sizeof(Kernel);
+            kernel_bytes = checkedAdd(
+                kernel_bytes,
+                checkedProduct(
+                    checkedProduct(
+                        matrix_elements, std::size_t{2}),
+                    sizeof(double)));
+            kernel_bytes = checkedAdd(
+                kernel_bytes,
+                checkedProduct(
+                    checkedAdd(
+                        static_cast<std::size_t>(cp),
+                        static_cast<std::size_t>(leaves)),
+                    sizeof(double)));
+            if (kernel_bytes > memory_budget_bytes)
+                throw std::length_error(
+                    "Convex-hull kernel exceeds its memory budget.");
 
-            MatrixType normalized_derivative(controlsPerPiece(), DIM);
-            MatrixType base_controls(controlsPerPiece(), DIM);
-            for (int segment = 0; segment < num_source_segments_; ++segment)
+            auto kernel = std::make_shared<Kernel>();
+            kernel->basis = basis;
+            kernel->source_num_coeffs = source_num_coeffs;
+            kernel->derivative_order = derivative_order;
+            kernel->degree = degree;
+            kernel->subdivision_depth = subdivision_depth;
+            kernel->leaves_per_segment = leaves;
+            kernel->stacked_power_to_control.resize(
+                static_cast<Eigen::Index>(stacked_rows), cp);
+            kernel->derivative_factors.resize(cp);
+            kernel->leaf_begin_fractions.resize(leaves);
+
+            const Eigen::MatrixXd basis_matrix =
+                powerToControlMatrix(basis, degree);
+            Eigen::MatrixXd restriction(cp, cp);
+            std::vector<long double> a_powers(cp, 1.0L);
+            std::vector<long double> h_powers(cp, 1.0L);
+            for (int leaf = 0; leaf < leaves; ++leaf)
             {
-                const double duration = breakpoints[segment + 1] - breakpoints[segment];
+                const long double a =
+                    static_cast<long double>(leaf) /
+                    static_cast<long double>(leaves);
+                const long double h =
+                    1.0L / static_cast<long double>(leaves);
+                kernel->leaf_begin_fractions(leaf) =
+                    static_cast<double>(a);
+                for (int power = 1; power <= degree; ++power)
+                {
+                    a_powers[power] =
+                        a_powers[power - 1] * a;
+                    h_powers[power] =
+                        h_powers[power - 1] * h;
+                }
+                restriction.setZero();
+                for (int k = 0; k <= degree; ++k)
+                {
+                    for (int j = 0; j <= k; ++j)
+                    {
+                        restriction(j, k) =
+                            static_cast<double>(
+                                static_cast<long double>(binomial(k, j)) *
+                                a_powers[k - j] *
+                                h_powers[j]);
+                    }
+                }
+                kernel->stacked_power_to_control.middleRows(
+                    leaf * cp, cp).noalias() =
+                    basis_matrix * restriction;
+            }
+            kernel->stacked_control_to_power_adjoint =
+                kernel->stacked_power_to_control.transpose();
+            for (int power = 0; power <= degree; ++power)
+                kernel->derivative_factors(power) =
+                    fallingFactorial(
+                        power + derivative_order,
+                        derivative_order);
+            return kernel;
+        }
+
+        static std::shared_ptr<const Kernel> acquireKernel(
+            ConvexHullBasis basis,
+            int source_num_coeffs,
+            int derivative_order,
+            int subdivision_depth,
+            std::size_t memory_budget_bytes)
+        {
+            using Cache =
+                std::unordered_map<std::uint64_t,
+                                   std::weak_ptr<const Kernel>>;
+            static Cache cache;
+            static std::mutex cache_mutex;
+            const std::uint64_t key =
+                kernelKey(basis, source_num_coeffs,
+                          derivative_order, subdivision_depth);
+
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            const auto found = cache.find(key);
+            if (found != cache.end())
+            {
+                if (auto kernel = found->second.lock())
+                {
+                    if (kernel->memoryBytes() > memory_budget_bytes)
+                        throw std::length_error(
+                            "Cached convex-hull kernel exceeds the requested memory budget.");
+                    return kernel;
+                }
+            }
+            auto kernel = buildKernel(
+                basis, source_num_coeffs, derivative_order,
+                subdivision_depth, memory_budget_bytes);
+            cache[key] = kernel;
+            return kernel;
+        }
+
+        void update(const std::vector<double> &breakpoints,
+                    const MatrixType &coefficients)
+        {
+            if (!kernel_ ||
+                static_cast<int>(breakpoints.size()) !=
+                    num_source_segments_ + 1 ||
+                coefficients.rows() !=
+                    num_source_segments_ * source_num_coeffs_ ||
+                coefficients.cols() != DIM)
+                throw std::invalid_argument(
+                    "Convex-hull update dimensions do not match resetTopology().");
+
+            source_coefficients_ = coefficients;
+            const int cp = controlsPerPiece();
+            for (int segment = 0; segment < num_source_segments_;
+                 ++segment)
+            {
+                const double duration =
+                    breakpoints[segment + 1] - breakpoints[segment];
                 if (!(duration > 0.0) || !std::isfinite(duration))
                     throw std::invalid_argument(
                         "PPolyND breakpoints must have finite, strictly positive durations.");
                 source_durations_(segment) = duration;
+                duration_powers_(segment, 0) = 1.0;
+                for (int power = 1; power <= degree_; ++power)
+                    duration_powers_(segment, power) =
+                        duration_powers_(segment, power - 1) *
+                        duration;
 
-                for (int k = derivative_order_; k < source_num_coeffs_; ++k)
+                for (int power = 0; power <= degree_; ++power)
                 {
-                    const int normalized_power = k - derivative_order_;
-                    const double scale =
-                        fallingFactorial(k, derivative_order_) *
-                        std::pow(duration, normalized_power);
-                    normalized_derivative.row(normalized_power) =
-                        scale * source_coefficients_.row(
-                            segment * source_num_coeffs_ + k);
+                    const int source_power =
+                        power + derivative_order_;
+                    normalized_derivative_.row(power) =
+                        kernel_->derivative_factors(power) *
+                        duration_powers_(segment, power) *
+                        source_coefficients_.row(
+                            segment * source_num_coeffs_ +
+                            source_power);
                 }
 
-                base_controls.noalias() =
-                    power_to_control_ * normalized_derivative;
+                const int first_row =
+                    segment * leaves_per_segment_ * cp;
+                controls_.middleRows(
+                    first_row,
+                    leaves_per_segment_ * cp).noalias() =
+                    kernel_->stacked_power_to_control *
+                    normalized_derivative_;
 
-                std::vector<MatrixType, Eigen::aligned_allocator<MatrixType>> level;
-                level.emplace_back(base_controls);
-                for (int depth = 0; depth < subdivision_depth_; ++depth)
+                for (int leaf = 0; leaf < leaves_per_segment_;
+                     ++leaf)
                 {
-                    std::vector<MatrixType, Eigen::aligned_allocator<MatrixType>> children;
-                    children.reserve(level.size() * 2);
-                    for (const MatrixType &parent : level)
-                    {
-                        children.emplace_back(left_split_ * parent);
-                        children.emplace_back(right_split_ * parent);
-                    }
-                    level.swap(children);
-                }
-
-                for (int leaf = 0; leaf < leaves_per_segment_; ++leaf)
-                {
-                    const int piece_index = segment * leaves_per_segment_ + leaf;
-                    controls_.middleRows(piece_index * cp, cp) = level[leaf];
-
+                    const int piece_index =
+                        segment * leaves_per_segment_ + leaf;
                     const double begin_fraction =
-                        static_cast<double>(leaf) / static_cast<double>(leaves_per_segment_);
-                    const double end_fraction =
-                        static_cast<double>(leaf + 1) / static_cast<double>(leaves_per_segment_);
-                    pieces_.push_back(PieceInfo{
+                        kernel_->leaf_begin_fractions(leaf);
+                    pieces_[piece_index] = PieceInfo{
                         segment,
                         leaf,
                         begin_fraction,
-                        end_fraction,
-                        breakpoints[segment] + begin_fraction * duration,
-                        duration / static_cast<double>(leaves_per_segment_)});
+                        static_cast<double>(leaf + 1) /
+                            static_cast<double>(leaves_per_segment_),
+                        breakpoints[segment] +
+                            begin_fraction * duration,
+                        duration /
+                            static_cast<double>(leaves_per_segment_)};
                 }
             }
             initialized_ = true;
         }
     };
+
+    template <int DIM>
+    using ConvexHullWorkspace = ConvexHullRepresentation<DIM>;
+
+    template <int DIM>
+    using ConvexHullKernel =
+        typename ConvexHullRepresentation<DIM>::Kernel;
 
     template <int DIM, int ORDER>
     inline ConvexHullRepresentation<DIM>
@@ -489,11 +832,12 @@ namespace SplineTrajectory
     template <int DIM, int ORDER>
     inline ConvexHullRepresentation<DIM>
     toMINVO(const PPolyND<DIM, ORDER> &polynomial,
-            int derivative_order = 0)
+            int derivative_order = 0,
+            int subdivision_depth = 0)
     {
         return ConvexHullRepresentation<DIM>::fromPPoly(
             polynomial, ConvexHullBasis::MINVO,
-            derivative_order, 0);
+            derivative_order, subdivision_depth);
     }
 }
 

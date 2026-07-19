@@ -1,9 +1,10 @@
 # SplineTrajectory
 
 可选单头文件 [`include/ConvexHullBasis.hpp`](include/ConvexHullBasis.hpp)
-提供 `PPolyND` 到 Bezier 和 0–7 次 MINVO 控制凸包的精确转换、任意物理时间
-导数、控制点梯度到多项式系数和分段时长的伴随反传，以及任意层稳定
-Bezier 二分。数学推导、API 和优化示例见
+提供 `PPolyND` 到 Bezier 和 0–7 次 MINVO 控制凸包的解析转换、任意物理时间
+导数、控制点梯度到多项式系数和分段时长的伴随反传，以及两种基的任意层
+细分。共享不可变 Kernel 与可复用 Workspace 使优化热路径不重新分配。
+数学推导、API 和优化示例见
 [`docs/convex_hull_basis_zh.md`](docs/convex_hull_basis_zh.md)。
 实测转换与反向传播耗时见
 [`docs/convex_hull_performance_zh.md`](docs/convex_hull_performance_zh.md)。
@@ -29,6 +30,9 @@ Bezier 二分。数学推导、API 和优化示例见
 | 三次样条 | 3 阶 | 加速度 | MINCO S2 |
 | 五次样条 | 5 阶 | Jerk | MINCO S3 |
 | 七次样条 | 7 阶 | Snap | MINCO S4 |
+
+也可统一使用 `MinDerivativeSplineND<DIM, S>`：`S=2/3/4` 在编译期分别
+选择上述 cubic/quintic/septic 专用实现，旧类型名保持兼容。
 
 ## 🔁 梯度传播
 
@@ -67,6 +71,7 @@ Bezier 二分。数学推导、API 和优化示例见
 - `TimeMap`，用于将无约束变量映射到正时间段
 - `SpatialMap`，用于将无约束变量映射到物理空间点、走廊或 polytope 约束状态
 - 积分型、离散路点型、整条轨迹型代价接口
+- 系数型 `CoefficientCost`，用于凸包代价累加后统一执行一次样条伴随传播
 - `AuxiliaryStateMap`，用于表达共享时间变量、拼接状态或其他低维附加优化变量
 - 面向 L-BFGS 等优化器的统一目标函数组织方式
 

@@ -78,6 +78,7 @@ target_link_libraries(test_spline_optimizer Eigen3::Eigen)
 
 add_executable(test_convex_hull_basis test_convex_hull_basis.cpp)
 target_link_libraries(test_convex_hull_basis Eigen3::Eigen)
+target_compile_definitions(test_convex_hull_basis PRIVATE EIGEN_RUNTIME_NO_MALLOC)
 
 add_executable(benchmark_convex_hull_basis benchmarks/benchmark_convex_hull_basis.cpp)
 target_link_libraries(benchmark_convex_hull_basis Eigen3::Eigen)

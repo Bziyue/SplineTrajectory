@@ -70,19 +70,6 @@ struct ZeroIntegralCost
     }
 };
 
-void addGradients(Spline::Gradients &destination,
-                  const Spline::Gradients &source)
-{
-    destination.times += source.times;
-    destination.inner_points += source.inner_points;
-    destination.start.p += source.start.p;
-    destination.start.v += source.start.v;
-    destination.start.a += source.start.a;
-    destination.end.p += source.end.p;
-    destination.end.v += source.end.v;
-    destination.end.a += source.end.a;
-}
-
 struct HullTrajectoryCost
 {
     enum class Environment
@@ -105,6 +92,12 @@ struct HullTrajectoryCost
     double acceleration_weight = 30.0;
     int position_subdivision_depth = 2;
     int dynamics_subdivision_depth = 1;
+    mutable Hull position_workspace;
+    mutable Hull velocity_workspace;
+    mutable Hull acceleration_workspace;
+    mutable Matrix position_gradient;
+    mutable Matrix velocity_gradient;
+    mutable Matrix acceleration_gradient;
 
     static double addNormUpperPenalty(const Matrix &controls,
                                       double upper,
@@ -193,53 +186,64 @@ struct HullTrajectoryCost
         return cost;
     }
 
+    static void prepareWorkspace(Hull &workspace,
+                                 Matrix &control_gradient,
+                                 const Spline::TrajectoryType &polynomial,
+                                 int derivative,
+                                 int subdivision_depth)
+    {
+        if (!workspace.kernel() ||
+            workspace.numSourceSegments() != polynomial.getNumSegments() ||
+            workspace.sourceDegree() + 1 != polynomial.getNumCoeffs() ||
+            workspace.derivativeOrder() != derivative ||
+            workspace.subdivisionDepth() != subdivision_depth)
+        {
+            workspace.resetTopology(
+                polynomial, SplineTrajectory::ConvexHullBasis::Bezier,
+                derivative, subdivision_depth);
+            control_gradient.resize(
+                workspace.controls().rows(), 2);
+        }
+        workspace.update(polynomial);
+        control_gradient.setZero();
+    }
+
     double operator()(Spline &spline,
                       const std::vector<double> &,
-                      const Matrix &,
                       double,
-                      const SplineTrajectory::BoundaryConditions<2> &,
-                      Spline::Gradients &gradients) const
+                      Matrix &coefficient_gradients,
+                      Eigen::VectorXd &duration_gradients,
+                      double &) const
     {
         const auto &polynomial = spline.getPPoly();
-        const Hull position =
-            SplineTrajectory::toBezier(
-                polynomial, 0, position_subdivision_depth);
-        const Hull velocity =
-            SplineTrajectory::toBezier(
-                polynomial, 1, dynamics_subdivision_depth);
-        const Hull acceleration =
-            SplineTrajectory::toBezier(
-                polynomial, 2, dynamics_subdivision_depth);
+        prepareWorkspace(position_workspace, position_gradient,
+                         polynomial, 0, position_subdivision_depth);
+        prepareWorkspace(velocity_workspace, velocity_gradient,
+                         polynomial, 1, dynamics_subdivision_depth);
+        prepareWorkspace(acceleration_workspace,
+                         acceleration_gradient, polynomial, 2,
+                         dynamics_subdivision_depth);
 
-        Matrix position_gradient =
-            Matrix::Zero(position.controls().rows(), 2);
-        Matrix velocity_gradient =
-            Matrix::Zero(velocity.controls().rows(), 2);
-        Matrix acceleration_gradient =
-            Matrix::Zero(acceleration.controls().rows(), 2);
-
-        double cost = addPositionPenalty(position, position_gradient);
+        double cost =
+            addPositionPenalty(position_workspace, position_gradient);
         cost += addNormUpperPenalty(
-            velocity.controls(), max_speed - dynamics_control_buffer,
+            velocity_workspace.controls(),
+            max_speed - dynamics_control_buffer,
             speed_weight, velocity_gradient);
         cost += addNormUpperPenalty(
-            acceleration.controls(), max_acceleration - dynamics_control_buffer,
+            acceleration_workspace.controls(),
+            max_acceleration - dynamics_control_buffer,
             acceleration_weight, acceleration_gradient);
 
-        auto position_backward = position.backward(position_gradient);
-        const auto velocity_backward = velocity.backward(velocity_gradient);
-        const auto acceleration_backward =
-            acceleration.backward(acceleration_gradient);
-        position_backward.coefficients += velocity_backward.coefficients;
-        position_backward.coefficients += acceleration_backward.coefficients;
-        position_backward.durations += velocity_backward.durations;
-        position_backward.durations += acceleration_backward.durations;
-
-        Spline::Gradients hull_gradients;
-        spline.propagateGrad(position_backward.coefficients,
-                             position_backward.durations,
-                             hull_gradients);
-        addGradients(gradients, hull_gradients);
+        position_workspace.backwardAdd(
+            position_gradient, coefficient_gradients,
+            duration_gradients);
+        velocity_workspace.backwardAdd(
+            velocity_gradient, coefficient_gradients,
+            duration_gradients);
+        acceleration_workspace.backwardAdd(
+            acceleration_gradient, coefficient_gradients,
+            duration_gradients);
         return cost;
     }
 };
@@ -484,7 +488,7 @@ void runScenario(const std::string &name,
     ZeroIntegralCost integral_cost;
     const auto spec =
         Optimizer::makeEvaluateSpec(time_cost, integral_cost)
-            .withTrajectoryCost(hull_cost);
+            .withCoefficientCost(hull_cost);
 
     Eigen::VectorXd scratch_gradient(x.size());
     optimizer.evaluatePrepared(context, initial_x, scratch_gradient, spec);

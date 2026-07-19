@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "ConvexHullBasis.hpp"
 #include "SplineOptimizer.hpp"
 
 namespace
@@ -133,6 +134,43 @@ struct ZeroTrajectoryCost
         (void)bc;
         (void)grads;
         return 0.0;
+    }
+};
+
+struct QuadraticHullCoefficientCost
+{
+    using Spline = SplineTrajectory::QuinticSplineND<3>;
+    using Matrix = Spline::MatrixType;
+    using Hull = SplineTrajectory::ConvexHullRepresentation<3>;
+
+    mutable Hull workspace;
+    mutable Matrix control_gradients;
+
+    double operator()(Spline &spline,
+                      const std::vector<double> &,
+                      double,
+                      Matrix &coefficient_gradients,
+                      Eigen::VectorXd &duration_gradients,
+                      double &) const
+    {
+        const auto &polynomial = spline.getPPoly();
+        if (!workspace.kernel() ||
+            workspace.numSourceSegments() !=
+                polynomial.getNumSegments())
+        {
+            workspace.resetTopology(
+                polynomial,
+                SplineTrajectory::ConvexHullBasis::MINVO,
+                1, 2);
+            control_gradients.resize(
+                workspace.controls().rows(), 3);
+        }
+        workspace.update(polynomial);
+        control_gradients = workspace.controls();
+        workspace.backwardAdd(
+            control_gradients, coefficient_gradients,
+            duration_gradients);
+        return 0.5 * workspace.controls().squaredNorm();
     }
 };
 
@@ -379,6 +417,34 @@ void testIntegralPointMetadata()
                             left_end.segment_duration) < 1e-14,
                "Quadrature step size must come from the optimizer's decoded duration.");
 }
+
+void testCoefficientCostUsesSingleSplineAdjoint()
+{
+    using Optimizer = SplineTrajectory::SplineOptimizer<
+        3, SplineTrajectory::MinDerivativeSplineND<3, 3>,
+        SplineTrajectory::IdentityTimeMap>;
+    Optimizer optimizer;
+    Optimizer::OptimizationContext context;
+    auto problem = makeProblem<Optimizer>(2, true);
+    expectTrue(
+        static_cast<bool>(
+            optimizer.prepareContext(problem, context)),
+        "Coefficient-cost context preparation should succeed.");
+
+    LinearTimeCost time_cost;
+    ZeroIntegralCost integral_cost;
+    QuadraticHullCoefficientCost hull_cost;
+    const auto spec =
+        Optimizer::makeEvaluateSpec(time_cost, integral_cost)
+            .withCoefficientCost(hull_cost);
+    const Eigen::VectorXd x =
+        optimizer.generateInitialGuess(context);
+    const auto check =
+        optimizer.checkGradients(context, x, spec, 2e-6, 2e-3);
+    expectTrue(
+        check.valid && check.max_abs_error < 2e-4,
+        "CoefficientCost hull gradients must pass the optimizer-level finite-difference check.");
+}
 } // namespace
 
 int main()
@@ -389,6 +455,7 @@ int main()
     testCheckGradientsRestoresWorkingState();
     testPreparedEvaluationAndWorkingStateSynchronization();
     testIntegralPointMetadata();
+    testCoefficientCostUsesSingleSplineAdjoint();
 
     std::cout << "test_spline_optimizer passed" << std::endl;
     return 0;

@@ -148,6 +148,35 @@ Under the current optimizer data model, `SampleCost` is a discrete cost on:
 It does not currently expose independent sample-backward channels for
 `v/a/j/s`.
 
+## CoefficientCost Protocol
+
+Use this protocol for Bezier/MINVO hull costs and other objectives whose natural
+gradient is expressed on the spline polynomial coefficients:
+
+```cpp
+struct CoefficientCostProtocol
+{
+    double operator()(QuinticSplineND<3>& spline,
+                      const std::vector<double>& Ts,
+                      double start_time,
+                      QuinticSplineND<3>::MatrixType& grad_coeffs,
+                      Eigen::VectorXd& grad_times,
+                      double& grad_start_time) const;
+};
+```
+
+Attach an lvalue callable with:
+
+```cpp
+auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost)
+    .withCoefficientCost(coefficient_cost);
+```
+
+The callback is borrowed through a pointer plus a compile-time thunk: binding and
+invocation do not allocate. It runs before the spline adjoint and must add to the
+provided gradients rather than clear or resize them. `SplineOptimizer` then calls
+`propagateGrad()` exactly once for all integral, sample, and coefficient costs.
+
 ## TrajectoryCost Protocol
 
 ```cpp
@@ -163,11 +192,10 @@ struct TrajectoryCostProtocol
 };
 ```
 
-The working spline is mutable only so a whole-trajectory cost can call
-`spline.propagateGrad(coeff_grads, time_grads, grads)` after producing gradients
-in polynomial-coefficient space. Existing callables accepting
-`const QuinticSplineND<3>&` remain compatible. Otherwise, treat the spline as
-read-only.
+`TrajectoryCost` runs after the spline coefficient adjoint and works directly on
+the final spline parameter gradients. New polynomial-coefficient or convex-hull
+costs should use `CoefficientCost`; this avoids a second `propagateGrad()` call.
+Existing trajectory callables remain compatible.
 
 ## AuxiliaryStateMap Protocol
 
@@ -202,6 +230,24 @@ struct AuxiliaryStateMapProtocol
                     Eigen::VectorXd& grad_z) const;
 };
 ```
+
+If the auxiliary map changes the common trajectory start time, it can use the
+extended backward overload:
+
+```cpp
+double backward(const Eigen::VectorXd& z,
+                const QuinticSplineND<3>& spline,
+                const std::vector<double>& times,
+                const MatrixType& waypoints,
+                double start_time,
+                const BoundaryConditions<3>& bc,
+                QuinticSplineND<3>::Gradients& grads,
+                double grad_start_time,
+                Eigen::VectorXd& grad_z) const;
+```
+
+The optimizer detects this overload at compile time and forwards direct
+`CoefficientCost` gradients of `start_time`.
 
 ## Runtime Integration Notes
 
@@ -240,6 +286,11 @@ needed by later evaluation, including:
 
 Later `setConfig(...)` calls affect newly prepared contexts, but do not mutate
 existing prepared contexts.
+
+For a valid problem, `prepareContext(...)` also sizes the reusable evaluation
+buffers and performs one fixed-topology spline update. Consequently the first
+optimizer callback uses the same preallocated coefficient, gradient, sample-time,
+and auxiliary-gradient storage as later callbacks.
 
 Setup and validation style APIs use `Status`:
 
