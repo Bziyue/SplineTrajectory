@@ -29,6 +29,20 @@ def load_controls(path: Path) -> dict[int, np.ndarray]:
     return {key: np.asarray(value) for key, value in groups.items()}
 
 
+def load_control_pieces(path: Path) -> list[tuple[int, np.ndarray]]:
+    groups: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    source_segments: dict[int, int] = {}
+    with path.open(newline="") as stream:
+        for row in csv.DictReader(stream):
+            piece = int(row["piece"])
+            source_segments[piece] = int(row["source_segment"])
+            groups[piece].append((float(row["x"]), float(row["y"])))
+    return [
+        (source_segments[piece], np.asarray(groups[piece]))
+        for piece in sorted(groups)
+    ]
+
+
 def convex_hull(points: np.ndarray) -> np.ndarray:
     unique = sorted(set(map(tuple, np.asarray(points, dtype=float))))
     if len(unique) <= 2:
@@ -134,6 +148,114 @@ def draw_scenario(ax, data_dir: Path, name: str, title: str) -> None:
     ax.legend(fontsize=7, ncol=2, loc="upper center")
 
 
+def draw_bezier_subdivision_stack(data_dir: Path, image_dir: Path) -> Path:
+    trajectory = load_numeric_csv(
+        data_dir / "bezier_subdivision_trajectory.csv"
+    )
+    segment_colors = ("#0984e3", "#00a878", "#e17055")
+    fig, axes = plt.subplots(
+        5,
+        1,
+        figsize=(13.5, 16.5),
+        dpi=180,
+        sharex=True,
+        sharey=True,
+    )
+
+    all_points = np.column_stack((trajectory["x"], trajectory["y"]))
+    padding = 0.08 * np.ptp(all_points, axis=0)
+    padding = np.maximum(padding, np.array([0.15, 0.15]))
+    lower = np.min(all_points, axis=0) - padding
+    upper = np.max(all_points, axis=0) + padding
+
+    for depth, ax in enumerate(axes):
+        pieces = load_control_pieces(
+            data_dir / f"bezier_subdivision_depth_{depth}.csv"
+        )
+        for source_segment, points in pieces:
+            color = segment_colors[source_segment]
+            hull = convex_hull(points)
+            if len(hull) >= 3:
+                closed = np.vstack([hull, hull[0]])
+                ax.fill(
+                    closed[:, 0],
+                    closed[:, 1],
+                    facecolor=color,
+                    edgecolor=color,
+                    linewidth=1.0,
+                    alpha=0.18,
+                    zorder=1,
+                )
+            ax.plot(
+                points[:, 0],
+                points[:, 1],
+                "--o",
+                color=color,
+                linewidth=0.75,
+                markersize=2.2,
+                alpha=0.82,
+                zorder=6,
+            )
+
+        ax.plot(
+            trajectory["x"],
+            trajectory["y"],
+            color="#1f2328",
+            linewidth=1.8,
+            label="trajectory",
+            zorder=4,
+        )
+        pieces_per_source = 1 << depth
+        ax.set_title(
+            f"Subdivision depth {depth} — "
+            f"{pieces_per_source} piece"
+            f"{'s' if pieces_per_source > 1 else ''} per source segment, "
+            f"{3 * pieces_per_source} hulls total",
+            fontsize=12,
+        )
+        ax.set_ylabel("y")
+        ax.set_xlim(lower[0], upper[0])
+        ax.set_ylim(lower[1], upper[1])
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(alpha=0.18)
+
+    axes[-1].set_xlabel("x")
+    legend_handles = [
+        plt.Line2D(
+            [0], [0], color="#1f2328", linewidth=2.1, label="trajectory"
+        )
+    ]
+    for segment, color in enumerate(segment_colors, start=1):
+        legend_handles.append(
+            plt.Line2D(
+                [0],
+                [0],
+                color=color,
+                linestyle="--",
+                marker="o",
+                markersize=3,
+                linewidth=1.0,
+                label=f"source segment {segment}: control polygon / hull",
+            )
+        )
+    axes[0].legend(
+        handles=legend_handles,
+        fontsize=8,
+        ncol=2,
+        loc="upper center",
+    )
+    fig.suptitle(
+        "Bezier convex-hull tightening on the same 3-segment quintic trajectory",
+        fontsize=15,
+        y=0.998,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.987))
+    output = image_dir / "bezier_subdivision_depths.png"
+    fig.savefig(output, bbox_inches="tight")
+    plt.close(fig)
+    return output
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build")
@@ -221,8 +343,13 @@ def main() -> None:
     fig.savefig(comparison, bbox_inches="tight")
     plt.close(fig)
 
+    subdivision_stack = draw_bezier_subdivision_stack(
+        args.data_dir, image_dir
+    )
+
     print(f"Wrote {overview}")
     print(f"Wrote {comparison}")
+    print(f"Wrote {subdivision_stack}")
 
 
 if __name__ == "__main__":

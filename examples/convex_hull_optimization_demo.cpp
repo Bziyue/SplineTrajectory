@@ -392,14 +392,51 @@ void writeTrajectory(const std::filesystem::path &path,
     }
 }
 
+void writeTrajectoryPrefix(const std::filesystem::path &path,
+                           const Spline &spline,
+                           int source_segments)
+{
+    std::ofstream stream(path);
+    stream << std::setprecision(17);
+    stream << "t,source_segment,x,y\n";
+    const auto &polynomial = spline.getPPoly();
+    const auto &breakpoints = polynomial.getBreakpoints();
+    const int segment_count =
+        std::min(source_segments, polynomial.getNumSegments());
+    constexpr int samples_per_segment = 160;
+    for (int segment = 0; segment < segment_count; ++segment)
+    {
+        for (int sample = 0; sample <= samples_per_segment; ++sample)
+        {
+            if (segment > 0 && sample == 0)
+                continue;
+            const double alpha =
+                static_cast<double>(sample) / samples_per_segment;
+            const double time =
+                breakpoints[segment] +
+                alpha *
+                    (breakpoints[segment + 1] -
+                     breakpoints[segment]);
+            const Vector position = polynomial.evaluate(time, 0);
+            stream << time << ',' << segment << ','
+                   << position.x() << ',' << position.y() << '\n';
+        }
+    }
+}
+
 void writeControls(const std::filesystem::path &path,
-                   const Hull &representation)
+                   const Hull &representation,
+                   int source_segments =
+                       std::numeric_limits<int>::max())
 {
     std::ofstream stream(path);
     stream << std::setprecision(17);
     stream << "piece,source_segment,local_control,x,y\n";
     for (int piece = 0; piece < representation.numPieces(); ++piece)
     {
+        if (representation.pieceInfo(piece).source_segment >=
+            source_segments)
+            continue;
         const auto controls = representation.pieceControls(piece);
         for (int local = 0; local < representation.controlsPerPiece(); ++local)
         {
@@ -540,6 +577,25 @@ void runScenario(const std::string &name,
                  result.history);
     writeEnvironment(output_directory / (name + "_environment.csv"),
                      hull_cost);
+
+    if (name == "esdf")
+    {
+        constexpr int displayed_segments = 3;
+        writeTrajectoryPrefix(
+            output_directory / "bezier_subdivision_trajectory.csv",
+            spline, displayed_segments);
+        for (int depth = 0; depth <= 4; ++depth)
+        {
+            const auto subdivision =
+                SplineTrajectory::toBezier(
+                    spline.getPPoly(), 0, depth);
+            writeControls(
+                output_directory /
+                    ("bezier_subdivision_depth_" +
+                     std::to_string(depth) + ".csv"),
+                subdivision, displayed_segments);
+        }
+    }
 
     double maximum_speed_control = 0.0;
     for (Eigen::Index row = 0; row < velocity.controls().rows(); ++row)
