@@ -58,6 +58,9 @@ target_link_libraries(quintic_spline_comparison Eigen3::Eigen)
 add_executable(robot_trajectory_planning examples/robot_trajectory_planning.cpp)
 target_link_libraries(robot_trajectory_planning Eigen3::Eigen)
 
+add_executable(convex_hull_optimization_demo examples/convex_hull_optimization_demo.cpp)
+target_link_libraries(convex_hull_optimization_demo Eigen3::Eigen)
+
 # boundary condition grad test
 add_executable(test_bc_grad test_bc_grad.cpp)
 target_link_libraries(test_bc_grad Eigen3::Eigen)
@@ -72,6 +75,12 @@ target_link_libraries(test_ppolyND Eigen3::Eigen)
 
 add_executable(test_spline_optimizer test_spline_optimizer.cpp)
 target_link_libraries(test_spline_optimizer Eigen3::Eigen)
+
+add_executable(test_convex_hull_basis test_convex_hull_basis.cpp)
+target_link_libraries(test_convex_hull_basis Eigen3::Eigen)
+
+add_executable(benchmark_convex_hull_basis benchmarks/benchmark_convex_hull_basis.cpp)
+target_link_libraries(benchmark_convex_hull_basis Eigen3::Eigen)
 
 # Compiler flags
 set(COMMON_COMPILE_FLAGS -Wall -Wextra)
@@ -88,10 +97,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(robot_trajectory_planning PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
+    target_compile_options(convex_hull_optimization_demo PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_bc_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_cost_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_ppolyND PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(test_spline_optimizer PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
+    target_compile_options(test_convex_hull_basis PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
+    target_compile_options(benchmark_convex_hull_basis PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
 else()
     target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
@@ -102,10 +114,13 @@ else()
     target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
     target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(robot_trajectory_planning PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+    target_compile_options(convex_hull_optimization_demo PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_bc_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_cost_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_ppolyND PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
     target_compile_options(test_spline_optimizer PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+    target_compile_options(test_convex_hull_basis PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+    target_compile_options(benchmark_convex_hull_basis PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
 endif()
 
 # Add chrono library for performance measurements
@@ -121,16 +136,19 @@ if(NOT WIN32)
     target_link_libraries(test_cost_grad pthread)
     target_link_libraries(test_ppolyND pthread)
     target_link_libraries(test_spline_optimizer pthread)
+    target_link_libraries(test_convex_hull_basis pthread)
+    target_link_libraries(convex_hull_optimization_demo pthread)
+    target_link_libraries(benchmark_convex_hull_basis pthread)
 endif()
 
 # Create custom targets for easy building
 add_custom_target(tests
-    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d test_with_min_snap_3d test_septic_spline_vs_minco_nd test_Grad test_bc_grad test_cost_grad test_ppolyND test_spline_optimizer
+    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d test_with_min_snap_3d test_septic_spline_vs_minco_nd test_Grad test_bc_grad test_cost_grad test_ppolyND test_spline_optimizer test_convex_hull_basis
     COMMENT "Building performance tests"
 )
 
 add_custom_target(examples
-    DEPENDS basic_cubic_spline quintic_spline_comparison robot_trajectory_planning 
+    DEPENDS basic_cubic_spline quintic_spline_comparison robot_trajectory_planning convex_hull_optimization_demo
     COMMENT "Building examples"
 )
 
@@ -154,10 +172,12 @@ message(STATUS "    * test_Grad")
 message(STATUS "    * test_ppolyND")
 message(STATUS "    * test_cost_grad")
 message(STATUS "    * test_spline_optimizer")
+message(STATUS "    * test_convex_hull_basis")
 message(STATUS "  - Examples:")
 message(STATUS "    * basic_cubic_spline")
 message(STATUS "    * quintic_spline_comparison") 
 message(STATUS "    * robot_trajectory_planning")
+message(STATUS "    * convex_hull_optimization_demo")
 message(STATUS "")
 message(STATUS "构建命令:")
 message(STATUS "  make tests     - 构建性能测试")

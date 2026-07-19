@@ -2,6 +2,14 @@
 
 Header-only C++ library for smooth N-dimensional minimum-control-effort spline trajectories. It is mathematically equivalent to [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER), with an O(N) block-tridiagonal solver, full-parameter gradient propagation, analytic energy gradients, and a componentized optimizer interface for cubic, quintic, and septic splines.
 
+The optional single header [`include/ConvexHullBasis.hpp`](include/ConvexHullBasis.hpp)
+adds exact Bezier and degree-0--7 MINVO control-hull representations for
+`PPolyND`, arbitrary physical-time derivatives, adjoint gradients to polynomial
+coefficients and segment durations, and stable arbitrary-depth binary Bezier
+subdivision. See the [mathematical and implementation notes](docs/convex_hull_basis_zh.md).
+Measured conversion, derivative, subdivision, and backward costs are reported
+in the [performance notes](docs/convex_hull_performance_zh.md).
+
 **English** | [中文](README_zh.md)
 
 ## ✨ Overview

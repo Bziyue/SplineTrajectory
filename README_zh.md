@@ -1,5 +1,13 @@
 # SplineTrajectory
 
+可选单头文件 [`include/ConvexHullBasis.hpp`](include/ConvexHullBasis.hpp)
+提供 `PPolyND` 到 Bezier 和 0–7 次 MINVO 控制凸包的精确转换、任意物理时间
+导数、控制点梯度到多项式系数和分段时长的伴随反传，以及任意层稳定
+Bezier 二分。数学推导、API 和优化示例见
+[`docs/convex_hull_basis_zh.md`](docs/convex_hull_basis_zh.md)。
+实测转换与反向传播耗时见
+[`docs/convex_hull_performance_zh.md`](docs/convex_hull_performance_zh.md)。
+
 一个纯头文件的 C++ 库，用于生成平滑的 N 维最小控制量样条轨迹。它与 [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER) 在数学上等价，并在实现上采用 O(N) 的块三对角求解结构，同时提供全控制参数梯度传播、能量解析梯度以及面向组件化优化的接口。
 
 [English](README.md) | **中文**

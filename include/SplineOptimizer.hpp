@@ -131,7 +131,7 @@ namespace SplineTrajectory
         template <typename T, typename SplineType, int DIM>
         struct HasTrajectoryCostInterface<T, SplineType, DIM, void_t<
             decltype(static_cast<double>(std::declval<T>()(
-                std::declval<const SplineType &>(),
+                std::declval<SplineType &>(),
                 std::declval<const std::vector<double> &>(),
                 std::declval<const typename SplineType::MatrixType &>(),
                 std::declval<double>(),

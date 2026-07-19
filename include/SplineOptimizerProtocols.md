@@ -154,7 +154,7 @@ It does not currently expose independent sample-backward channels for
 struct TrajectoryCostProtocol
 {
     // The concrete spline type is determined by SplineOptimizer<DIM, SplineType, ...>
-    double operator()(const QuinticSplineND<3>& spline,
+    double operator()(QuinticSplineND<3>& spline,
                       const std::vector<double>& Ts,
                       const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic>& waypoints,
                       double start_time,
@@ -162,6 +162,12 @@ struct TrajectoryCostProtocol
                       QuinticSplineND<3>::Gradients& grads) const;
 };
 ```
+
+The working spline is mutable only so a whole-trajectory cost can call
+`spline.propagateGrad(coeff_grads, time_grads, grads)` after producing gradients
+in polynomial-coefficient space. Existing callables accepting
+`const QuinticSplineND<3>&` remain compatible. Otherwise, treat the spline as
+read-only.
 
 ## AuxiliaryStateMap Protocol
 
