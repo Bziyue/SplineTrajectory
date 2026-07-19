@@ -315,6 +315,8 @@ cmake --build build --target test_convex_hull_basis convex_hull_optimization_dem
 - `docs/images/convex_hull_basis_comparison.png`
 - `docs/images/bezier_subdivision_depths.png`：同一条三段五次轨迹在细分
   深度 0 到 4 下的纵向凸包收缩对比。
+- `docs/images/minvo_subdivision_depths.png`：相同轨迹、相同坐标范围下的
+  MINVO 深度 0 到 4 纵向凸包收缩对比。
 
 转换、导数、反向传播和细分的微基准见
 [`convex_hull_performance_zh.md`](convex_hull_performance_zh.md)。

@@ -586,14 +586,23 @@ void runScenario(const std::string &name,
             spline, displayed_segments);
         for (int depth = 0; depth <= 4; ++depth)
         {
-            const auto subdivision =
+            const auto bezier_subdivision =
                 SplineTrajectory::toBezier(
                     spline.getPPoly(), 0, depth);
             writeControls(
                 output_directory /
                     ("bezier_subdivision_depth_" +
                      std::to_string(depth) + ".csv"),
-                subdivision, displayed_segments);
+                bezier_subdivision, displayed_segments);
+
+            const auto minvo_subdivision =
+                SplineTrajectory::toMINVO(
+                    spline.getPPoly(), 0, depth);
+            writeControls(
+                output_directory /
+                    ("minvo_subdivision_depth_" +
+                     std::to_string(depth) + ".csv"),
+                minvo_subdivision, displayed_segments);
         }
     }
 

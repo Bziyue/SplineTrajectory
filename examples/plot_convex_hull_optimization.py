@@ -148,7 +148,9 @@ def draw_scenario(ax, data_dir: Path, name: str, title: str) -> None:
     ax.legend(fontsize=7, ncol=2, loc="upper center")
 
 
-def draw_bezier_subdivision_stack(data_dir: Path, image_dir: Path) -> Path:
+def draw_subdivision_stack(
+    data_dir: Path, image_dir: Path, basis: str
+) -> Path:
     trajectory = load_numeric_csv(
         data_dir / "bezier_subdivision_trajectory.csv"
     )
@@ -170,7 +172,7 @@ def draw_bezier_subdivision_stack(data_dir: Path, image_dir: Path) -> Path:
 
     for depth, ax in enumerate(axes):
         pieces = load_control_pieces(
-            data_dir / f"bezier_subdivision_depth_{depth}.csv"
+            data_dir / f"{basis}_subdivision_depth_{depth}.csv"
         )
         for source_segment, points in pieces:
             color = segment_colors[source_segment]
@@ -245,12 +247,13 @@ def draw_bezier_subdivision_stack(data_dir: Path, image_dir: Path) -> Path:
         loc="upper center",
     )
     fig.suptitle(
-        "Bezier convex-hull tightening on the same 3-segment quintic trajectory",
+        f"{basis.upper() if basis == 'minvo' else basis.title()} "
+        "convex-hull tightening on the same 3-segment quintic trajectory",
         fontsize=15,
         y=0.998,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.987))
-    output = image_dir / "bezier_subdivision_depths.png"
+    output = image_dir / f"{basis}_subdivision_depths.png"
     fig.savefig(output, bbox_inches="tight")
     plt.close(fig)
     return output
@@ -343,13 +346,17 @@ def main() -> None:
     fig.savefig(comparison, bbox_inches="tight")
     plt.close(fig)
 
-    subdivision_stack = draw_bezier_subdivision_stack(
-        args.data_dir, image_dir
+    bezier_subdivision_stack = draw_subdivision_stack(
+        args.data_dir, image_dir, "bezier"
+    )
+    minvo_subdivision_stack = draw_subdivision_stack(
+        args.data_dir, image_dir, "minvo"
     )
 
     print(f"Wrote {overview}")
     print(f"Wrote {comparison}")
-    print(f"Wrote {subdivision_stack}")
+    print(f"Wrote {bezier_subdivision_stack}")
+    print(f"Wrote {minvo_subdivision_stack}")
 
 
 if __name__ == "__main__":
