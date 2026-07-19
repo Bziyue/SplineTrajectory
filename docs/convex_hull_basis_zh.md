@@ -5,61 +5,61 @@
 
 ## 1. 输入约定
 
-`PPolyND` 的第 \(s\) 段在局部物理时间
-\(\tau\in[0,T_s]\) 上按升幂保存：
+`PPolyND` 的第 $s$ 段在局部物理时间
+$\tau\in[0,T_s]$ 上按升幂保存：
 
-\[
+$$
 p_s(\tau)=\sum_{k=0}^{n}c_{s,k}\tau^k,\qquad
 c_{s,k}\in\mathbb R^D.
-\]
+$$
 
 转换不采样曲线。位置、速度、加速度等都使用同一个解析变换。对
-\(r\) 阶物理时间导数，令 \(m=n-r\)，再用
-\(u=\tau/T_s\in[0,1]\) 归一化：
+$r$ 阶物理时间导数，令 $m=n-r$，再用
+$u=\tau/T_s\in[0,1]$ 归一化：
 
-\[
+$$
 \frac{d^r p_s}{d\tau^r}(T_su)
 =\sum_{\ell=0}^{m}\hat c_{s,\ell}u^\ell,
 \qquad
 \hat c_{s,\ell}
 =\frac{(\ell+r)!}{\ell!}c_{s,\ell+r}T_s^\ell.
-\]
+$$
 
 这一步是稀疏对角变换，记作
-\(\hat C_s=N_r(T_s)C_s\)。
+$\hat C_s=N_r(T_s)C_s$。
 
 ## 2. 幂基到凸包基
 
-设 \(B_m\) 是“归一化升幂系数到控制点”的矩阵，则
+设 $B_m$ 是“归一化升幂系数到控制点”的矩阵，则
 
-\[
+$$
 V_s=B_m\hat C_s=B_mN_r(T_s)C_s=M_sC_s.
-\]
+$$
 
-`V_s` 每一行是一个 \(D\) 维控制点。
+`V_s` 每一行是一个 $D$ 维控制点。
 
 ### 2.1 Bezier
 
-对 \(0\leq \ell\leq i\leq m\)，
+对 $0\leq \ell\leq i\leq m$，
 
-\[
+$$
 (B_m^\mathrm{bez})_{i\ell}
 =\frac{\binom{i}{\ell}}{\binom{m}{\ell}},
-\]
+$$
 
 其余元素为零。这是升幂到 Bernstein 控制点的闭式变换，不需要求逆。
-Bernstein 基在 \([0,1]\) 上非负且和为一，因此曲线完全位于控制点凸包内。
+Bernstein 基在 $[0,1]$ 上非负且和为一，因此曲线完全位于控制点凸包内。
 
 ### 2.2 MINVO
 
-若官方 MINVO 基矩阵 \(A_m\) 的每一行按降幂给出一个基函数，则在转换到
-\([0,1]\) 后，本实现使用
+若官方 MINVO 基矩阵 $A_m$ 的每一行按降幂给出一个基函数，则在转换到
+$[0,1]$ 后，本实现使用
 
-\[
+$$
 B_m^\mathrm{mv}=A_m^{-T}J,
-\]
+$$
 
-其中 \(J\) 负责把升幂顺序反转为降幂顺序。头文件中的常数由
+其中 $J$ 负责把升幂顺序反转为降幂顺序。头文件中的常数由
 `minvo/src/solutions/solutionDeg0.mat` 到 `solutionDeg7.mat` 和官方
 `getA_MV.m` 的行顺序一次性生成。因而精确 MINVO 支持 0 到 7 次多项式，
 覆盖本库的 cubic、quintic、septic 轨迹及它们的所有导数。
@@ -69,79 +69,79 @@ B_m^\mathrm{mv}=A_m^{-T}J,
 
 ## 3. Bezier 任意层二分
 
-`subdivision_depth=s` 表示连续执行 \(s\) 层二分，每个原始多项式段产生
-\(2^s\) 个 Bezier 段。二分采用 \(u=1/2\) 的 de Casteljau 算法，它不改变
+`subdivision_depth=s` 表示连续执行 $s$ 层二分，每个原始多项式段产生
+$2^s$ 个 Bezier 段。二分采用 $u=1/2$ 的 de Casteljau 算法，它不改变
 曲线，只缩小每个局部控制凸包。
 
 左、右子段控制点分别写成
 
-\[
+$$
 V^L=LV,\qquad V^R=RV,
-\]
+$$
 
 其中
 
-\[
+$$
 L_{ij}=
 \begin{cases}
 \binom{i}{j}2^{-i},&j\le i,\\
 0,&j>i,
 \end{cases}
-\]
+$$
 
-\[
+$$
 R_{ij}=
 \begin{cases}
 \binom{m-i}{j-i}2^{-(m-i)},&j\ge i,\\
 0,&j<i.
 \end{cases}
-\]
+$$
 
 代码逐层应用这两个固定矩阵。相较于对子区间重新展开幂多项式，这种方法
 数值更稳定，并且天然提供高效的伴随反传。
 
 ## 4. 控制点梯度反传
 
-设损失对控制点的梯度为 \(G_V=\partial L/\partial V\)。未细分时，
+设损失对控制点的梯度为 $G_V=\partial L/\partial V$。未细分时，
 
-\[
+$$
 G_C=M_s^TG_V.
-\]
+$$
 
-时长的偏导要求把局部幂系数固定。由于第 \(\ell\) 个归一化导数系数仅含
-\(T_s^\ell\)，
+时长的偏导要求把局部幂系数固定。由于第 $\ell$ 个归一化导数系数仅含
+$T_s^\ell$，
 
-\[
+$$
 \frac{\partial \hat c_{s,\ell}}{\partial T_s}
 =\frac{\ell}{T_s}\hat c_{s,\ell},
-\]
+$$
 
 所以
 
-\[
+$$
 \frac{\partial L}{\partial T_s}
 =\left\langle
 G_V,\,
 B_m\frac{\partial N_r(T_s)}{\partial T_s}C_s
 \right\rangle_F.
-\]
+$$
 
 实现只复用一份基矩阵，并利用稀疏归一化结构逐行反传，不构造每段完整
 变换矩阵、三阶张量，也不做有限差分。
 
 对细分 Bezier，叶子控制点梯度按树反向合并：
 
-\[
+$$
 G_{\mathrm{parent}}=L^TG_{\mathrm{left}}+R^TG_{\mathrm{right}}.
-\]
+$$
 
-合并到原段控制点后再执行上述 \(M_s^T\) 反传。计算量和生成的控制点数
+合并到原段控制点后再执行上述 $M_s^T$ 反传。计算量和生成的控制点数
 线性相关，且不保存每个叶子到原幂系数的完整矩阵。
 
 `backward()` 返回：
 
 - `coefficients`：和输入 `PPolyND::getCoefficients()` 同形状；
-- `durations`：每个原始段一个 \(\partial L/\partial T_s\)。
+- `durations`：每个原始段一个 $\partial L/\partial T_s$。
 
 对于 MINCO spline，可直接继续传播：
 
