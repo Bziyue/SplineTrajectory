@@ -10,6 +10,8 @@
 
 
 #include "SplineTrajectory.hpp"
+
+static int failed_checks = 0;
 #include "gcopter/minco.hpp"
 #include "traj_min_jerk.hpp"
 #include "traj_min_snap.hpp"
@@ -28,6 +30,7 @@ struct BenchmarkStats
 template <typename Func>
 BenchmarkStats runBenchmark(const Func &func, int iters, int repeats = 7, int warmup_iters = 200)
 {
+    if (iters <= 1) { repeats = 1; warmup_iters = 0; }
     for (int i = 0; i < warmup_iters; ++i)
     {
         func();
@@ -76,6 +79,7 @@ void printSubHeader(const string &title)
 void printCheck(const string &name, double diff, double tol = 1e-4)
 {
     cout << std::left << std::setw(35) << name << ": ";
+    if (!(diff < tol)) ++failed_checks;
     if (diff < tol)
         cout << "\033[32mPASS\033[0m (Diff: " << std::scientific << std::setprecision(2) << diff << ")" << "\033[0m" << endl;
     else
@@ -103,8 +107,7 @@ void generateRandomData(int N,
                         Eigen::Matrix3Xd &inner_points_mat,
                         Eigen::MatrixXd &inner_points_ref_format) // 3x(N-1)
 {
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937 gen(20260912);
     std::uniform_real_distribution<> dis_t(0.5, 2.0);
     std::uniform_real_distribution<> dis_p(-10.0, 10.0);
 
@@ -141,8 +144,7 @@ void testCubic(int N, int BENCH_ITERS)
         
         std::vector<double> times(N);
         PointsMatrix3D all_points(N + 1, 3);
-        std::random_device rd;
-        std::mt19937 gen(rd());
+            std::mt19937 gen(20260912);
         std::uniform_real_distribution<> dis_t(0.5, 2.0);
         std::uniform_real_distribution<> dis_p(-10.0, 10.0);
         for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
@@ -393,8 +395,7 @@ void testQuintic(int N, int BENCH_ITERS)
         
         std::vector<double> times(N);
         PointsMatrix3D all_points(N + 1, 3);
-        std::random_device rd;
-        std::mt19937 gen(rd());
+            std::mt19937 gen(20260912);
         std::uniform_real_distribution<> dis_t(0.5, 2.0);
         std::uniform_real_distribution<> dis_p(-10.0, 10.0);
         for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
@@ -671,8 +672,7 @@ void testSeptic(int N, int BENCH_ITERS)
         
         std::vector<double> times(N);
         PointsMatrix3D all_points(N + 1, 3);
-        std::random_device rd;
-        std::mt19937 gen(rd());
+            std::mt19937 gen(20260912);
         std::uniform_real_distribution<> dis_t(0.5, 2.0);
         std::uniform_real_distribution<> dis_p(-10.0, 10.0);
         for (int i = 0; i < N; ++i) times[i] = dis_t(gen);
@@ -950,14 +950,19 @@ void testSeptic(int N, int BENCH_ITERS)
     cout << "Jerk (J) Spline: " << direct_bc_grads.end.j.transpose() << endl;
 }
 
-int main()
+/** @brief Check deterministic MINCO equivalence; optional arguments enable kernel timing.
+ * @param argc Argument count, at most three.
+ * @param argv Optional piece count and benchmark iterations; defaults are 5 and 1.
+ * @return Nonzero on invalid arguments or numerical mismatch. */
+int main(int argc, char **argv)
 {
     // Test parameters
-    int N = 5;
-    int BENCH_ITERS = 10000;
+    int N = argc > 1 ? std::stoi(argv[1]) : 5;
+    int BENCH_ITERS = argc > 2 ? std::stoi(argv[2]) : 1;
+    if (argc > 3 || N < 2 || BENCH_ITERS < 1) return 2;
 
     // Seed random
-    srand(time(0));
+    srand(20260912);
 
     // Print test configuration
     printHeader("TEST CONFIGURATION");
@@ -968,5 +973,5 @@ int main()
     testQuintic(N, BENCH_ITERS);
     testSeptic(N, BENCH_ITERS);
 
-    return 0;
+    return failed_checks == 0 ? 0 : 1;
 }

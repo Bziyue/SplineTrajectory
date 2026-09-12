@@ -6,6 +6,8 @@
 
 #include "SplineTrajectory.hpp" 
 
+static int failed_checks = 0;
+
 double relativeError(double analytical, double numerical) {
     if (std::abs(analytical) < 1e-9 && std::abs(numerical) < 1e-9) return 0.0;
     return std::abs(analytical - numerical) / std::max(1e-6, std::abs(analytical));
@@ -70,6 +72,7 @@ void testCubicGradients() {
                   << " | NErr: " << numerical_err;
 
         bool pass = consistency_err < 1e-10 && numerical_err < 1e-4;
+        if (!pass) ++failed_checks;
         if (pass) std::cout << " [PASS]" << std::endl;
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
@@ -184,6 +187,7 @@ void testQuinticGradients() {
                   << " | NErr: " << numerical_err;
 
         bool pass = consistency_err < 1e-10 && numerical_err < 1e-4;
+        if (!pass) ++failed_checks;
         if (pass) std::cout << " [PASS]" << std::endl;
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
@@ -309,6 +313,7 @@ void testSepticGradients() {
                   << " | NErr: " << numerical_err;
 
         bool pass = consistency_err < 1e-10 && numerical_err < 1e-4;
+        if (!pass) ++failed_checks;
         if (pass) std::cout << " [PASS]" << std::endl;
         else std::cout << " [FAIL] <<<<<<<<<<<<<<<" << std::endl;
     };
@@ -382,5 +387,5 @@ int main() {
     testCubicGradients();
     testQuinticGradients();
     testSepticGradients();
-    return 0;
+    return failed_checks == 0 ? 0 : 1;
 }

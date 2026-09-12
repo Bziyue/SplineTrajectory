@@ -45,6 +45,7 @@ test/
 
 # 构建目录
 build/
+convex_hull_demo_output/
 bin/
 lib/
 out/

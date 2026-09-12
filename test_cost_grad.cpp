@@ -5,6 +5,8 @@
 #include <vector>
 
 #include "SplineTrajectory.hpp"
+
+static int failed_checks = 0;
 #include "gcopter/minco.hpp"
 
 using std::cout;
@@ -18,6 +20,8 @@ static inline double rel_err(double a, double b)
 
 static inline void print_triplet(const std::string &name, double spline_grad, double minco_grad, double num_grad)
 {
+    if (!(rel_err(spline_grad, num_grad) < 3e-4 && rel_err(minco_grad, num_grad) < 3e-4 &&
+          rel_err(spline_grad, minco_grad) < 1e-8)) ++failed_checks;
     cout << std::left << std::setw(14) << name
          << " spline=" << std::setw(14) << spline_grad
          << " minco=" << std::setw(14) << minco_grad
@@ -607,5 +611,5 @@ int main()
     test_cubic<3>();
     test_quintic<3>();
     test_septic<3>();
-    return 0;
+    return failed_checks == 0 ? 0 : 1;
 }

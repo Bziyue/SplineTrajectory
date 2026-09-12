@@ -1,165 +1,68 @@
 cmake_minimum_required(VERSION 3.10)
-project(SplineTrajectoryExamples)
+project(SplineTrajectory LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(Threads REQUIRED)
+include(CTest)
+option(SPLINE_BUILD_BENCHMARKS "Build performance comparisons" ON)
+option(SPLINE_BUILD_EXAMPLES "Build usage examples" ON)
+option(SPLINE_NATIVE_ARCH "Tune local benchmark executables for the current CPU" OFF)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_library(SplineTrajectory INTERFACE)
+add_library(SplineTrajectory::SplineTrajectory ALIAS SplineTrajectory)
+target_compile_features(SplineTrajectory INTERFACE cxx_std_17)
+target_include_directories(SplineTrajectory INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(SplineTrajectory INTERFACE Eigen3::Eigen)
 
-# Find Eigen3
-find_package(Eigen3 REQUIRED)
+function(spline_executable name source)
+    add_executable(${name} ${source})
+    target_link_libraries(${name} PRIVATE SplineTrajectory Threads::Threads)
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/large_scale_traj_optimizer)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        # Numerical failure contracts require IEEE NaN/Inf semantics, including Release builds.
+        target_compile_options(${name} PRIVATE -Wall -Wextra -fno-fast-math)
+        if(SPLINE_NATIVE_ARCH)
+            target_compile_options(${name} PRIVATE -march=native)
+        endif()
+    endif()
+endfunction()
 
-# Fallback for systems without proper Eigen3 CMake config
-if(NOT TARGET Eigen3::Eigen)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(EIGEN3 REQUIRED eigen3)
-    include_directories(${EIGEN3_INCLUDE_DIRS})
+if(BUILD_TESTING)
+    set(spline_tests test_Grad test_bc_grad test_cost_grad test_ppolyND
+        test_spline_optimizer test_convex_hull_basis test_sampler test_optimizer_contracts test_numerical_failure)
+    foreach(name IN LISTS spline_tests)
+        spline_executable(${name} ${name}.cpp)
+        add_test(NAME ${name} COMMAND ${name})
+        if(name STREQUAL "test_convex_hull_basis")
+            target_compile_definitions(${name} PRIVATE EIGEN_RUNTIME_NO_MALLOC)
+            target_compile_options(${name} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-UNDEBUG>)
+        endif()
+        if(name STREQUAL "test_sampler" OR name STREQUAL "test_optimizer_contracts")
+            target_compile_options(${name} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-UNDEBUG>)
+        endif()
+    endforeach()
+    add_custom_target(tests DEPENDS ${spline_tests})
 endif()
 
-# Include directories
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include/large_scale_traj_optimizer)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-
-# Set build type if not specified
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
+if(SPLINE_BUILD_BENCHMARKS)
+    foreach(name test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd
+                 test_septic_spline_vs_minco_nd test_with_min_jerk_3d test_with_min_snap_3d)
+        spline_executable(${name} ${name}.cpp)
+    endforeach()
+    spline_executable(benchmark_convex_hull_basis benchmarks/benchmark_convex_hull_basis.cpp)
+    spline_executable(benchmark_optimizer benchmarks/benchmark_optimizer.cpp)
+    spline_executable(benchmark_sampling benchmarks/benchmark_sampling.cpp)
+    target_compile_definitions(benchmark_sampling PRIVATE BENCH_COMBINED BENCH_SAMPLER)
 endif()
 
-# Performance test executables
-add_executable(test_cubic_spline_vs_minco_nd test_cubic_spline_vs_minco_nd.cpp)
-target_link_libraries(test_cubic_spline_vs_minco_nd Eigen3::Eigen)
-
-add_executable(test_quintic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd.cpp)
-target_link_libraries(test_quintic_spline_vs_minco_nd Eigen3::Eigen)
-
-add_executable(test_septic_spline_vs_minco_nd test_septic_spline_vs_minco_nd.cpp)
-target_link_libraries(test_septic_spline_vs_minco_nd Eigen3::Eigen)
-
-# Add new min_jerk comparison test
-add_executable(test_with_min_jerk_3d test_with_min_jerk_3d.cpp)
-target_link_libraries(test_with_min_jerk_3d Eigen3::Eigen)
-
-# Add new min_snap comparison test
-add_executable(test_with_min_snap_3d test_with_min_snap_3d.cpp)
-target_link_libraries(test_with_min_snap_3d Eigen3::Eigen)
-
-# Add gradient test
-add_executable(test_Grad test_Grad.cpp)
-target_link_libraries(test_Grad Eigen3::Eigen)
-
-# Example executables
-add_executable(basic_cubic_spline examples/basic_cubic_spline.cpp)
-target_link_libraries(basic_cubic_spline Eigen3::Eigen)
-
-add_executable(quintic_spline_comparison examples/quintic_spline_comparison.cpp)
-target_link_libraries(quintic_spline_comparison Eigen3::Eigen)
-
-add_executable(robot_trajectory_planning examples/robot_trajectory_planning.cpp)
-target_link_libraries(robot_trajectory_planning Eigen3::Eigen)
-
-# boundary condition grad test
-add_executable(test_bc_grad test_bc_grad.cpp)
-target_link_libraries(test_bc_grad Eigen3::Eigen)
-
-# Cost gradient test
-add_executable(test_cost_grad test_cost_grad.cpp)
-target_link_libraries(test_cost_grad Eigen3::Eigen)
-
-# PPolyND test
-add_executable(test_ppolyND test_ppolyND.cpp)
-target_link_libraries(test_ppolyND Eigen3::Eigen)
-
-add_executable(test_spline_optimizer test_spline_optimizer.cpp)
-target_link_libraries(test_spline_optimizer Eigen3::Eigen)
-
-# Compiler flags
-set(COMMON_COMPILE_FLAGS -Wall -Wextra)
-set(DEBUG_FLAGS -g -O0)
-set(RELEASE_FLAGS -O3 -march=native -ffast-math -DNDEBUG)
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_septic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_with_min_jerk_3d PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_with_min_snap_3d PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_Grad PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(robot_trajectory_planning PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_bc_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_cost_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_ppolyND PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(test_spline_optimizer PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-else()
-    target_compile_options(test_cubic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_quintic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_septic_spline_vs_minco_nd PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_with_min_jerk_3d PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_with_min_snap_3d PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_Grad PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(basic_cubic_spline PRIVATE ${COMMON_COMPILE_FLAGS} ${DEBUG_FLAGS})
-    target_compile_options(quintic_spline_comparison PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(robot_trajectory_planning PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_bc_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_cost_grad PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_ppolyND PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
-    target_compile_options(test_spline_optimizer PRIVATE ${COMMON_COMPILE_FLAGS} ${RELEASE_FLAGS})
+if(SPLINE_BUILD_EXAMPLES)
+    set(spline_examples basic_cubic_spline quintic_spline_comparison robot_trajectory_planning convex_hull_optimization_demo)
+    foreach(name IN LISTS spline_examples)
+        spline_executable(${name} examples/${name}.cpp)
+    endforeach()
+    add_custom_target(examples DEPENDS ${spline_examples})
 endif()
-
-# Add chrono library for performance measurements
-if(NOT WIN32)
-    target_link_libraries(test_cubic_spline_vs_minco_nd pthread)
-    target_link_libraries(test_quintic_spline_vs_minco_nd pthread)
-    target_link_libraries(test_septic_spline_vs_minco_nd pthread)
-    target_link_libraries(test_with_min_jerk_3d pthread)
-    target_link_libraries(test_with_min_snap_3d pthread)
-    target_link_libraries(test_Grad pthread)
-    target_link_libraries(quintic_spline_comparison pthread)
-    target_link_libraries(test_bc_grad pthread)
-    target_link_libraries(test_cost_grad pthread)
-    target_link_libraries(test_ppolyND pthread)
-    target_link_libraries(test_spline_optimizer pthread)
-endif()
-
-# Create custom targets for easy building
-add_custom_target(tests
-    DEPENDS test_cubic_spline_vs_minco_nd test_quintic_spline_vs_minco_nd test_with_min_jerk_3d test_with_min_snap_3d test_septic_spline_vs_minco_nd test_Grad test_bc_grad test_cost_grad test_ppolyND test_spline_optimizer
-    COMMENT "Building performance tests"
-)
-
-add_custom_target(examples
-    DEPENDS basic_cubic_spline quintic_spline_comparison robot_trajectory_planning 
-    COMMENT "Building examples"
-)
-
-add_custom_target(all_targets
-    DEPENDS tests examples
-    COMMENT "Building all targets"
-)
-
-# Status messages
-message(STATUS "构建类型: ${CMAKE_BUILD_TYPE}")
-message(STATUS "C++标准: ${CMAKE_CXX_STANDARD}")
-message(STATUS "项目名称: ${PROJECT_NAME}")
-message(STATUS "可执行文件:")
-message(STATUS "  - Performance Tests:")
-message(STATUS "    * test_cubic_spline_vs_minco_nd")
-message(STATUS "    * test_quintic_spline_vs_minco_nd")
-message(STATUS "    * test_septic_spline_vs_minco_nd")
-message(STATUS "    * test_with_min_jerk_3d")
-message(STATUS "    * test_with_min_snap_3d")
-message(STATUS "    * test_Grad")
-message(STATUS "    * test_ppolyND")
-message(STATUS "    * test_cost_grad")
-message(STATUS "    * test_spline_optimizer")
-message(STATUS "  - Examples:")
-message(STATUS "    * basic_cubic_spline")
-message(STATUS "    * quintic_spline_comparison") 
-message(STATUS "    * robot_trajectory_planning")
-message(STATUS "")
-message(STATUS "构建命令:")
-message(STATUS "  make tests     - 构建性能测试")
-message(STATUS "  make examples  - 构建示例程序")
-message(STATUS "  make all       - 构建所有目标")

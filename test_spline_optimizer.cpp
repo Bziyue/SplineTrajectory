@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "SplineConvexHull.hpp"
 #include "SplineOptimizer.hpp"
 
 namespace
@@ -136,6 +137,43 @@ struct ZeroTrajectoryCost
     }
 };
 
+struct QuadraticHullCoefficientCost
+{
+    using Spline = SplineTrajectory::QuinticSplineND<3>;
+    using Matrix = Spline::MatrixType;
+    using Hull = SplineTrajectory::ConvexHullRepresentation<3>;
+
+    mutable Hull workspace;
+    mutable Matrix control_gradients;
+
+    double operator()(Spline &spline,
+                      const std::vector<double> &,
+                      double,
+                      Matrix &coefficient_gradients,
+                      Eigen::VectorXd &duration_gradients,
+                      double &) const
+    {
+        const auto &polynomial = spline.getPPoly();
+        if (!workspace.kernel() ||
+            workspace.numSourceSegments() !=
+                polynomial.getNumSegments())
+        {
+            workspace.resetTopology(
+                polynomial,
+                SplineTrajectory::ConvexHullBasis::MINVO,
+                1, 2);
+            control_gradients.resize(
+                workspace.controls().rows(), 3);
+        }
+        workspace.update(polynomial);
+        control_gradients = workspace.controls();
+        workspace.backwardAdd(
+            control_gradients, coefficient_gradients,
+            duration_gradients);
+        return 0.5 * workspace.controls().squaredNorm();
+    }
+};
+
 template <int DIM>
 struct ScalingSpatialMap
 {
@@ -221,16 +259,14 @@ void testPreparedContextSnapshotsSpatialMap()
     Optimizer optimizer;
     typename Optimizer::OptimizerConfig config;
     config.spatial_map = &map_prepare;
-    expectTrue(static_cast<bool>(optimizer.setConfig(config)), "setConfig with prepare map should succeed.");
 
     typename Optimizer::OptimizationContext context;
     auto problem = makeProblem<Optimizer>(1, true);
-    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context)), "prepareContext should succeed.");
+    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context, config)), "prepareContext should succeed.");
 
     const Eigen::VectorXd x_before = optimizer.generateInitialGuess(context);
 
     config.spatial_map = &map_after;
-    expectTrue(static_cast<bool>(optimizer.setConfig(config)), "setConfig with post-prepare map should succeed.");
 
     const Eigen::VectorXd x_after = optimizer.generateInitialGuess(context);
     expectTrue((x_before - x_after).norm() < 1e-12,
@@ -339,14 +375,12 @@ void testIntegralPointMetadata()
 {
     using Optimizer = SplineTrajectory::SplineOptimizer<3>;
     Optimizer optimizer;
-    auto config = optimizer.getActiveConfig();
+    Optimizer::OptimizerConfig config;
     config.integral_num_steps = 2;
-    expectTrue(static_cast<bool>(optimizer.setConfig(config)),
-               "Two-step integration config should be valid.");
 
     Optimizer::OptimizationContext context;
     auto problem = makeProblem<Optimizer>(2);
-    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context)),
+    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context, config)),
                "Metadata test context preparation should succeed.");
 
     LinearTimeCost time_cost;
@@ -379,6 +413,34 @@ void testIntegralPointMetadata()
                             left_end.segment_duration) < 1e-14,
                "Quadrature step size must come from the optimizer's decoded duration.");
 }
+
+void testCoefficientCostUsesSingleSplineAdjoint()
+{
+    using Optimizer = SplineTrajectory::SplineOptimizer<
+        3, SplineTrajectory::MinDerivativeSplineND<3, 3>,
+        SplineTrajectory::IdentityTimeMap>;
+    Optimizer optimizer;
+    Optimizer::OptimizationContext context;
+    auto problem = makeProblem<Optimizer>(2, true);
+    expectTrue(
+        static_cast<bool>(
+            optimizer.prepareContext(problem, context)),
+        "Coefficient-cost context preparation should succeed.");
+
+    LinearTimeCost time_cost;
+    ZeroIntegralCost integral_cost;
+    QuadraticHullCoefficientCost hull_cost;
+    const auto spec =
+        Optimizer::makeEvaluateSpec(time_cost, integral_cost)
+            .withCoefficientCost(hull_cost);
+    const Eigen::VectorXd x =
+        optimizer.generateInitialGuess(context);
+    const auto check =
+        optimizer.checkGradients(context, x, spec, 2e-6, 2e-3);
+    expectTrue(
+        check.valid && check.max_abs_error < 2e-4,
+        "CoefficientCost hull gradients must pass the optimizer-level finite-difference check.");
+}
 } // namespace
 
 int main()
@@ -389,6 +451,7 @@ int main()
     testCheckGradientsRestoresWorkingState();
     testPreparedEvaluationAndWorkingStateSynchronization();
     testIntegralPointMetadata();
+    testCoefficientCostUsesSingleSplineAdjoint();
 
     std::cout << "test_spline_optimizer passed" << std::endl;
     return 0;
