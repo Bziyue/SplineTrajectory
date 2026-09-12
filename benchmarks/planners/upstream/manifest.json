@@ -1,0 +1,28 @@
+{
+  "GCOPTER": {
+    "revision": "e0444f6d47b84f972ced91746b05feb36ce1fd4f",
+    "files": {
+      "LICENSE": "5449b6565f534493983f6a88557c4956686a966bdef7f575a4025a4d85f1c05c",
+      "gcopter/include/gcopter/minco.hpp": "60defee515dd3c96cdc54f3dbfa279b84556c92fce92b77365cc37b70649b512",
+      "gcopter/include/gcopter/trajectory.hpp": "9ba9b8d43be34848f9f3bd955d5bf8c8922e85757255a7363c82fe59a8a2e9fd",
+      "gcopter/include/gcopter/root_finder.hpp": "c5eaa3ebed6bc65b5671db8965c0c6e3f79cb0cfa9787c89822315cdbac9d781",
+      "gcopter/include/gcopter/lbfgs.hpp": "fdc6b0d4c4b4c50e0368d6983dd28ffd893c824df461aebe9e3b24dd8a99b3ca",
+      "gcopter/include/gcopter/flatness.hpp": "6b7f45b5b313a3981b3eb79a63e37f8025c262d90d6edc6eeabb6503ec9390b2",
+      "gcopter/include/gcopter/gcopter.hpp": "652f2b63087294207c3bbcc9d58cbde893179e8d1aeb9ad4b0c7aaa7eccbd339"
+    }
+  },
+  "SUPER": {
+    "revision": "2ad3419c127a617c6d7df6925e81a14175a9c096",
+    "files": {
+      "super_planner/include/traj_opt/minco.h": "7fd6913d9df42beca67f446b14b3bb06f3e4aedf53d32c1f73bbedab349036b9",
+      "super_planner/src/utils/minco.cpp": "06a65e4f55052ce2dabc7064fa256ebaadde9015e269fdf22a86cbe3e4b28d84",
+      "super_planner/include/utils/optimization/banded_system.h": "63eeea5d12820753b1e223e81ad124be1443732895d364e2333b091125b38d30",
+      "super_planner/src/utils/banded_system.cpp": "89965e22761bb0408b60461bba41bf52ecd57529e48d10d93747e79fd8bee7ce",
+      "super_planner/include/utils/optimization/lbfgs.h": "14ee85131e63fd04694b2e31aefe39bfb064bc96af2c3475f4a5703f59f53651",
+      "super_planner/src/utils/lbfgs.cpp": "799ce226c48d0e8785a293cc3e11bffd6f0844fa90edc9465312c616eb0a2f0e",
+      "super_planner/include/utils/geometry/quadrotor_flatness.hpp": "d4eca0be4d832a7e8e9f26f4dd5fab57dbaa2a60f282d2fc69c0f4081908e2a9",
+      "super_planner/src/traj_opt/exp_traj_optimizer_s4.cpp": "1baf48508ef4a3720ec3dd231fcf5ed46d2bf8e8935cf4058aa397536e4bd600",
+      "super_planner/src/utils/optimization_utils.cpp": "769fe9742f04833a262b353bc437bd4bdc8499dd79e1f539f9ea61b7d6194a15"
+    }
+  }
+}

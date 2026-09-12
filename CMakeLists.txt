@@ -71,6 +71,7 @@ if(SPLINE_BUILD_BENCHMARKS)
     spline_executable(benchmark_kernel benchmarks/benchmark_kernel.cpp)
     spline_executable(benchmark_sampling benchmarks/benchmark_sampling.cpp)
     target_compile_definitions(benchmark_sampling PRIVATE BENCH_COMBINED BENCH_SAMPLER)
+    add_subdirectory(benchmarks/planners)
 endif()
 
 if(SPLINE_BUILD_EXAMPLES)

@@ -76,6 +76,12 @@ for (double t : increasing_times) {
 合法候选可以在失败后继续评价。梯度检查遇到非法扰动返回失败并恢复基准候选。
 依赖这些失败语义时不能启用破坏 NaN/Inf 检查的 fast-math 选项。
 
+## 原始规划器对照基准
+
+[GCOPTER/SUPER 基准](benchmarks/planners/README.md) 从仓库文件加载 72 个小、中、大规模的走廊与 ESDF 问题，
+分别使用各自原始 L-BFGS、MINCO、平坦性和惩罚代码，与直接 Spline、SplineOptimizer 比较，统一使用 C++17。
+[结果报告](docs/planner_benchmark_results.md) 区分固定候选梯度等价、完整求解差异、性能和净空检查。
+
 ## 构建与验证
 
 ```sh

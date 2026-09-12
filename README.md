@@ -130,6 +130,13 @@ values needed by the adjoint, so a hull does not borrow a polynomial. `backwardA
 scratch storage and requires exclusive workspace access; destination gradients are accumulated.
 See [the mathematical derivation](docs/convex_hull_basis_zh.md) and [MINVO provenance](THIRD_PARTY_NOTICES.md).
 
+## Native planner benchmarks
+
+The [GCOPTER/SUPER benchmark corpus](benchmarks/planners/README.md) loads 72 fixed corridor and
+ESDF problems at small/medium/large scales. It compares original MINCO, direct Spline and
+SplineOptimizer with each project's own frozen L-BFGS, flatness and penalty code, all in C++17.
+See [measured consistency and performance](docs/planner_benchmark_results.md).
+
 ## Build and validation
 
 ```sh
