@@ -697,6 +697,16 @@ namespace SplineTrajectory
         const Polynomial &polynomial() const & { return state_.spline.polynomial(); }
         const Polynomial &polynomial() const && = delete;
         Polynomial copyPolynomial() const { return polynomial(); }
+        /** @brief Borrow current physical parameters for diagnostics without exposing mutable storage.
+         * @return Read-only references invalidated by evaluation, preparation, movement or destruction.
+         * @note After a failed decode, values may be partial; lastStatus() determines validity.
+         *       Inspect the original decision vector when replaying a rejected candidate. */
+        ParameterView<Spline> parameters() const & { return parameterView(); }
+        ParameterView<Spline> parameters() const && = delete;
+        /** @brief Return unweighted minimum-derivative energy of the last constructed trajectory.
+         * @return Energy in physical-time units, or NaN when the polynomial is invalid.
+         * @note Read-only and allocation-free; a valid trial is not necessarily an accepted solution. */
+        double energy() const { return state_.spline.energy(); }
         /** @brief Borrow records from the latest successful recording evaluation; otherwise empty. */
         const SampleBuffer &recordedSamples() const noexcept
         {

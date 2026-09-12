@@ -34,6 +34,11 @@ unprepared. Preparation and movement invalidate previously borrowed views.
 independent value. Evaluation and `updateAccepted()` replace the polynomial. `problem()`,
 `layout()` and `activeMask()` borrow prepared data until preparation, movement or destruction.
 Evaluation never changes that layout. A call does not retain any reference to the objective.
+`energy()` returns the unweighted minimum-derivative energy of the current trajectory without
+copying solver storage; an invalid trajectory returns NaN.
+`parameters()` borrows the current physical values for diagnostics. After a failed decode they
+may be only partially updated; use `lastStatus()` and preserve the original decision vector
+when recording a rejected candidate. The view expires on the next evaluation or state change.
 
 One optimizer supports one synchronous evaluation at a time. Independent solves need independent
 optimizers and any mutable cost workspaces. An external solver's final accepted vector may differ
