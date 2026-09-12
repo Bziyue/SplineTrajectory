@@ -1,19 +1,147 @@
 # SplineTrajectory
 
-[中文](README_zh.md) · [Documentation](docs/README.md) · [Examples](examples/README.md)
+Header-only C++17 / Eigen library for smooth N-dimensional minimum-control-effort trajectories.
+It solves the same clamped spline problem as [MINCO](https://github.com/ZJU-FAST-Lab/GCOPTER),
+with an O(N) block-tridiagonal solver, analytic energy gradients, a composable optimizer
+interface, and differentiable convex-hull conversions.
 
-A header-only C++17 / Eigen library for N-dimensional minimum-control-effort trajectories.
-Cubic, quintic and septic splines minimize squared acceleration, jerk and snap, with
-linear-time construction and analytic gradients. Compose optimization objectives and solve
-them with your preferred numerical optimizer.
+**English** | [中文](README_zh.md)
+
+## ✨ Overview
+
+- Cubic, quintic and septic minimum-control-effort splines in arbitrary dimensions.
+- O(N) construction and adjoint propagation to durations, waypoints and boundary states.
+- Analytic energy gradients derived from Hamiltonian conservation and variational principles.
+- A generic `SplineOptimizer` for reusable variable maps and objective components.
+- Sequential sampling with reusable derivative coefficients and no source warm-up.
+- Bezier / MINVO convex-hull conversion, subdivision and gradient propagation.
+
+| Spline Type | Polynomial Degree | Minimizes the Integral of | MINCO Equivalent |
+| --- | ---: | --- | --- |
+| Cubic | 3 | Squared acceleration | MINCO S2 |
+| Quintic | 5 | Squared jerk | MINCO S3 |
+| Septic | 7 | Squared snap | MINCO S4 |
+
+The library is organized into three public headers:
 
 | Header | Features |
 | --- | --- |
-| `SplineTrajectory.hpp` | Splines, energy gradients, piecewise polynomials and sequential sampling |
+| `SplineTrajectory.hpp` | Splines, energy gradients, piecewise polynomials and sampling |
 | `SplineOptimizer.hpp` | Decision variables, objective composition and gradient propagation |
-| `SplineConvexHull.hpp` | Bezier / MINVO control points, subdivision and derivatives |
+| `SplineConvexHull.hpp` | Bezier / MINVO control points, subdivision and adjoints |
 
-## Build and test
+## 🔁 Gradient Propagation
+
+`spline.backward()` maps coefficient and independent duration partials to gradients of
+segment durations, interior waypoints and endpoint derivatives. The adjoint reuses the
+construction factorization.
+
+For sampled-state costs, `SplineOptimizer` handles quadrature, coefficient/time partials
+and variable-map pullbacks. Objective components supply local gradients with respect to
+position, velocity, acceleration and higher derivatives, with explicit time dependence
+when needed. See [sampling and gradients](docs/trajectory.md).
+
+## ⚡ Analytic Energy Gradients
+
+`spline.energyGradient()` computes minimum-control-effort energy gradients directly from
+the spline solution. Duration gradients use boundary information in O(1) per segment;
+waypoint gradients use jumps in high-order derivatives at the joins. This avoids assembling
+coefficient partials and running a separate adjoint for the energy term.
+
+## 🧩 SplineOptimizer
+
+`SplineOptimizer<Spline>` owns the prepared problem and reusable evaluation workspace.
+An objective is an ordinary struct with named components such as `duration`, `integral`
+and `coefficient`; only the supplied components participate in evaluation.
+
+- Map decision variables to positive durations, spatial points and optional auxiliary states.
+- Combine energy, time, sampled-state and control-point costs.
+- Supply costs and gradients to L-BFGS or another numerical solver through `costAndGradient()`.
+
+See the quick start below and the [optimizer reference](docs/optimizer.md)
+for custom maps and objective protocols.
+
+## 📐 Spline Convex-Hull Conversion
+
+`SplineConvexHull.hpp` converts each polynomial segment, or one of its derivatives, into
+Bezier or MINVO control points without changing the represented curve.
+
+- `toBezier()` and `toMINVO()` create control-point workspaces; included MINVO bases cover degrees 0–7.
+- Binary subdivision produces tighter local bounds while preserving the trajectory.
+- `configure()` prepares conversion data; `update()` and `backwardAdd()` reuse workspace storage.
+- Control-point gradients propagate to both polynomial coefficients and segment durations.
+
+If all controls lie in a convex corridor, the entire corresponding curve piece lies in it.
+Velocity and acceleration controls similarly provide conservative bounds over a whole piece.
+Soft penalties require a separate feasibility check; ESDF values at controls alone do not
+certify collision freedom in nonconvex free space.
+
+![Bezier subdivision and MINVO convex hulls](docs/images/convex_hull_basis_comparison.png)
+
+[Conversion guide](docs/convex_hull.md) · [Derivation (中文)](docs/convex_hull_basis_zh.md) ·
+[Optimizer example](examples/convex_hull_optimizer.cpp)
+
+## 📈 Benchmarks
+
+### GCOPTER and SUPER: identical optimization problems
+
+The benchmark loads 72 saved corridor and ESDF problems: 12 cases at each of 4, 12 and
+32 segments for each problem family. Within each planner group, all backends use identical
+inputs, penalties, initialization and solver settings, including that project's original
+L-BFGS. GCOPTER compares quintic minimum jerk; SUPER compares septic minimum snap.
+The two planner groups solve different formulations and are compared separately.
+
+Recorded on 2026-09-12 with headers at `54abad9`: GCC 9.4, Eigen 3.3.7, C++17
+`-O3 -fno-fast-math`, Ryzen 9 7945HX, one logical CPU, no LTO.
+
+| Group | Problem | Segments | Cost + Gradient, MINCO / Optimizer (µs) | Solve, MINCO / Optimizer (ms) |
+| --- | --- | ---: | ---: | ---: |
+| GCOPTER | Corridor | 4 | 11.268 / 8.697 | 0.514 / 0.407 |
+| GCOPTER | Corridor | 12 | 33.939 / 25.765 | 7.954 / 6.113 |
+| GCOPTER | Corridor | 32 | 90.378 / 68.347 | 54.164 / 44.063 |
+| GCOPTER | ESDF | 4 | 11.113 / 8.834 | 1.199 / 0.983 |
+| GCOPTER | ESDF | 12 | 33.399 / 26.085 | 5.069 / 4.052 |
+| GCOPTER | ESDF | 32 | 88.526 / 69.285 | 52.435 / 43.716 |
+| SUPER | Corridor | 4 | 12.716 / 8.673 | 0.463 / 0.327 |
+| SUPER | Corridor | 12 | 38.071 / 25.509 | 13.631 / 8.989 |
+| SUPER | Corridor | 32 | 101.295 / 67.576 | 108.449 / 81.553 |
+| SUPER | ESDF | 4 | 12.490 / 8.780 | 3.502 / 2.521 |
+| SUPER | ESDF | 12 | 37.359 / 25.729 | 8.296 / 5.896 |
+| SUPER | ESDF | 32 | 105.469 / 72.444 | 79.921 / 59.749 |
+
+MINCO denotes the original planner backend; Optimizer uses SplineTrajectory with
+`SplineOptimizer`. Values are medians across 12 case medians, excluding file I/O and geometry
+preparation. Regular fixed-candidate gradient comparisons had relative errors below `3e-13`.
+Independent solves did not always reach the same final trajectory, and very short segments
+expose unresolved gradient discrepancies; see [numerical notes](docs/numerical_notes.md).
+
+[Full results, including direct Spline](docs/benchmarks.md) ·
+[Corpus and reproduction commands](benchmarks/planners/README.md)
+
+### Spline kernels
+
+Earlier kernel measurements compare construction, general adjoints and analytic energy gradients:
+
+![Trajectory construction speed](docs/images/construction_speed.png)
+
+![Gradient back-propagation speed](docs/images/backprop_speed.png)
+
+![Analytic energy gradient speed](docs/images/analytic_grad_speed.png)
+
+Current benchmark sources and commands are listed in the [benchmark guide](docs/benchmarks.md).
+
+## 🛠️ Refactored Projects
+
+Related planner implementations using SplineTrajectory, each with its own integration version:
+
+| Project | Original | Refactored |
+| --- | --- | --- |
+| **EGO-Planner-v2** | [ZJU-FAST-Lab](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2) | [Refactored](https://github.com/Bziyue/EGO-Planner-v2) |
+| **GCOPTER** | [ZJU-FAST-Lab](https://github.com/ZJU-FAST-Lab/GCOPTER) | [Refactored](https://github.com/Bziyue/GCOPTER) |
+| **SUPER** | [HKU-MaRS](https://github.com/hku-mars/SUPER) | [Refactored](https://github.com/Bziyue/SUPER) |
+| **DDR-opt** | [ZJU-FAST-Lab](https://github.com/ZJU-FAST-Lab/DDR-opt) | [Refactored](https://github.com/Bziyue/DDR-opt) |
+
+## 🚀 Quick Start
 
 Requires a C++17 compiler, CMake ≥ 3.12, Eigen ≥ 3.3 and Python 3 for the test tools.
 
@@ -31,7 +159,7 @@ Examples and tests build by default. Enable performance comparisons with
 `-DSPLINE_BUILD_BENCHMARKS=ON`. To use only the library, disable `BUILD_TESTING`,
 `SPLINE_BUILD_EXAMPLES` and `SPLINE_BUILD_BENCHMARKS`, or include the headers directly.
 
-## Create a spline
+### Create a spline
 
 ```cpp
 #include "SplineTrajectory.hpp"
@@ -45,7 +173,7 @@ if (!spline.isValid()) throw std::runtime_error("Invalid spline");
 auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // position, velocity, acceleration
 ```
 
-## Create an optimizer
+### Create an optimizer
 
 Using the same points and durations:
 
@@ -67,7 +195,7 @@ Add named `duration`, `integral` or `coefficient` members to an objective to com
 state and control-point costs. An external solver calls `costAndGradient`; after solving,
 call `updateAccepted(x)` before reading the trajectory. See the [GCOPTER L-BFGS examples](examples/README.md).
 
-## Examples and guides
+## 🧰 Examples and Documentation
 
 | Example | Objective |
 | --- | --- |
@@ -80,5 +208,20 @@ call `updateAccepted(x)` before reading the trajectory. See the [GCOPTER L-BFGS 
 [Sampling and gradients](docs/trajectory.md) · [Optimizer reference](docs/optimizer.md) ·
 [Convex hulls](docs/convex_hull.md) · [Benchmarks](docs/benchmarks.md) · [Numerical notes](docs/numerical_notes.md)
 
+## 🔭 Future Plans
+
+- [x] MINCO-equivalent gradient propagation
+- [x] Clamped septic spline support
+- [x] Spline convex-hull conversion support
+- [ ] N-dimensional non-uniform B-spline support
+
+## 📄 License
+
 The public headers are [MIT licensed](LICENSE). Bundled dependencies retain their
 [third-party licenses](THIRD_PARTY_NOTICES.md).
+
+## 🙏 Acknowledgments
+
+- [Eigen](https://eigen.tuxfamily.org/) for linear algebra.
+- [MINCO / GCOPTER](https://github.com/ZJU-FAST-Lab/GCOPTER) and [SUPER](https://github.com/hku-mars/SUPER) for the reference implementations.
+- Classical spline interpolation theory and the minimum-norm formulation.
