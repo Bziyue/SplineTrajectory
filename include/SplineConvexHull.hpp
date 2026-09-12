@@ -811,8 +811,17 @@ namespace SplineTrajectory
 
                 const int first_row =
                     segment * kernel_->leaves_per_segment * cp;
-                controls_.middleRows(first_row, kernel_->leaves_per_segment * cp).noalias() =
-                    kernel_->stacked_power_to_control * normalized_derivative_;
+                // Fixed-dimensional row accumulation avoids small dynamic GEMM setup and
+                // checks each result while it is still local, rather than rescanning all controls.
+                for (int row = 0; row < kernel_->leaves_per_segment * cp; ++row)
+                {
+                    Vector control = Vector::Zero();
+                    for (int power = 0; power < cp; ++power)
+                        control.noalias() += kernel_->stacked_power_to_control(row, power) *
+                            normalized_derivative_.row(power).transpose();
+                    if (!control.allFinite()) throw std::overflow_error("Nonfinite hull control");
+                    controls_.row(first_row + row) = control.transpose();
+                }
 
                 for (int leaf = 0; leaf < kernel_->leaves_per_segment;
                      ++leaf)
@@ -833,7 +842,6 @@ namespace SplineTrajectory
                             static_cast<double>(kernel_->leaves_per_segment)};
                 }
             }
-            if (!controls_.allFinite() || !duration_powers_.allFinite()) throw std::overflow_error("Nonfinite hull");
             initialized_ = true;
         }
     };
