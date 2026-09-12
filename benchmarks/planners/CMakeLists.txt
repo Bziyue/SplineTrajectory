@@ -43,5 +43,6 @@ foreach(planner gcopter super)
             --data ${CMAKE_CURRENT_SOURCE_DIR}/data
             --output ${CMAKE_CURRENT_BINARY_DIR}/checks/${planner}
             --validate-only --limit-per-file 1)
+        set_tests_properties(planner_${planner}_equivalence PROPERTIES LABELS "benchmarks")
     endif()
 endforeach()

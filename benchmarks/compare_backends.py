@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare frozen d504135 and current engines in Ubuntu 20.04, without changing either checkout.
+"""Compare frozen d504135 and current engines without changing either checkout.
 
 The frozen harness is adapted only for degree/cost selection; its library headers remain immutable.
 Build before measuring, so compiler activity cannot pollute CPU-pinned timings.
@@ -31,7 +31,7 @@ parser.add_argument('--orders', type=int, nargs='+', default=[0, 3, 4])
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 base, out = args.baseline.resolve(), args.output.resolve()
-lbfgs_header = (args.lbfgs_header or root.parent/'GCOPTER/gcopter/include/gcopter/lbfgs.hpp').resolve()
+lbfgs_header = (args.lbfgs_header or root/'benchmarks/planners/upstream/GCOPTER/gcopter/include/gcopter/lbfgs.hpp').resolve()
 if args.repeats <= 0 or args.solve_repeats < 0 or args.jobs <= 0:
     parser.error('Repetitions and jobs must be positive; solve repetitions may be zero')
 if args.solve_repeats and not lbfgs_header.is_file():

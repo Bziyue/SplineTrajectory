@@ -1,8 +1,6 @@
 # API migration from d504135
 
-This guide covers the second refactor in SplineTrajectory. The three downstream repositories
-have **not** been migrated or validated by this change. They must eventually copy the three
-public headers byte-for-byte, including English Doxygen, licenses and MINVO constants.
+Use this guide when updating code written against `d504135` or earlier.
 
 ## Polynomial and spline names
 
@@ -86,7 +84,7 @@ The coefficient stage now receives a read-only `ParameterView<Spline>` and writa
 `CoefficientGradient<Spline>`, rather than a mutable spline solver and several unrelated outputs.
 The auxiliary protocol also receives these physical views; it must propagate gradients back
 through its transforms **before** ordinary time/spatial maps. The time map's duration argument
-is the pre-auxiliary `toTime(tau)` value. See [complete signatures](../include/SplineOptimizerProtocols.md).
+is the pre-auxiliary `toTime(tau)` value. See [complete signatures](optimizer.md).
 
 Pre-size `g` before entering the external solver callback. Sample objectives require
 `prepare(problem, options, objective)` to determine recording capability without borrowing the
@@ -109,21 +107,3 @@ objective. Preparation is the allocation boundary. After the solver returns, che
 invalid source/topology invalidates the numerical state and throws. Numeric overflow is also
 rejected. The immutable kernel cache is consulted only during configuration; it is shared
 across spatial dimensions. A complete tuple key avoids packed-field collisions.
-
-## Downstream checklist for the follow-up migration
-
-Paths below are relative to the parent `optimizer/` workspace. This is a migration inventory,
-not a claim that these consumers already compile with the new API.
-
-| Consumer | Relevant call sites | Required adaptation |
-| --- | --- | --- |
-| GCOPTER | `GCOPTER/gcopter/include/gcopter/spline_sfc_optimizer.hpp`, `include/TrajectoryOptAdapters/GcopterPenaltyIntegralCostAdapter.hpp`, project gradient-check code | Quintic parameterization; polytope map `backwardInto`; named duration/integral objective; structured gradient-check callback; accepted solution |
-| SUPER | `SUPER/super_planner/include/traj_opt/spline_components.hpp`, `src/traj_opt/exp_traj_optimizer_s4.cpp`, `src/traj_opt/backup_traj_optimizer_s4.cpp`, `include/TrajectoryOptAdapters/SuperBackupAuxiliaryStateMap.hpp` | Septic objective and owned optimizer; boundary/mask layout; auxiliary views; additive decision-domain penalties |
-| diff-planner-swarm | `diff-planner-swarm/src/planning/backend/optimizer/trajectory_optimizer.cpp`, `include/DiffSwarm/planning/backend/optimizer/trajectory_auxiliary_map.hpp`, `terms/bezier_corridor_cost.hpp`, `mapping/positive_duration_map.hpp` | Named objective instead of generated spec type; combined parameter costs; moving-start/shared-time adjoint; hull workspace preparation; recording capability; accepted vector |
-| All three | Vendored spline headers and polynomial/sampling users | Copy the three headers unchanged, adapt renamed queries, remove obsolete adapters, update recorded upstream version/hash and third-party notes |
-
-Downstream C-style solver user data should hold pointers/references to the named optimizer and
-objective. Keep `void*` at that boundary; costs inside quadrature remain statically dispatched.
-Application trajectory identity, coordinate frames, splicing and acceptance policy remain
-project responsibilities. Project-specific Chinese comments in diff-planner-swarm do not apply
-to the unmodified upstream public headers.

@@ -252,7 +252,7 @@ double operator()(const SplineTrajectory::ParameterView<Spline>& state,
 `isConfigured()` 与 `isValid()` 分别表示已配置拓扑和本次数值有效；
 `matches(ppoly, HullOptions)` 可判断是否需要重新配置。
 共享转换核不依赖 DIM，相同拓扑的不同维度工作区复用同一个不可变核。
-完整用法见[协议文档](../include/SplineOptimizerProtocols.md)和[优化示例](../examples/convex_hull_optimization_demo.cpp)。
+完整用法见[协议文档](optimizer.md)和[优化示例](../examples/convex_hull_optimizer.cpp)。
 
 ## 6. 统一的 3/5/7 次样条名
 
@@ -272,53 +272,12 @@ SplineTrajectory::MinDerivativeSplineND<DIM, S>
 PPoly 唯一持有的系数矩阵，`Gradients` 提供固定拓扑的 `resetTopology()`/`setZero()`，
 因此统一名字不会牺牲现有专用求解器的热路径性能。
 
-## 7. 优化示例与验证
+## 7. 优化示例
 
-`examples/convex_hull_optimization_demo.cpp` 使用 `SplineOptimizer` 和一个
-紧凑 L-BFGS 驱动器，同时优化：
+[凸包优化示例](../examples/convex_hull_optimizer.cpp) 使用 GCOPTER L-BFGS，组合分段凸走廊、
+Bezier 速度与加速度控制点边界、minimum-jerk 能量和总时长。运行方法见[示例目录](../examples/README.md)。
 
-- minimum-jerk 能量；
-- ESDF 圆障碍或分段凸走廊；
-- Bezier 速度与加速度控制点上界；
-- 总时间。
+同一 piece 的全部控制点满足凸集约束时，整段曲线满足该约束；ESDF 自由空间通常非凸，不能直接套用此结论。
 
-ESDF 的自由空间是非凸集合，因此“每个控制点 ESDF 为正”本身不是严格的
-整段安全证明；示例采用二层细分和小的控制点安全缓冲，并额外密集采样
-验证。凸走廊不同：同一 Bezier piece 的全部控制点位于凸走廊内时，该
-piece 的整条曲线必定位于走廊内。速度和加速度的欧氏球也是凸集，因此
-对应导数控制点全部满足范数上界即可界定整段导数。
-
-核心测试 `test_convex_hull_basis.cpp` 覆盖：
-
-- 0 到 7 次 Bezier/MINVO 基；
-- 每个合法导数阶；
-- 三层 Bezier 与 MINVO 细分后的曲线重构；
-- 基函数非负性和单位分解；
-- 系数梯度、时长梯度的随机中心差分；
-- `backwardAdd()` 的加法语义和共享 Kernel；
-- piece 起始时间、piece 时长到源时长/公共起始时间的有限差分；
-- 优化器决策变量层的 `CoefficientCost` 梯度检查；
-- 禁止 Eigen 堆分配后的样条更新、凸包更新、反向与 MINCO 伴随传播。
-
-运行：
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target test_convex_hull_basis convex_hull_optimization_demo
-./build/test_convex_hull_basis
-./build/convex_hull_optimization_demo convex_hull_demo_output
-/home/beiyue/venvs/mate/bin/python \
-  examples/plot_convex_hull_optimization.py --skip-run
-```
-
-可视化输出位于：
-
-- `docs/images/convex_hull_optimization.png`
-- `docs/images/convex_hull_basis_comparison.png`
-- `docs/images/bezier_subdivision_depths.png`：同一条三段五次轨迹在细分
-  深度 0 到 4 下的纵向凸包收缩对比。
-- `docs/images/minvo_subdivision_depths.png`：相同轨迹、相同坐标范围下的
-  MINVO 深度 0 到 4 纵向凸包收缩对比。
-
-转换、导数、反向传播和细分的微基准见
-[`convex_hull_performance_zh.md`](convex_hull_performance_zh.md)。
+[Bezier 细分图](images/bezier_subdivision_depths.png)与[MINVO 细分图](images/minvo_subdivision_depths.png)
+展示不同细分深度下的凸包收缩。

@@ -1,0 +1,8 @@
+foreach(name cubic_minco quintic_minco septic_minco min_jerk min_snap)
+    spline_executable(benchmark_${name} kernels/benchmark_${name}.cpp)
+endforeach()
+foreach(name convex_hull_basis optimizer kernel sampling)
+    spline_executable(benchmark_${name} benchmark_${name}.cpp)
+endforeach()
+target_compile_definitions(benchmark_sampling PRIVATE BENCH_COMBINED BENCH_SAMPLER)
+add_subdirectory(planners)

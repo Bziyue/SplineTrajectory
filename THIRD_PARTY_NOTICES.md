@@ -45,7 +45,7 @@ LGPL-3.0-or-later notices are retained as supplied. LGPL and GPL license texts a
 snapshot. The generated standalone bindings retain the corresponding notices. SUPER-derived
 point-penalty adapters in `benchmarks/planners/PlannerCosts.hpp` are LGPL-3.0-or-later.
 
-These are benchmark-only dependencies. The authoritative source manifest is
+The GCOPTER L-BFGS snapshot is also used by the runnable examples; SUPER dependencies are benchmark-only. The authoritative source manifest is
 [upstream/manifest.json](benchmarks/planners/upstream/manifest.json).
 The [benchmark guide](benchmarks/planners/README.md) records the exact extraction and portability
 adaptations, update process, and numerical verification. No original solver/adjoint algorithm
