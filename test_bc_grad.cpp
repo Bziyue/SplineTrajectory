@@ -22,7 +22,7 @@ void testCubicGradients() {
     using SplineType = CubicSplineND<DIM>;
 
     std::vector<double> times = {1.0, 2.0, 1.5};
-    SplineType::MatrixType points(static_cast<int>(times.size()) + 1, DIM);
+    SplineType::CoefficientMatrix points(static_cast<int>(times.size()) + 1, DIM);
     for (int i = 0; i <= static_cast<int>(times.size()); ++i)
         points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
@@ -32,11 +32,11 @@ void testCubicGradients() {
 
     SplineType spline(times, points, 0.0, bc);
 
-    auto gdC = spline.getEnergyPartialGradByCoeffs();
-    auto gdT = spline.getEnergyPartialGradByTimes();
+    auto gdC = spline.energyCoefficientPartials();
+    auto gdT = spline.energyDurationPartials();
 
-    auto grads = spline.propagateGrad(gdC, gdT);
-    auto bc_grads = spline.getEnergyGradBoundary();
+    auto grads = spline.backward(gdC, gdT);
+    auto bc_grads = spline.energyBoundaryGradient();
 
     double eps = 1e-6;
 
@@ -46,12 +46,12 @@ void testCubicGradients() {
         // J(x + eps)
         target_val_ref = original + eps;
         spline.update(times, points, 0.0, bc);
-        double cost_p = spline.getEnergy();
+        double cost_p = spline.energy();
 
         // J(x - eps)
         target_val_ref = original - eps;
         spline.update(times, points, 0.0, bc);
-        double cost_m = spline.getEnergy();
+        double cost_m = spline.energy();
 
         // Central Difference
         double num_grad = (cost_p - cost_m) / (2.0 * eps);
@@ -60,7 +60,7 @@ void testCubicGradients() {
         target_val_ref = original;
         spline.update(times, points, 0.0, bc);
 
-        // Check consistency between propagateGrad and getEnergyGradBoundary
+        // Check consistency between backward and energyBoundaryGradient
         double consistency_err = relativeError(grad_propagate, grad_boundary);
         double numerical_err = relativeError(grad_propagate, num_grad);
 
@@ -103,7 +103,7 @@ void testCubicGradients() {
     std::cout << "\n--- [Proof] Hierarchy: Pos->Jerk, Vel->Acc (Cubic k=2) ---" << std::endl;
     std::cout << "Formula: m = 2k-1-n, where n is boundary derivative order" << std::endl;
 
-    auto& traj = spline.getTrajectory();
+    auto& traj = spline.polynomial();
 
     // Start Boundary (t=0)
     // Vel (n=1) -> Acc (m=2): Grad_Vel / Acc = -2
@@ -117,7 +117,7 @@ void testCubicGradients() {
               << " (Expected: 2.0)" << std::endl;
 
     // End Boundary (t=T)
-    double T = spline.getEndTime();
+    double T = spline.endTime();
     auto end_acc = traj.evaluate(T, Deriv::Acc);
     auto end_jerk = traj.evaluate(T, Deriv::Jerk);
 
@@ -136,7 +136,7 @@ void testQuinticGradients() {
 
     std::vector<double> times = {1.0, 1.5, 0.8};
 
-    SplineType::MatrixType points(static_cast<int>(times.size()) + 1, DIM);
+    SplineType::CoefficientMatrix points(static_cast<int>(times.size()) + 1, DIM);
     for (int i = 0; i <= static_cast<int>(times.size()); ++i)
         points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
@@ -148,11 +148,11 @@ void testQuinticGradients() {
 
     SplineType spline(times, points, 0.0, bc);
 
-    auto gdC = spline.getEnergyPartialGradByCoeffs();
-    auto gdT = spline.getEnergyPartialGradByTimes();
+    auto gdC = spline.energyCoefficientPartials();
+    auto gdT = spline.energyDurationPartials();
 
-    auto grads = spline.propagateGrad(gdC, gdT);
-    auto bc_grads = spline.getEnergyGradBoundary();
+    auto grads = spline.backward(gdC, gdT);
+    auto bc_grads = spline.energyBoundaryGradient();
 
     double eps = 1e-6;
 
@@ -162,12 +162,12 @@ void testQuinticGradients() {
         // J(x + eps)
         target_val_ref = original + eps;
         spline.update(times, points, 0.0, bc);
-        double cost_p = spline.getEnergy();
+        double cost_p = spline.energy();
 
         // J(x - eps)
         target_val_ref = original - eps;
         spline.update(times, points, 0.0, bc);
-        double cost_m = spline.getEnergy();
+        double cost_m = spline.energy();
 
         // Central Difference
         double num_grad = (cost_p - cost_m) / (2.0 * eps);
@@ -175,7 +175,7 @@ void testQuinticGradients() {
         target_val_ref = original;
         spline.update(times, points, 0.0, bc);
 
-        // Check consistency between propagateGrad and getEnergyGradBoundary
+        // Check consistency between backward and energyBoundaryGradient
         double consistency_err = relativeError(grad_propagate, grad_boundary);
         double numerical_err = relativeError(grad_propagate, num_grad);
 
@@ -222,7 +222,7 @@ void testQuinticGradients() {
     std::cout << "\n--- [Proof] Hierarchy: Pos->Crackle, Vel->Snap, Acc->Jerk (Quintic k=3) ---" << std::endl;
     std::cout << "Formula: m = 2k-1-n = 5-n, where n is boundary derivative order" << std::endl;
 
-    auto& traj = spline.getTrajectory();
+    auto& traj = spline.polynomial();
 
     // Start Boundary (t=0)
     // Acc (n=2) -> Jerk (m=3): Grad_Acc / Jerk = -2
@@ -241,7 +241,7 @@ void testQuinticGradients() {
               << " (Expected: -2.0)" << std::endl;
 
     // End Boundary (t=T)
-    double T = spline.getEndTime();
+    double T = spline.endTime();
     auto end_jerk = traj.evaluate(T, Deriv::Jerk);
     auto end_snap = traj.evaluate(T, Deriv::Snap);
     auto end_crackle = traj.evaluate(T, 5);
@@ -263,7 +263,7 @@ void testSepticGradients() {
     
     std::vector<double> times = {2.0, 1.0}; 
     
-    SplineType::MatrixType points(static_cast<int>(times.size()) + 1, DIM);
+    SplineType::CoefficientMatrix points(static_cast<int>(times.size()) + 1, DIM);
     for (int i = 0; i <= static_cast<int>(times.size()); ++i)
         points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
@@ -278,11 +278,11 @@ void testSepticGradients() {
 
     SplineType spline(times, points, 0.0, bc);
 
-    auto gdC = spline.getEnergyPartialGradByCoeffs();
-    auto gdT = spline.getEnergyPartialGradByTimes();
+    auto gdC = spline.energyCoefficientPartials();
+    auto gdT = spline.energyDurationPartials();
 
-    auto grads = spline.propagateGrad(gdC, gdT);
-    auto bc_grads = spline.getEnergyGradBoundary();
+    auto grads = spline.backward(gdC, gdT);
+    auto bc_grads = spline.energyBoundaryGradient();
 
     double eps = 1e-6;
 
@@ -290,18 +290,18 @@ void testSepticGradients() {
         double original = target_val_ref;
         target_val_ref = original + eps;
         spline.update(times, points, 0.0, bc);
-        double cost_p = spline.getEnergy();
+        double cost_p = spline.energy();
 
         target_val_ref = original - eps;
         spline.update(times, points, 0.0, bc);
-        double cost_m = spline.getEnergy();
+        double cost_m = spline.energy();
 
         double num_grad = (cost_p - cost_m) / (2.0 * eps);
 
         target_val_ref = original;
         spline.update(times, points, 0.0, bc);
 
-        // Check consistency between propagateGrad and getEnergyGradBoundary
+        // Check consistency between backward and energyBoundaryGradient
         double consistency_err = relativeError(grad_propagate, grad_boundary);
         double numerical_err = relativeError(grad_propagate, num_grad);
 
@@ -342,7 +342,7 @@ void testSepticGradients() {
     std::cout << "\n--- [Proof] Hierarchy: Pos->Flick, Vel->Pop, Acc->Crackle, Jerk->Snap (Septic k=4) ---" << std::endl;
     std::cout << "Formula: m = 2k-1-n = 7-n, where n is boundary derivative order" << std::endl;
 
-    auto& traj = spline.getTrajectory();
+    auto& traj = spline.polynomial();
 
     // Start Boundary (t=0)
     // Jerk (n=3) -> Snap (m=4): Grad_Jerk / Snap = -2
@@ -365,7 +365,7 @@ void testSepticGradients() {
               << " (Expected: 2.0)" << std::endl;
 
     // End Boundary (t=T)
-    double T = spline.getEndTime();
+    double T = spline.endTime();
     auto end_snap = traj.evaluate(T, Deriv::Snap);
     auto end_crackle = traj.evaluate(T, 5);
     auto end_pop = traj.evaluate(T, 6);

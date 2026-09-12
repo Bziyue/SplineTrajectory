@@ -2,8 +2,8 @@
 // #include "SplineTrajectory.hpp"
 // #include "cubic_spline_nd_with_ppolynd.hpp"
 #include "SplineTrajectory.hpp"
-#include "gcopter/minco.hpp"
-#include "gcopter/trajectory.hpp"
+#include <minco.hpp>
+#include <trajectory.hpp>
 #include <iostream>
 #include <vector>
 #include <random>
@@ -184,9 +184,9 @@ void runTest()
     auto end_vel_eigen = generateRandomVelocity(DIM);
 
     using Spline = SplineTrajectory::CubicSplineND<DIM>;
-    using VectorD = typename Spline::VectorType;
+    using VectorD = typename Spline::Vector;
 
-    typename Spline::MatrixType waypoints = waypoints_mat;
+    typename Spline::CoefficientMatrix waypoints = waypoints_mat;
 
     BoundaryConditions<DIM> bv(start_vel_eigen, end_vel_eigen);
 
@@ -256,12 +256,12 @@ void runTest()
     }
 
     double dt = 0.01;
-    auto time_seq = cubic_spline.getTrajectory().generateTimeSequence(dt);
+    auto time_seq = cubic_spline.polynomial().generateTimeSequence(dt);
     int num_queries = time_seq.size();
 
     std::cout << "\n2.2) 单点查询性能 (" << num_queries << "个点):" << std::endl;
     std::function<void(int)> cubic_func = [&](int i)
-    { cubic_spline.getTrajectory().evaluate(time_seq[i], Deriv::Pos); };
+    { cubic_spline.polynomial().evaluate(time_seq[i], Deriv::Pos); };
     auto perf_cubic = measurePerformance(cubic_func, num_queries);
     printPerformance(perf_cubic, "  - CubicSpline" + std::to_string(DIM) + "D");
 
@@ -280,10 +280,10 @@ void runTest()
 
     std::cout << "\n2.3) 批量查询性能 (一次性查询 " << num_queries << " 个点):" << std::endl;
     auto t1 = std::chrono::high_resolution_clock::now();
-    auto cubic_results_position = cubic_spline.getTrajectory().evaluate(time_seq, Deriv::Pos);
-    auto cubic_results_velocity = cubic_spline.getTrajectory().evaluate(time_seq, Deriv::Vel);
-    auto cubic_results_acceleration = cubic_spline.getTrajectory().evaluate(time_seq, Deriv::Acc);
-    auto cubic_results_jerk = cubic_spline.getTrajectory().evaluate(time_seq, Deriv::Jerk);
+    auto cubic_results_position = cubic_spline.polynomial().evaluate(time_seq, Deriv::Pos);
+    auto cubic_results_velocity = cubic_spline.polynomial().evaluate(time_seq, Deriv::Vel);
+    auto cubic_results_acceleration = cubic_spline.polynomial().evaluate(time_seq, Deriv::Acc);
+    auto cubic_results_jerk = cubic_spline.polynomial().evaluate(time_seq, Deriv::Jerk);
     auto t2 = std::chrono::high_resolution_clock::now();
     double cubic_batch_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     std::cout << "  - CubicSpline" << DIM << "D 批量查询 (getTrajectorySequence): " << cubic_batch_us << " μs" << std::endl;
@@ -342,7 +342,7 @@ void runTest()
     printConsistency(cons);
 
     std::cout << "\n2.5) PPolyND::derivative() 方法验证 (一阶导数):" << std::endl;
-    auto ppoly = cubic_spline.getPPoly();
+    auto ppoly = cubic_spline.polynomial();
     auto d_ppoly = ppoly.derivative(1);
     auto vel_from_d_ppoly = d_ppoly.evaluate(time_seq, 0);
     double max_diff = 0.0, avg_diff = 0.0;
@@ -374,7 +374,7 @@ void runTest()
         std::cout << "\n2.6) 轨迹能量计算一致性测试 (DIM=3):" << std::endl;
         
         // 获取 CubicSplineND 的能量
-        double cubic_energy = cubic_spline.getEnergy();
+        double cubic_energy = cubic_spline.energy();
         
         // 获取 MINCO 的能量 (只有第一个实例，因为DIM=3时只有一个MINCO实例)
         double minco_energy = 0.0;

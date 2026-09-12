@@ -19,10 +19,10 @@
 namespace
 {
 using Spline = SplineTrajectory::QuinticSplineND<2>;
-using Optimizer = SplineTrajectory::SplineOptimizer<2>;
-using Matrix = Spline::MatrixType;
+using Optimizer = SplineTrajectory::SplineOptimizer<Spline>;
+using Matrix = Spline::CoefficientMatrix;
 using Vector = Eigen::Vector2d;
-using Hull = SplineTrajectory::ConvexHullRepresentation<2>;
+using Hull = SplineTrajectory::ConvexHullWorkspace<2>;
 
 struct Circle
 {
@@ -41,32 +41,13 @@ struct LinearTimeCost
     double weight = 0.4;
 
     double operator()(const std::vector<double> &times,
-                      Eigen::VectorXd &gradient) const
+                      Eigen::Ref<Eigen::VectorXd> gradient) const
     {
-        gradient = Eigen::VectorXd::Constant(
-            static_cast<Eigen::Index>(times.size()), weight);
+        gradient.array() += weight;
         double total = 0.0;
         for (double duration : times)
             total += duration;
         return weight * total;
-    }
-};
-
-struct ZeroIntegralCost
-{
-    double operator()(const SplineTrajectory::IntegralPointInfo &,
-                      const Vector &, const Vector &, const Vector &,
-                      const Vector &, const Vector &,
-                      Vector &gp, Vector &gv, Vector &ga,
-                      Vector &gj, Vector &gs, double &gt) const
-    {
-        gp.setZero();
-        gv.setZero();
-        ga.setZero();
-        gj.setZero();
-        gs.setZero();
-        gt = 0.0;
-        return 0.0;
     }
 };
 
@@ -92,12 +73,12 @@ struct HullTrajectoryCost
     double acceleration_weight = 30.0;
     int position_subdivision_depth = 2;
     int dynamics_subdivision_depth = 1;
-    mutable Hull position_workspace;
-    mutable Hull velocity_workspace;
-    mutable Hull acceleration_workspace;
-    mutable Matrix position_gradient;
-    mutable Matrix velocity_gradient;
-    mutable Matrix acceleration_gradient;
+    Hull position_workspace;
+    Hull velocity_workspace;
+    Hull acceleration_workspace;
+    Matrix position_gradient;
+    Matrix velocity_gradient;
+    Matrix acceleration_gradient;
 
     static double addNormUpperPenalty(const Matrix &controls,
                                       double upper,
@@ -188,19 +169,15 @@ struct HullTrajectoryCost
 
     static void prepareWorkspace(Hull &workspace,
                                  Matrix &control_gradient,
-                                 const Spline::TrajectoryType &polynomial,
+                                 const Spline::Polynomial &polynomial,
                                  int derivative,
                                  int subdivision_depth)
     {
-        if (!workspace.kernel() ||
-            workspace.numSourceSegments() != polynomial.getNumSegments() ||
-            workspace.sourceDegree() + 1 != polynomial.getNumCoeffs() ||
-            workspace.derivativeOrder() != derivative ||
-            workspace.subdivisionDepth() != subdivision_depth)
+        const SplineTrajectory::HullOptions options{
+            SplineTrajectory::ConvexHullBasis::Bezier, derivative, subdivision_depth};
+        if (!workspace.matches(polynomial, options))
         {
-            workspace.resetTopology(
-                polynomial, SplineTrajectory::ConvexHullBasis::Bezier,
-                derivative, subdivision_depth);
+            workspace.configure(polynomial, options);
             control_gradient.resize(
                 workspace.controls().rows(), 2);
         }
@@ -208,14 +185,8 @@ struct HullTrajectoryCost
         control_gradient.setZero();
     }
 
-    double operator()(Spline &spline,
-                      const std::vector<double> &,
-                      double,
-                      Matrix &coefficient_gradients,
-                      Eigen::VectorXd &duration_gradients,
-                      double &) const
+    void prepare(const Spline::Polynomial &polynomial)
     {
-        const auto &polynomial = spline.getPPoly();
         prepareWorkspace(position_workspace, position_gradient,
                          polynomial, 0, position_subdivision_depth);
         prepareWorkspace(velocity_workspace, velocity_gradient,
@@ -224,6 +195,19 @@ struct HullTrajectoryCost
                          acceleration_gradient, polynomial, 2,
                          dynamics_subdivision_depth);
 
+    }
+
+    double operator()(const SplineTrajectory::ParameterView<Spline> &state,
+                      SplineTrajectory::CoefficientGradient<Spline> &gradient)
+    {
+        position_workspace.update(state.polynomial);
+        velocity_workspace.update(state.polynomial);
+        acceleration_workspace.update(state.polynomial);
+        position_gradient.setZero();
+        velocity_gradient.setZero();
+        acceleration_gradient.setZero();
+        auto &coefficient_gradients = gradient.coefficients;
+        auto &duration_gradients = gradient.durations;
         double cost =
             addPositionPenalty(position_workspace, position_gradient);
         cost += addNormUpperPenalty(
@@ -251,6 +235,7 @@ struct HullTrajectoryCost
 struct LBFGSResult
 {
     int iterations = 0;
+    const char *termination = "iteration_limit";
     double final_cost = 0.0;
     double gradient_inf_norm = 0.0;
     std::vector<double> history;
@@ -277,7 +262,10 @@ LBFGSResult minimizeLBFGS(Eigen::VectorXd &x,
         if (!std::isfinite(cost) || !gradient.allFinite())
             throw std::runtime_error("Non-finite objective encountered in L-BFGS.");
         if (gradient.lpNorm<Eigen::Infinity>() < 2e-5)
+        {
+            result.termination = "gradient_tolerance";
             break;
+        }
 
         Eigen::VectorXd direction;
         if (s_history.empty())
@@ -339,7 +327,10 @@ LBFGSResult minimizeLBFGS(Eigen::VectorXd &x,
             step *= 0.5;
         }
         if (step < 1e-9 || !std::isfinite(trial_cost))
+        {
+            result.termination = "line_search_failed";
             break;
+        }
 
         Eigen::VectorXd s = trial_x - x;
         Eigen::VectorXd y = trial_gradient - gradient;
@@ -371,18 +362,18 @@ LBFGSResult minimizeLBFGS(Eigen::VectorXd &x,
 }
 
 void writeTrajectory(const std::filesystem::path &path,
-                     const Spline &spline)
+                     const Spline::Polynomial &spline)
 {
     std::ofstream stream(path);
     stream << std::setprecision(17);
     stream << "t,x,y,speed,acceleration\n";
     constexpr int samples = 500;
-    const auto &polynomial = spline.getPPoly();
+    const auto &polynomial = spline;
     for (int i = 0; i <= samples; ++i)
     {
         const double alpha = static_cast<double>(i) / samples;
         const double time =
-            spline.getStartTime() + alpha * spline.getDuration();
+            spline.startTime() + alpha * spline.duration();
         const Vector position = polynomial.evaluate(time, 0);
         const Vector velocity = polynomial.evaluate(time, 1);
         const Vector acceleration = polynomial.evaluate(time, 2);
@@ -393,16 +384,16 @@ void writeTrajectory(const std::filesystem::path &path,
 }
 
 void writeTrajectoryPrefix(const std::filesystem::path &path,
-                           const Spline &spline,
+                           const Spline::Polynomial &spline,
                            int source_segments)
 {
     std::ofstream stream(path);
     stream << std::setprecision(17);
     stream << "t,source_segment,x,y\n";
-    const auto &polynomial = spline.getPPoly();
-    const auto &breakpoints = polynomial.getBreakpoints();
+    const auto &polynomial = spline;
+    const auto &breakpoints = polynomial.breakpoints();
     const int segment_count =
-        std::min(source_segments, polynomial.getNumSegments());
+        std::min(source_segments, polynomial.numSegments());
     constexpr int samples_per_segment = 160;
     for (int segment = 0; segment < segment_count; ++segment)
     {
@@ -481,13 +472,13 @@ void writeEnvironment(const std::filesystem::path &path,
     }
 }
 
-Optimizer::ProblemDefinition makeProblem(
+Optimizer::Problem makeProblem(
     const std::vector<Vector, Eigen::aligned_allocator<Vector>> &points,
     double initial_duration)
 {
-    Optimizer::ProblemDefinition problem;
+    Optimizer::Problem problem;
     const int segments = static_cast<int>(points.size()) - 1;
-    problem.time_segments.assign(segments, initial_duration);
+    problem.durations.assign(segments, initial_duration);
     problem.waypoints.resize(segments + 1, 2);
     for (int i = 0; i <= segments; ++i)
         problem.waypoints.row(i) = points[i].transpose();
@@ -502,67 +493,76 @@ Optimizer::ProblemDefinition makeProblem(
 }
 
 void runScenario(const std::string &name,
-                 const Optimizer::ProblemDefinition &problem,
-                 const HullTrajectoryCost &hull_cost,
+                 const Optimizer::Problem &problem,
+                 HullTrajectoryCost hull_cost,
                  const std::filesystem::path &output_directory)
 {
     Optimizer optimizer;
-    Optimizer::OptimizerConfig config;
-    config.rho_energy = 0.003;
-    config.integral_num_steps = 20;
+    SplineTrajectory::OptimizerOptions config;
+    config.energy_weight = 0.003;
+    config.integration_steps = 20;
 
-    Optimizer::OptimizationContext context;
-    const auto prepare_status = optimizer.prepareContext(problem, context, config);
+    const auto prepare_status = optimizer.prepare(problem, config);
     if (!prepare_status)
         throw std::runtime_error(prepare_status.message);
 
-    Eigen::VectorXd x = optimizer.generateInitialGuess(context);
+    Eigen::VectorXd x = optimizer.initialGuess();
     const Eigen::VectorXd initial_x = x;
     LinearTimeCost time_cost;
-    ZeroIntegralCost integral_cost;
-    const auto spec =
-        Optimizer::makeEvaluateSpec(time_cost, integral_cost)
-            .withCoefficientCost(hull_cost);
+    hull_cost.prepare(optimizer.polynomial());
+    struct Objective
+    {
+        LinearTimeCost &duration;
+        HullTrajectoryCost &coefficient;
+    } objective{time_cost, hull_cost};
 
     Eigen::VectorXd scratch_gradient(x.size());
-    optimizer.evaluatePrepared(context, initial_x, scratch_gradient, spec);
+    const auto initial_result = optimizer.evaluate(initial_x, scratch_gradient, objective);
+    if (!initial_result) throw std::runtime_error(initial_result.status.message);
     writeTrajectory(output_directory / (name + "_initial_trajectory.csv"),
-                    optimizer.getWorkingSpline(context));
+                    optimizer.polynomial());
 
     const auto gradient_check =
-        optimizer.checkGradients(context, x, spec, 1e-6, 2e-3);
+        SplineTrajectory::checkGradients(optimizer, x, objective, 1e-6, 2e-3);
     std::cout << name << " gradient check: max_abs="
-              << gradient_check.max_abs_error << ", relative="
-              << gradient_check.rel_error << '\n';
-    if (!gradient_check.valid && gradient_check.max_abs_error > 3e-3)
+              << gradient_check.max_absolute_error << ", relative="
+              << gradient_check.relative_error << '\n';
+    if (!gradient_check)
         throw std::runtime_error(name + " optimizer gradient check failed.");
 
-    auto evaluate = [&](const Eigen::VectorXd &decision,
-                        Eigen::VectorXd &gradient)
+    // A C-style solver can receive this ordinary named object as its user data.
+    struct CallbackData
     {
-        return optimizer.evaluatePrepared(
-            context, decision, gradient, spec);
-    };
+        Optimizer &optimizer;
+        Objective &objective;
+        static double evaluate(void *instance, const Eigen::VectorXd &decision, Eigen::VectorXd &gradient)
+        {
+            auto &data = *static_cast<CallbackData *>(instance);
+            return data.optimizer.costAndGradient(decision, gradient, data.objective);
+        }
+    } callback{optimizer, objective};
+    auto evaluate = [&](const Eigen::VectorXd &decision, Eigen::VectorXd &gradient)
+    { return CallbackData::evaluate(&callback, decision, gradient); };
     const LBFGSResult result = minimizeLBFGS(x, evaluate);
 
     const auto synchronize_status =
-        optimizer.synchronizeWorkingState(context, x);
+        optimizer.updateAccepted(x);
     if (!synchronize_status)
         throw std::runtime_error(synchronize_status.message);
-    const Spline &spline = optimizer.getWorkingSpline(context);
+    const Spline::Polynomial &spline = optimizer.polynomial();
     const auto position_bezier =
         SplineTrajectory::toBezier(
-            spline.getPPoly(), 0,
+            spline, 0,
             hull_cost.position_subdivision_depth);
     const auto position_minvo =
-        SplineTrajectory::toMINVO(spline.getPPoly(), 0);
+        SplineTrajectory::toMINVO(spline, 0);
     const auto velocity =
         SplineTrajectory::toBezier(
-            spline.getPPoly(), 1,
+            spline, 1,
             hull_cost.dynamics_subdivision_depth);
     const auto acceleration =
         SplineTrajectory::toBezier(
-            spline.getPPoly(), 2,
+            spline, 2,
             hull_cost.dynamics_subdivision_depth);
 
     writeTrajectory(output_directory / (name + "_trajectory.csv"), spline);
@@ -585,7 +585,7 @@ void runScenario(const std::string &name,
         {
             const auto bezier_subdivision =
                 SplineTrajectory::toBezier(
-                    spline.getPPoly(), 0, depth);
+                    spline, 0, depth);
             writeControls(
                 output_directory /
                     ("bezier_subdivision_depth_" +
@@ -594,7 +594,7 @@ void runScenario(const std::string &name,
 
             const auto minvo_subdivision =
                 SplineTrajectory::toMINVO(
-                    spline.getPPoly(), 0, depth);
+                    spline, 0, depth);
             writeControls(
                 output_directory /
                     ("minvo_subdivision_depth_" +
@@ -613,9 +613,9 @@ void runScenario(const std::string &name,
             maximum_acceleration_control,
             acceleration.controls().row(row).norm());
 
-    std::cout << name << ": iterations=" << result.iterations
+    std::cout << name << ": termination=" << result.termination << ", iterations=" << result.iterations
               << ", cost=" << result.final_cost
-              << ", duration=" << spline.getDuration()
+              << ", duration=" << spline.duration()
               << ", max |v control|=" << maximum_speed_control
               << ", max |a control|=" << maximum_acceleration_control
               << ", |grad|inf=" << result.gradient_inf_norm << '\n';

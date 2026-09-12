@@ -82,7 +82,7 @@ VectorXd allocateTime(const MatrixXd &wayPs,
     return durations;
 }
 
-SepticSpline3D::MatrixType convertRouteToSplineMatrix(const MatrixXd &route)
+SepticSpline3D::CoefficientMatrix convertRouteToSplineMatrix(const MatrixXd &route)
 {
     return route.transpose();
 }
@@ -174,7 +174,7 @@ void runEvaluationTests()
     snapOpt.getTraj(minSnapTraj);
     
     // Setup SepticSpline trajectory
-    SepticSpline3D::MatrixType spline_points = convertRouteToSplineMatrix(route);
+    SepticSpline3D::CoefficientMatrix spline_points = convertRouteToSplineMatrix(route);
     std::vector<double> time_segments = convertVectorXdToStdVector(ts);
     BoundaryConditions<3> boundary;
     boundary.start_velocity.setZero();
@@ -213,7 +213,7 @@ void runEvaluationTests()
     
     // SepticSpline random evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_pos_random = septicSpline.getTrajectory().evaluate(random_times, Deriv::Pos);
+    auto ss_pos_random = septicSpline.polynomial().evaluate(random_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_pos_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -229,7 +229,7 @@ void runEvaluationTests()
     
     // SepticSpline random evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_vel_random = septicSpline.getTrajectory().evaluate(random_times, Deriv::Vel);
+    auto ss_vel_random = septicSpline.polynomial().evaluate(random_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_vel_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -245,7 +245,7 @@ void runEvaluationTests()
     
     // SepticSpline random evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_acc_random = septicSpline.getTrajectory().evaluate(random_times, Deriv::Acc);
+    auto ss_acc_random = septicSpline.polynomial().evaluate(random_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_acc_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -279,7 +279,7 @@ void runEvaluationTests()
     
     // SepticSpline normal batch evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_pos_batch_normal = septicSpline.getTrajectory().evaluate(uniform_times, Deriv::Pos);
+    auto ss_pos_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_pos_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -295,7 +295,7 @@ void runEvaluationTests()
     
     // SepticSpline batch evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_vel_batch_normal = septicSpline.getTrajectory().evaluate(uniform_times, Deriv::Vel);
+    auto ss_vel_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_vel_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -311,7 +311,7 @@ void runEvaluationTests()
     
     // SepticSpline batch evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_acc_batch_normal = septicSpline.getTrajectory().evaluate(uniform_times, Deriv::Acc);
+    auto ss_acc_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_acc_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -347,9 +347,9 @@ void runEvaluationTests()
         ms_acc_consistency[i] = minSnapTraj.getAcc(consistency_times[i]);
     }
     
-    auto ss_pos_consistency = septicSpline.getTrajectory().evaluate(consistency_times, Deriv::Pos);
-    auto ss_vel_consistency = septicSpline.getTrajectory().evaluate(consistency_times, Deriv::Vel);
-    auto ss_acc_consistency = septicSpline.getTrajectory().evaluate(consistency_times, Deriv::Acc);
+    auto ss_pos_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Pos);
+    auto ss_vel_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Vel);
+    auto ss_acc_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Acc);
     
     // Convert sampled results to std::vector for error calculation
     std::vector<Vector3d> ss_pos_consistency_vec(ss_pos_consistency.begin(), ss_pos_consistency.end());
@@ -367,7 +367,7 @@ void runEvaluationTests()
 
     // energy consistency
     double ms_energy = snapOpt.getObjective();
-    double ss_energy = septicSpline.getEnergy();
+    double ss_energy = septicSpline.energy();
     bool energy_consistent = std::abs(ms_energy - ss_energy) < 1e-6;
 
     // Check if results are consistent (within reasonable tolerance)
@@ -454,7 +454,7 @@ int main()
             minSnapTime_us += std::chrono::duration_cast<std::chrono::microseconds>(tc1 - tc0).count();
 
             // 准备 SepticSpline 数据
-            SepticSpline3D::MatrixType spline_points = convertRouteToSplineMatrix(route);
+            SepticSpline3D::CoefficientMatrix spline_points = convertRouteToSplineMatrix(route);
             std::vector<double> time_segments = convertVectorXdToStdVector(ts);
             
             // 设置边界条件（零速度、加速度和急动度）

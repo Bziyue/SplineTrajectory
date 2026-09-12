@@ -50,7 +50,7 @@ int main() {
     }
 
     using PPoly = PPolyND<DIM>;
-    PPoly::MatrixType coeffs(NUM_SEGS * NUM_COEFFS, DIM);
+    PPoly::CoefficientMatrix coeffs(NUM_SEGS * NUM_COEFFS, DIM);
     
     int target_seg_idx = 10;
     Eigen::Matrix<double, NUM_COEFFS, DIM> target_seg_coeffs;
@@ -73,8 +73,8 @@ int main() {
 
     PPoly traj(breakpoints, coeffs, NUM_COEFFS);
 
-    if (traj.isInitialized() && traj.getNumSegments() == NUM_SEGS && traj.getNumCoeffs() == NUM_COEFFS) {
-        std::cout << "Generated Spline: " << NUM_SEGS << " segments, Total Duration: " << traj.getDuration() << "s" << std::endl;
+    if (traj.isValid() && traj.numSegments() == NUM_SEGS && traj.coefficientCount() == NUM_COEFFS) {
+        std::cout << "Generated Spline: " << NUM_SEGS << " segments, Total Duration: " << traj.duration() << "s" << std::endl;
         printPass("Initialization & Random Generation");
     } else {
         printFail("Initialization", "Failed to init PPolyND with random data");
@@ -83,7 +83,6 @@ int main() {
     {
         std::cout << "\nTesting STL Iterator on 36 segments..." << std::endl;
         int iter_count = 0;
-        bool continuity_check = true;
 
         for (const auto& seg : traj) {
             if (seg.index() != iter_count) {
@@ -96,7 +95,7 @@ int main() {
             }
 
             if (iter_count == 5) {
-                auto seg_coeffs = seg.getCoeffs(); 
+                auto seg_coeffs = seg.coefficients();
                 if ((seg_coeffs.row(0) - coeffs.row(5 * NUM_COEFFS)).norm() > 1e-9) {
                     printFail("Iterator", "Coefficient access mismatch");
                 }
@@ -121,15 +120,15 @@ int main() {
         Eigen::Vector3d ones(1, 1, 1);
 
         Eigen::Vector3d expected_pos = (0.5 + std::pow(0.5, 5)) * ones;
-        assertVectorEq(seg.evaluate(dt, Deriv::Pos), expected_pos, "Quintic Pos");
+        assertVectorEq(seg.evaluateLocal(dt, Deriv::Pos), expected_pos, "Quintic Pos");
 
         Eigen::Vector3d expected_vel = (1.0 + 5.0 * std::pow(0.5, 4)) * ones;
-        assertVectorEq(seg.evaluate(dt, Deriv::Vel), expected_vel, "Quintic Vel");
+        assertVectorEq(seg.evaluateLocal(dt, Deriv::Vel), expected_vel, "Quintic Vel");
 
         Eigen::Vector3d expected_crackle = 120.0 * ones;
-        assertVectorEq(seg.evaluate(dt, Deriv::Crackle), expected_crackle, "Quintic Crackle (5th deriv)");
+        assertVectorEq(seg.evaluateLocal(dt, Deriv::Crackle), expected_crackle, "Quintic Crackle (5th deriv)");
 
-        assertVectorEq(seg.evaluate(dt, Deriv::Pop), Eigen::Vector3d::Zero(), "Quintic Pop (6th deriv - zero)");
+        assertVectorEq(seg.evaluateLocal(dt, Deriv::Pop), Eigen::Vector3d::Zero(), "Quintic Pop (6th deriv - zero)");
 
         printPass("Quintic Derivative Evaluation (up to 6th order)");
     }
@@ -147,7 +146,7 @@ int main() {
         }
 
         try {
-            auto out_bounds = traj.at(NUM_SEGS); 
+            (void)traj.at(NUM_SEGS);
             printFail("Exception", "traj.at(36) did not throw");
         } catch (const std::out_of_range& e) {
             printPass("Exception Handling (out_of_range)");
@@ -167,32 +166,15 @@ int main() {
     }
 
     {
-        std::cout << "\nTesting Evaluation with Hint Optimization..." << std::endl;
-
-        int hint = 0;
-        double start_time = traj.getStartTime();
-        double end_time = traj.getEndTime();
-        double dt = 0.01;
-
-        int num_evaluations = static_cast<int>((end_time - start_time) / dt) + 1;
-        std::cout << "Evaluating " << num_evaluations << " points with dt=" << dt << "..." << std::endl;
-
-        int hint_changes = 0;
-        int prev_hint = hint;
-
-        for (double t = start_time; t <= end_time + 1e-9; t += dt) {
-            Eigen::Vector3d pos = traj.evaluate(t, &hint, Deriv::Pos);
-
-            if (hint != prev_hint && prev_hint != 0) {
-                hint_changes++;
-            }
-            prev_hint = hint;
+        auto sampler = traj.makeSampler<3>();
+        for (double t = traj.startTime(); t <= traj.endTime(); t += 0.01)
+        {
+            const auto values = sampler.evaluate(t);
+            for (int derivative = 0; derivative <= 3; ++derivative)
+                if (!values[derivative].isApprox(traj.evaluate(t, derivative), 1e-12))
+                    throw std::runtime_error("Sequential sampling differs from direct evaluation");
         }
-
-        std::cout << "Hint changes during evaluation: " << hint_changes << std::endl;
-        std::cout << "Final hint value: " << hint << std::endl;
-
-        printPass("Evaluation with Hint Optimization");
+        printPass("Sequential derivative sampling");
     }
 
     std::cout << "\n-------------------------------------------" << std::endl;

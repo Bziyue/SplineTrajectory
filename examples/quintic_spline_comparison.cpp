@@ -12,12 +12,13 @@
 #include "SplineTrajectory.hpp"
 
 int main() {
+    double checksum = 0.0;
     using namespace SplineTrajectory;
     
     std::cout << "=== Cubic vs Quintic Spline Comparison ===" << std::endl;
     
     // Define a challenging 2D trajectory with sharp turns (row = one waypoint)
-    QuinticSpline2D::MatrixType waypoints(7, 2);
+    QuinticSpline2D::CoefficientMatrix waypoints(7, 2);
     waypoints <<
         0.0, 0.0,
         2.0, 1.0,
@@ -40,7 +41,7 @@ int main() {
     CubicSpline2D cubic_spline(time_points, waypoints, boundary);
     QuinticSpline2D quintic_spline(time_points, waypoints, boundary);
     
-    if (!cubic_spline.isInitialized() || !quintic_spline.isInitialized()) {
+    if (!cubic_spline.isValid() || !quintic_spline.isValid()) {
         std::cerr << "Failed to initialize splines!" << std::endl;
         return -1;
     }
@@ -51,26 +52,26 @@ int main() {
     std::cout << "Property                | Cubic      | Quintic    | Difference" << std::endl;
     std::cout << "------------------------|------------|------------|------------" << std::endl;
     
-    double cubic_energy = cubic_spline.getEnergy();
-    double quintic_energy = quintic_spline.getEnergy();
+    double cubic_energy = cubic_spline.energy();
+    double quintic_energy = quintic_spline.energy();
     std::cout << "Energy                  | " << std::setw(10) << cubic_energy 
               << " | " << std::setw(10) << quintic_energy 
               << " | " << std::setw(10) << (quintic_energy - cubic_energy) << std::endl;
     
-    double cubic_length = cubic_spline.getTrajectory().getTrajectoryLength();
-    double quintic_length = quintic_spline.getTrajectory().getTrajectoryLength();
+    double cubic_length = cubic_spline.polynomial().length();
+    double quintic_length = quintic_spline.polynomial().length();
     std::cout << "Length                  | " << std::setw(10) << cubic_length 
               << " | " << std::setw(10) << quintic_length 
               << " | " << std::setw(10) << (quintic_length - cubic_length) << std::endl;
     
     // Compare smoothness by looking at acceleration and jerk profiles
     std::cout << "\n=== Smoothness Analysis ===" << std::endl;
-    std::vector<double> eval_times = cubic_spline.getTrajectory().generateTimeSequence(0.05);
+    std::vector<double> eval_times = cubic_spline.polynomial().generateTimeSequence(0.05);
     
-    auto cubic_accelerations = cubic_spline.getTrajectory().evaluate(eval_times, Deriv::Acc);
-    auto quintic_accelerations = quintic_spline.getTrajectory().evaluate(eval_times, Deriv::Acc);
-    auto cubic_jerks = cubic_spline.getTrajectory().evaluate(eval_times, Deriv::Jerk);
-    auto quintic_jerks = quintic_spline.getTrajectory().evaluate(eval_times, Deriv::Jerk);
+    auto cubic_accelerations = cubic_spline.polynomial().evaluate(eval_times, Deriv::Acc);
+    auto quintic_accelerations = quintic_spline.polynomial().evaluate(eval_times, Deriv::Acc);
+    auto cubic_jerks = cubic_spline.polynomial().evaluate(eval_times, Deriv::Jerk);
+    auto quintic_jerks = quintic_spline.polynomial().evaluate(eval_times, Deriv::Jerk);
     
     // Calculate RMS values for smoothness comparison
     double cubic_acc_rms = 0.0, quintic_acc_rms = 0.0;
@@ -98,10 +99,10 @@ int main() {
     // Generate detailed comparison data
     std::cout << "\n=== Generating Comparison Data ===" << std::endl;
     
-    auto cubic_positions = cubic_spline.getTrajectory().evaluate(eval_times, Deriv::Pos);
-    auto quintic_positions = quintic_spline.getTrajectory().evaluate(eval_times, Deriv::Pos);
-    auto cubic_velocities = cubic_spline.getTrajectory().evaluate(eval_times, Deriv::Vel);
-    auto quintic_velocities = quintic_spline.getTrajectory().evaluate(eval_times, Deriv::Vel);
+    auto cubic_positions = cubic_spline.polynomial().evaluate(eval_times, Deriv::Pos);
+    auto quintic_positions = quintic_spline.polynomial().evaluate(eval_times, Deriv::Pos);
+    auto cubic_velocities = cubic_spline.polynomial().evaluate(eval_times, Deriv::Vel);
+    auto quintic_velocities = quintic_spline.polynomial().evaluate(eval_times, Deriv::Vel);
     
     // Save comparison data
     std::ofstream csv_file("spline_comparison.csv");
@@ -130,7 +131,8 @@ int main() {
     auto start_time = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_evaluations; ++i) {
         double t = 6.0 * i / num_evaluations;
-        volatile auto pos = cubic_spline.getTrajectory().evaluate(t, Deriv::Pos);
+        const auto pos = cubic_spline.polynomial().evaluate(t, Deriv::Pos);
+        checksum += pos.squaredNorm();
     }
     auto end_time = std::chrono::high_resolution_clock::now();
     auto cubic_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
@@ -138,7 +140,8 @@ int main() {
     start_time = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_evaluations; ++i) {
         double t = 6.0 * i / num_evaluations;
-        volatile auto pos = quintic_spline.getTrajectory().evaluate(t, Deriv::Pos);
+        const auto pos = quintic_spline.polynomial().evaluate(t, Deriv::Pos);
+        checksum += pos.squaredNorm();
     }
     end_time = std::chrono::high_resolution_clock::now();
     auto quintic_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
@@ -147,5 +150,6 @@ int main() {
     std::cout << "Quintic spline: " << quintic_duration.count() << " μs for " << num_evaluations << " evaluations" << std::endl;
     std::cout << "Performance ratio: " << (double)quintic_duration.count() / cubic_duration.count() << "x" << std::endl;
     
+    std::cout << "Query checksum: " << checksum << std::endl;
     return 0;
 }

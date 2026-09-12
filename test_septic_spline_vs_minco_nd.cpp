@@ -1,8 +1,8 @@
 // #define EIGEN_DONT_ALIGN_STATICALLY
 // #include "septic_spline_nd.hpp"
 #include "SplineTrajectory.hpp"
-#include "gcopter/minco.hpp"
-#include "gcopter/trajectory.hpp"
+#include <minco.hpp>
+#include <trajectory.hpp>
 #include <iostream>
 #include <vector>
 #include <random>
@@ -245,9 +245,9 @@ void runSepticTest()
     auto end_jerk_eigen = generateRandomVector(DIM, 3.0);
 
     using SepticSpline = SplineTrajectory::SepticSplineND<DIM>;
-    using VectorD = typename SepticSpline::VectorType;
+    using VectorD = typename SepticSpline::Vector;
 
-    typename SepticSpline::MatrixType waypoints = waypoints_mat;
+    typename SepticSpline::CoefficientMatrix waypoints = waypoints_mat;
 
     BoundaryConditions<DIM> bc(start_vel_eigen, start_acc_eigen,start_jerk_eigen,
                                end_vel_eigen, end_acc_eigen, end_jerk_eigen);
@@ -376,14 +376,14 @@ void runSepticTest()
     }
 
     double dt = 0.01;
-    auto time_seq = septic_spline.getTrajectory().generateTimeSequence(dt);
+    auto time_seq = septic_spline.polynomial().generateTimeSequence(dt);
     int num_queries = time_seq.size();
 
     std::cout << "\n2.2) 单点查询性能 (" << num_queries << "个点):" << std::endl;
 
     // 七次样条单点查询性能
     std::function<void(int)> septic_func = [&](int i)
-    { septic_spline.getTrajectory().evaluate(time_seq[i]); };
+    { septic_spline.polynomial().evaluate(time_seq[i]); };
     auto perf_septic = measurePerformance(septic_func, num_queries);
     printPerformance(perf_septic, "  - SepticSpline" + std::to_string(DIM) + "D");
 
@@ -409,11 +409,11 @@ void runSepticTest()
 
     // 七次样条批量查询
     auto t1 = std::chrono::high_resolution_clock::now();
-    auto septic_results_position = septic_spline.getTrajectory().evaluate(time_seq, Deriv::Pos);
-    auto septic_results_velocity = septic_spline.getTrajectory().evaluate(time_seq, Deriv::Vel);
-    auto septic_results_acceleration = septic_spline.getTrajectory().evaluate(time_seq, Deriv::Acc);
-    auto septic_results_jerk = septic_spline.getTrajectory().evaluate(time_seq, Deriv::Jerk);
-    auto septic_results_snap = septic_spline.getTrajectory().evaluate(time_seq, Deriv::Snap);
+    auto septic_results_position = septic_spline.polynomial().evaluate(time_seq, Deriv::Pos);
+    auto septic_results_velocity = septic_spline.polynomial().evaluate(time_seq, Deriv::Vel);
+    auto septic_results_acceleration = septic_spline.polynomial().evaluate(time_seq, Deriv::Acc);
+    auto septic_results_jerk = septic_spline.polynomial().evaluate(time_seq, Deriv::Jerk);
+    auto septic_results_snap = septic_spline.polynomial().evaluate(time_seq, Deriv::Snap);
     auto t2 = std::chrono::high_resolution_clock::now();
     double septic_batch_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     std::cout << "  - SepticSpline" << DIM << "D 普通批量查询: " << septic_batch_us << " μs" << std::endl;
@@ -474,7 +474,7 @@ void runSepticTest()
     printConsistency(cons);
 
     std::cout << "\n2.5) PPolyND::derivative() 方法验证 (一阶导数):" << std::endl;
-    auto ppoly = septic_spline.getPPoly();
+    auto ppoly = septic_spline.polynomial();
     auto d_ppoly = ppoly.derivative(1);
     auto vel_from_d_ppoly = d_ppoly.evaluate(time_seq, 0);
     double max_diff = 0.0, avg_diff = 0.0;
@@ -506,7 +506,7 @@ void runSepticTest()
         std::cout << "\n2.8) 轨迹能量计算一致性测试 (DIM=3):" << std::endl;
         
         // 获取 SepticSplineND 的能量
-        double septic_energy = septic_spline.getEnergy();
+        double septic_energy = septic_spline.energy();
         
         // 获取 MINCO_S4NU 的能量 (只有第一个实例，因为DIM=3时只有一个MINCO实例)
         double minco_energy = 0.0;

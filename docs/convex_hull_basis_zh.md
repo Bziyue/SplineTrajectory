@@ -112,11 +112,11 @@ $$
 这与 Bezier 的重复二分/de Casteljau 在数学上等价，但运行时不再建立
 细分树。由于 $B_m$ 可以是 Bezier 或 MINVO，MINVO 细分无需另一套算法。
 
-`Kernel` 是不可变共享对象，按“基、源系数数、导数阶、细分深度”缓存
+`ConvexHullKernel` 是不可变共享对象，按“基、源系数数、导数阶、细分深度”缓存
 $K$、$K^T$、下降阶乘和叶片起始比例。相同拓扑的多个表示或多个优化上下文
 复用同一份核。
 
-`resetTopology()` 只在拓扑改变时分配输出和临时工作区，并按真实字节数
+`configure()` 只在拓扑改变时分配输出和临时工作区，并按真实字节数
 检查内存预算；`update()` 只更新系数、时长幂、控制点和 piece 元数据。
 时长幂通过
 
@@ -156,7 +156,7 @@ $$
 
 `backwardAdd()` 使用预分配的临时矩阵，并把结果加到调用方已有的
 `grad_coeffs`、`grad_times`，不清空、不调整尺寸。这样位置、速度、加速度
-等多个凸包代价可先相加，最后只调用一次 spline `propagateGrad()`。
+等多个凸包代价可先相加，最后只调用一次 spline `backward()`。
 
 `backward()` 返回：
 
@@ -166,11 +166,11 @@ $$
 对于 MINCO spline，可直接继续传播：
 
 ```cpp
-auto hull = SplineTrajectory::toBezier(spline.getPPoly(), 1, 2);
+auto hull = SplineTrajectory::toBezier(spline.polynomial(), 1, 2);
 auto partial = hull.backward(control_gradients);
 
 QuinticSplineND<3>::Gradients parameters;
-spline.propagateGrad(partial.coefficients, partial.durations, parameters);
+spline.backward(partial.coefficients, partial.durations, parameters);
 ```
 
 这样控制点代价最终会传播到内部航点、边界状态和时间变量。
@@ -195,7 +195,7 @@ $t_0$ 梯度。因此全局时间相关代价不需要 $O(N^2)$ 的前缀求导�
 ```cpp
 #include "SplineConvexHull.hpp"
 
-const auto& ppoly = spline.getPPoly();
+const auto& ppoly = spline.polynomial();
 
 // 位置，每个原段二分 3 层，得到 8 个局部 Bezier 凸包。
 auto position = SplineTrajectory::toBezier(ppoly, 0, 3);
@@ -223,34 +223,36 @@ auto partial = position.backward(grad_controls);
 优化循环应复用 Workspace：
 
 ```cpp
-SplineTrajectory::ConvexHullRepresentation<3> hull;
-hull.resetTopology(ppoly, SplineTrajectory::ConvexHullBasis::MINVO, 1, 2);
+SplineTrajectory::ConvexHullWorkspace<3> hull;
+hull.configure(ppoly, {SplineTrajectory::ConvexHullBasis::MINVO, 1, 2});
 
 // 每次迭代：不改变 topology，不重新分配。
-hull.update(spline.getPPoly());
+hull.update(spline.polynomial());
 hull.backwardAdd(grad_controls, grad_coeffs, grad_times);
 ```
 
-`SplineOptimizer::EvaluateSpec::withCoefficientCost()` 提供了
-allocation-free 的非拥有型回调。它在统一 spline 伴随传播之前运行：
+`SplineOptimizer` 通过普通 Objective 的 `coefficient` 成员绑定凸包代价。
+它只读取多项式，在统一样条伴随之前累加系数和独立时间偏导：
 
 ```cpp
-auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost)
-    .withCoefficientCost(hull_cost);
+struct ProblemObjective {
+    TimeCost duration;
+    IntegralCost integral;
+    HullCost coefficient;
+};
+
+// HullCost's callable interface:
+double operator()(const SplineTrajectory::ParameterView<Spline>& state,
+                  SplineTrajectory::CoefficientGradient<Spline>& gradient);
 ```
 
-回调签名为：
-
-```cpp
-double operator()(Spline& spline,
-                  const std::vector<double>& times,
-                  double start_time,
-                  Matrix& grad_coeffs,
-                  Eigen::VectorXd& grad_times,
-                  double& grad_start_time) const;
-```
-
-回调必须使用加法语义。优化器随后只执行一次 `propagateGrad()`。
+代价工作区在准备阶段配置，回调内调用 `update()` 和 `backwardAdd()`；
+后者为非 const 操作，需要独占工作区。`gradient.coefficients/durations/start_time`
+都使用加法语义，优化器随后只执行一次 `backward()`。
+`isConfigured()` 与 `isValid()` 分别表示已配置拓扑和本次数值有效；
+`matches(ppoly, HullOptions)` 可判断是否需要重新配置。
+共享转换核不依赖 DIM，相同拓扑的不同维度工作区复用同一个不可变核。
+完整用法见[协议文档](../include/SplineOptimizerProtocols.md)和[优化示例](../examples/convex_hull_optimization_demo.cpp)。
 
 ## 6. 统一的 3/5/7 次样条名
 
@@ -266,8 +268,8 @@ SplineTrajectory::MinDerivativeSplineND<DIM, S>
 
 这是编译期选择器，内部仍使用已经稳定的三个专用线性求解与梯度实现，
 没有运行时分支；旧的 `CubicSplineND`、`QuinticSplineND`、
-`SepticSplineND` API 完全保留。三个专用实现的系数求解均已改成原位写入
-持久化矩阵，`Gradients` 提供固定拓扑的 `resetTopology()`/`setZero()`，
+`SepticSplineND` 类型名保留；查询和伴随名称按[迁移表](api_migration.md)统一。三个专用实现原位写入
+PPoly 唯一持有的系数矩阵，`Gradients` 提供固定拓扑的 `resetTopology()`/`setZero()`，
 因此统一名字不会牺牲现有专用求解器的热路径性能。
 
 ## 7. 优化示例与验证

@@ -11,8 +11,8 @@
 namespace
 {
 using PPoly = SplineTrajectory::PPolyND<3>;
-using Hull = SplineTrajectory::ConvexHullRepresentation<3>;
-using Matrix = PPoly::MatrixType;
+using Hull = SplineTrajectory::ConvexHullWorkspace<3>;
+using Matrix = PPoly::CoefficientMatrix;
 
 void require(bool condition, const char *message)
 {
@@ -43,7 +43,7 @@ double objective(const PPoly &polynomial,
                  int subdivision_depth,
                  const Matrix &weights)
 {
-    const auto representation = Hull::fromPPoly(
+    auto representation = Hull::fromPPoly(
         polynomial, basis, derivative, subdivision_depth);
     return (representation.controls().array() * weights.array()).sum();
 }
@@ -53,7 +53,7 @@ void checkRepresentationValues(const PPoly &polynomial,
                                int derivative,
                                int subdivision_depth)
 {
-    const auto representation = Hull::fromPPoly(
+    auto representation = Hull::fromPPoly(
         polynomial, basis, derivative, subdivision_depth);
     const Eigen::MatrixXd transform =
         Hull::powerToControlMatrix(basis, representation.degree());
@@ -78,10 +78,10 @@ void checkRepresentationValues(const PPoly &polynomial,
                 (powers * normalized_power).transpose();
             const double local_time =
                 info.start_time -
-                polynomial.getBreakpoints()[info.source_segment] +
+                polynomial.breakpoints()[info.source_segment] +
                 u * info.duration;
             const Eigen::Vector3d expected =
-                polynomial[info.source_segment].evaluate(local_time, derivative);
+                polynomial[info.source_segment].evaluateLocal(local_time, derivative);
             require((from_controls - expected).norm() < 2e-9,
                     "Converted controls do not reproduce the polynomial derivative.");
 
@@ -110,7 +110,7 @@ void checkBackward(SplineTrajectory::ConvexHullBasis basis,
             coefficients(row, col) = normal(generator);
 
     PPoly polynomial = makePolynomial(durations, coefficients, num_coefficients);
-    const auto representation = Hull::fromPPoly(
+    auto representation = Hull::fromPPoly(
         polynomial, basis, derivative, subdivision_depth);
 
     Matrix weights(representation.controls().rows(), 3);
@@ -180,8 +180,8 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
     const PPoly polynomial =
         makePolynomial(durations, coefficients, num_coefficients);
     Hull workspace;
-    workspace.resetTopology(
-        polynomial, SplineTrajectory::ConvexHullBasis::MINVO, 2, 3);
+    workspace.configure(
+        polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3});
     workspace.update(polynomial);
     const auto reference = Hull::fromPPoly(
         polynomial, SplineTrajectory::ConvexHullBasis::MINVO, 2, 3);
@@ -239,7 +239,7 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
     };
 
     constexpr double epsilon = 2e-7;
-    const double start = polynomial.getStartTime();
+    const double start = polynomial.startTime();
     const double numerical_start =
         (time_objective(start + epsilon, durations) -
          time_objective(start - epsilon, durations)) /
@@ -264,9 +264,8 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
     try
     {
         Hull too_large;
-        too_large.resetTopology(
-            1, 8, SplineTrajectory::ConvexHullBasis::Bezier,
-            0, 8, 1024);
+        too_large.configure(
+            1, 8, {SplineTrajectory::ConvexHullBasis::Bezier, 0, 8}, 1024);
     }
     catch (const std::length_error &)
     {
@@ -282,7 +281,7 @@ void checkFixedTopologyEigenAllocationFree()
         SplineTrajectory::MinDerivativeSplineND<3, 3>;
     using Hull =
         SplineTrajectory::ConvexHullWorkspace<3>;
-    using SplineMatrix = typename Spline::MatrixType;
+    using SplineMatrix = typename Spline::CoefficientMatrix;
 
     const std::vector<double> durations{
         0.8, 1.1, 0.9, 1.2};
@@ -302,21 +301,21 @@ void checkFixedTopologyEigenAllocationFree()
         durations, waypoints, 0.25, boundary);
 
     Hull hull;
-    hull.resetTopology(
-        spline.getNumSegments(), Spline::COEFF_NUM,
-        SplineTrajectory::ConvexHullBasis::Bezier, 1, 2);
-    hull.update(spline.getTrajectory());
+    hull.configure(
+        spline.numSegments(), Spline::kCoefficientCount,
+        {SplineTrajectory::ConvexHullBasis::Bezier, 1, 2});
+    hull.update(spline.polynomial());
 
     SplineMatrix control_gradients =
         SplineMatrix::Ones(hull.controls().rows(), 3);
     SplineMatrix coefficient_gradients =
         SplineMatrix::Zero(
-            spline.getNumSegments() * Spline::COEFF_NUM, 3);
+            spline.numSegments() * Spline::kCoefficientCount, 3);
     Eigen::VectorXd duration_gradients =
-        Eigen::VectorXd::Zero(spline.getNumSegments());
+        Eigen::VectorXd::Zero(spline.numSegments());
     typename Spline::Gradients gradients;
-    gradients.resetTopology(spline.getNumSegments());
-    spline.propagateGrad(
+    gradients.resetTopology(spline.numSegments());
+    spline.backward(
         coefficient_gradients, duration_gradients, gradients);
 
     Eigen::internal::set_is_malloc_allowed(false);
@@ -324,13 +323,13 @@ void checkFixedTopologyEigenAllocationFree()
     {
         spline.update(
             durations, waypoints, 0.25, boundary);
-        hull.update(spline.getTrajectory());
+        hull.update(spline.polynomial());
         coefficient_gradients.setZero();
         duration_gradients.setZero();
         hull.backwardAdd(
             control_gradients, coefficient_gradients,
             duration_gradients);
-        spline.propagateGrad(
+        spline.backward(
             coefficient_gradients, duration_gradients,
             gradients);
     }

@@ -18,7 +18,7 @@ int main() {
     std::cout << "=== 6-DOF Robot Arm Trajectory Planning ===" << std::endl;
     
     // Define joint space waypoints (6 joints in radians, row = one waypoint)
-    QuinticSpline6D::MatrixType joint_waypoints(5, 6);
+    QuinticSpline6D::CoefficientMatrix joint_waypoints(5, 6);
     joint_waypoints <<
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         M_PI / 4, M_PI / 6, -M_PI / 3, 0.0, M_PI / 4, 0.0,
@@ -39,14 +39,14 @@ int main() {
     // Create quintic spline for smooth robot motion
     QuinticSpline6D robot_trajectory(time_points, joint_waypoints, boundary_conditions);
     
-    if (!robot_trajectory.isInitialized()) {
+    if (!robot_trajectory.isValid()) {
         std::cerr << "Failed to initialize robot trajectory!" << std::endl;
         return -1;
     }
     
     std::cout << "Robot trajectory created successfully!" << std::endl;
-    std::cout << "Total duration: " << robot_trajectory.getDuration() << " seconds" << std::endl;
-    std::cout << "Trajectory energy: " << robot_trajectory.getEnergy() << std::endl;
+    std::cout << "Total duration: " << robot_trajectory.duration() << " seconds" << std::endl;
+    std::cout << "Trajectory energy: " << robot_trajectory.energy() << std::endl;
     
     // Define joint limits and velocity/acceleration constraints
     SplinePoint6d joint_limits_min;
@@ -61,10 +61,10 @@ int main() {
     // Validate trajectory against constraints
     std::cout << "\n=== Trajectory Validation ===" << std::endl;
     
-    std::vector<double> eval_times = robot_trajectory.getTrajectory().generateTimeSequence(0.01);
-    auto positions = robot_trajectory.getTrajectory().evaluate(eval_times, Deriv::Pos);
-    auto velocities = robot_trajectory.getTrajectory().evaluate(eval_times, Deriv::Vel);
-    auto accelerations = robot_trajectory.getTrajectory().evaluate(eval_times, Deriv::Acc);
+    std::vector<double> eval_times = robot_trajectory.polynomial().generateTimeSequence(0.01);
+    auto positions = robot_trajectory.polynomial().evaluate(eval_times, Deriv::Pos);
+    auto velocities = robot_trajectory.polynomial().evaluate(eval_times, Deriv::Vel);
+    auto accelerations = robot_trajectory.polynomial().evaluate(eval_times, Deriv::Acc);
     
     bool position_valid = true, velocity_valid = true, acceleration_valid = true;
     double max_velocity = 0.0, max_acceleration = 0.0;
@@ -107,10 +107,10 @@ int main() {
     std::cout << "Generating commands at " << control_frequency << " Hz..." << std::endl;
     
     int command_count = 0;
-    for (double t = 0.0; t <= robot_trajectory.getEndTime(); t += dt) {
-        SplinePoint6d pos = robot_trajectory.getTrajectory().evaluate(t, Deriv::Pos);
-        SplinePoint6d vel = robot_trajectory.getTrajectory().evaluate(t, Deriv::Vel);
-        SplinePoint6d acc = robot_trajectory.getTrajectory().evaluate(t, Deriv::Acc);
+    for (double t = 0.0; t <= robot_trajectory.endTime(); t += dt) {
+        SplinePoint6d pos = robot_trajectory.polynomial().evaluate(t, Deriv::Pos);
+        SplinePoint6d vel = robot_trajectory.polynomial().evaluate(t, Deriv::Vel);
+        SplinePoint6d acc = robot_trajectory.polynomial().evaluate(t, Deriv::Acc);
         
         cmd_file << t;
         for (int i = 0; i < 6; ++i) cmd_file << "," << pos(i);
@@ -145,7 +145,7 @@ int main() {
     
     // Calculate smoothness metrics
     double total_jerk = 0.0;
-    auto jerks = robot_trajectory.getTrajectory().evaluate(eval_times, Deriv::Jerk);
+    auto jerks = robot_trajectory.polynomial().evaluate(eval_times, Deriv::Jerk);
     for (const auto& jerk : jerks) {
         total_jerk += jerk.squaredNorm();
     }

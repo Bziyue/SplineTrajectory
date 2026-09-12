@@ -9,8 +9,7 @@
 namespace
 {
 using Spline = SplineTrajectory::SepticSplineND<3>;
-using Optimizer = SplineTrajectory::SplineOptimizer<
-    3, Spline, SplineTrajectory::QuadInvTimeMap>;
+using Optimizer = SplineTrajectory::SplineOptimizer<Spline>;
 
 void Require(bool condition, const char *message)
 {
@@ -21,10 +20,10 @@ void Require(bool condition, const char *message)
   }
 }
 
-Optimizer::ProblemDefinition MakeProblem()
+Optimizer::Problem MakeProblem()
 {
-  Optimizer::ProblemDefinition problem;
-  problem.time_segments = {1.0, 1.0};
+  Optimizer::Problem problem;
+  problem.durations = {1.0, 1.0};
   problem.waypoints.resize(3, 3);
   problem.waypoints << 0, 0, 0, 1, 0, 0, 2, 0, 0;
   return problem;
@@ -37,22 +36,22 @@ template <class Curve>
 void CheckSplineValidity()
 {
   const auto problem = MakeProblem();
-  Curve curve(problem.time_segments, problem.waypoints, 0.0);
-  Require(curve.isInitialized(), "valid initial curve");
+  Curve curve(problem.durations, problem.waypoints, 0.0);
+  Require(curve.isValid(), "valid initial curve");
 
-  curve.update(problem.time_segments, problem.waypoints, 2e16);
-  Require(!curve.isInitialized() && !curve.getTrajectory().isInitialized(),
+  curve.update(problem.durations, problem.waypoints, 2e16);
+  Require(!curve.isValid() && !curve.polynomial().isValid(),
           "outer spline must reject collapsed polynomial time knots");
 
   auto points = problem.waypoints;
   points(0, 0) = -std::numeric_limits<double>::max();
   points(1, 0) = std::numeric_limits<double>::max();
-  curve.update(problem.time_segments, points, 0.0);
-  Require(!curve.isInitialized() && !curve.getTrajectory().isInitialized(),
+  curve.update(problem.durations, points, 0.0);
+  Require(!curve.isValid() && !curve.polynomial().isValid(),
           "outer spline must reject nonfinite solved coefficients");
 
-  curve.update(problem.time_segments, problem.waypoints, 0.0);
-  Require(curve.isInitialized() && curve.getTrajectory().evaluate(0.5).allFinite(),
+  curve.update(problem.durations, problem.waypoints, 0.0);
+  Require(curve.isValid() && curve.polynomial().evaluate(0.5).allFinite(),
           "curve must recover after invalid updates");
 }
 
@@ -61,30 +60,31 @@ void CheckSplineValidity()
 void CheckEvaluationFailures()
 {
   Optimizer optimizer;
-  Optimizer::OptimizationContext context;
   const auto problem = MakeProblem();
-  Require(bool(optimizer.prepareContext(problem, context)), "prepare valid context");
-  const auto good = optimizer.generateInitialGuess(context);
-  Eigen::VectorXd gradient;
+  Require(bool(optimizer.prepare(problem)), "prepare valid context");
+  const auto good = optimizer.initialGuess();
+  Eigen::VectorXd gradient(good.size());
   int time_calls = 0;
   int integral_calls = 0;
   bool nonfinite_cost = false;
-  auto time_cost = [&](const std::vector<double> &times, Eigen::VectorXd &g) {
+  auto time_cost = [&](const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> g) {
     ++time_calls;
     g.setOnes();
     return nonfinite_cost ? std::numeric_limits<double>::infinity() : times[0] + times[1];
   };
-  auto integral_cost = [&](const auto &, const auto &, const auto &, const auto &,
-                           const auto &, const auto &, auto &, auto &, auto &, auto &,
-                           auto &, double &) {
+  auto integral_cost = [&](const auto &, const auto &, auto &) {
     ++integral_calls;
     return 0.0;
   };
-  const auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
-  const double baseline = optimizer.evaluatePrepared(context, good, gradient, spec);
+  struct Objective
+  {
+    decltype(time_cost) &duration;
+    decltype(integral_cost) &integral;
+  } objective{time_cost, integral_cost};
+  const double baseline = optimizer.costAndGradient(good, gradient, objective);
   const Eigen::VectorXd baseline_gradient = gradient;
   Require(std::isfinite(baseline) && gradient.allFinite(), "valid baseline evaluation");
-  Require(optimizer.checkGradients(context, good, spec).valid, "normal gradient check remains valid");
+  Require(bool(SplineTrajectory::checkGradients(optimizer, good, objective)), "normal gradient check remains valid");
 
   // First trial reproduces the September 11 empty-coefficient read with the real duration map.
   for (int kind = 0; kind < 4; ++kind)
@@ -93,49 +93,50 @@ void CheckEvaluationFailures()
     if (kind == 0) bad(0) = 2e8;
     if (kind == 1) bad(0) = std::numeric_limits<double>::max();
     if (kind == 2)
-      bad(context.prepared.layout.waypoints.front().offset) = std::numeric_limits<double>::max();
+      bad(optimizer.layout().waypoints.front().offset) = std::numeric_limits<double>::max();
     if (kind == 3) bad(0) = std::numeric_limits<double>::quiet_NaN();
     const int previous_time_calls = time_calls;
     const int previous_integral_calls = integral_calls;
     gradient.setOnes(good.size());
-    const auto result = optimizer.evaluate(context, bad, gradient, spec);
+    const auto result = optimizer.evaluate(bad, gradient, objective);
     Require(!result && std::isinf(result.cost) && result.cost > 0 && gradient.isZero(),
             "checked evaluation must return failure, positive infinity and zero gradient");
-    Require(!optimizer.getWorkingSpline(context).isInitialized(), "failed build cannot expose stale curve");
-    Require(context.isValid(), "trial failure must not poison prepared configuration");
+    Require(!optimizer.polynomial().isValid(), "failed build cannot expose stale curve");
+    Require(optimizer.isPrepared(), "trial failure must not poison prepared configuration");
     Require(time_calls == previous_time_calls && integral_calls == previous_integral_calls,
             "invalid build must not enter cost callbacks");
     if (kind == 0)
-      Require(result.message.find("segment=1") != std::string::npos, "collapsed knot index retained");
+      Require(result.status.index == 1, "collapsed knot index retained");
 
     Optimizer::Status status;
     gradient.setOnes();
-    const double rejected = optimizer.evaluatePrepared(context, bad, gradient, spec, &status);
-    Require(!status && !status.message.empty() && std::isinf(rejected) && gradient.isZero(),
+    const double rejected = optimizer.costAndGradient(bad, gradient, objective);
+    status = optimizer.lastStatus();
+    Require(!status && status.message[0] != 0 && std::isinf(rejected) && gradient.isZero(),
             "scalar adapter must preserve status and reject invalid trials in Release too");
-    Require(!optimizer.synchronizeWorkingState(context, bad), "synchronization must reject same trial");
-    Require(!optimizer.getWorkingSpline(context).getTrajectory().isInitialized(), "invalid synchronized curve");
+    Require(!optimizer.updateAccepted(bad), "synchronization must reject same trial");
+    Require(!optimizer.polynomial().isValid(), "invalid synchronized curve");
 
-    Require(optimizer.evaluatePrepared(context, good, gradient, spec) == baseline &&
+    Require(optimizer.costAndGradient(good, gradient, objective) == baseline &&
                 gradient.isApprox(baseline_gradient, 1e-12),
             "valid retry must reproduce original cost and gradient");
   }
 
   nonfinite_cost = true;
-  const auto invalid_cost = optimizer.evaluate(context, good, gradient, spec);
+  const auto invalid_cost = optimizer.evaluate(good, gradient, objective);
   Require(!invalid_cost && std::isinf(invalid_cost.cost) && gradient.isZero(), "nonfinite callback is failure");
   nonfinite_cost = false;
-  Require(std::isfinite(optimizer.evaluatePrepared(context, good, gradient, spec)), "recover after bad cost");
+  Require(std::isfinite(optimizer.costAndGradient(good, gradient, objective)), "recover after bad cost");
 
   auto invalid_seed = problem;
-  invalid_seed.time_segments = {2e16, 1.0};
-  Require(!optimizer.prepareContext(invalid_seed, context), "prepare must reject collapsed seed knots");
-  Require(!context.isValid() && !optimizer.getWorkingSpline(context).isInitialized(), "invalid seed state");
+  invalid_seed.durations = {2e16, 1.0};
+  Require(!optimizer.prepare(invalid_seed), "prepare must reject collapsed seed knots");
+  Require(!optimizer.isPrepared() && !optimizer.polynomial().isValid(), "invalid seed state");
   invalid_seed = problem;
   invalid_seed.waypoints(1, 0) = std::numeric_limits<double>::max();
-  Require(!optimizer.prepareContext(invalid_seed, context), "prepare must reject nonfinite seed coefficients");
-  Require(bool(optimizer.prepareContext(problem, context)), "reprepare after invalid seed");
-  Require(bool(optimizer.synchronizeWorkingState(context, good)), "synchronize valid retry");
+  Require(!optimizer.prepare(invalid_seed), "prepare must reject nonfinite seed coefficients");
+  Require(bool(optimizer.prepare(problem)), "reprepare after invalid seed");
+  Require(bool(optimizer.updateAccepted(good)), "synchronize valid retry");
 }
 } // namespace
 

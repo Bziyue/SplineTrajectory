@@ -82,7 +82,7 @@ VectorXd allocateTime(const MatrixXd &wayPs,
     return durations;
 }
 
-QuinticSpline3D::MatrixType convertRouteToSplineMatrix(const MatrixXd &route)
+QuinticSpline3D::CoefficientMatrix convertRouteToSplineMatrix(const MatrixXd &route)
 {
     return route.transpose();
 }
@@ -174,7 +174,7 @@ void runEvaluationTests()
     jerkOpt.getTraj(minJerkTraj);
     
     // Setup QuinticSpline trajectory
-    QuinticSpline3D::MatrixType spline_points = convertRouteToSplineMatrix(route);
+    QuinticSpline3D::CoefficientMatrix spline_points = convertRouteToSplineMatrix(route);
     std::vector<double> time_segments = convertVectorXdToStdVector(ts);
     BoundaryConditions<3> boundary;
     boundary.start_velocity.setZero();
@@ -211,7 +211,7 @@ void runEvaluationTests()
     
     // QuinticSpline random evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_pos_random = quinticSpline.getTrajectory().evaluate(random_times, Deriv::Pos);
+    auto qs_pos_random = quinticSpline.polynomial().evaluate(random_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_random_pos_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -227,7 +227,7 @@ void runEvaluationTests()
     
     // QuinticSpline random evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_vel_random = quinticSpline.getTrajectory().evaluate(random_times, Deriv::Vel);
+    auto qs_vel_random = quinticSpline.polynomial().evaluate(random_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_random_vel_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -243,7 +243,7 @@ void runEvaluationTests()
     
     // QuinticSpline random evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_acc_random = quinticSpline.getTrajectory().evaluate(random_times, Deriv::Acc);
+    auto qs_acc_random = quinticSpline.polynomial().evaluate(random_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_random_acc_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -277,7 +277,7 @@ void runEvaluationTests()
     
     // QuinticSpline normal batch evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_pos_batch_normal = quinticSpline.getTrajectory().evaluate(uniform_times, Deriv::Pos);
+    auto qs_pos_batch_normal = quinticSpline.polynomial().evaluate(uniform_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_pos_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -293,7 +293,7 @@ void runEvaluationTests()
     
     // QuinticSpline batch evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_vel_batch_normal = quinticSpline.getTrajectory().evaluate(uniform_times, Deriv::Vel);
+    auto qs_vel_batch_normal = quinticSpline.polynomial().evaluate(uniform_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_vel_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -309,7 +309,7 @@ void runEvaluationTests()
     
     // QuinticSpline batch evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto qs_acc_batch_normal = quinticSpline.getTrajectory().evaluate(uniform_times, Deriv::Acc);
+    auto qs_acc_batch_normal = quinticSpline.polynomial().evaluate(uniform_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double qs_batch_acc_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     
@@ -345,9 +345,9 @@ void runEvaluationTests()
         mj_acc_consistency[i] = minJerkTraj.getAcc(consistency_times[i]);
     }
     
-    auto qs_pos_consistency = quinticSpline.getTrajectory().evaluate(consistency_times, Deriv::Pos);
-    auto qs_vel_consistency = quinticSpline.getTrajectory().evaluate(consistency_times, Deriv::Vel);
-    auto qs_acc_consistency = quinticSpline.getTrajectory().evaluate(consistency_times, Deriv::Acc);
+    auto qs_pos_consistency = quinticSpline.polynomial().evaluate(consistency_times, Deriv::Pos);
+    auto qs_vel_consistency = quinticSpline.polynomial().evaluate(consistency_times, Deriv::Vel);
+    auto qs_acc_consistency = quinticSpline.polynomial().evaluate(consistency_times, Deriv::Acc);
     
     // Convert sampled results to std::vector for error calculation
     std::vector<Vector3d> qs_pos_consistency_vec(qs_pos_consistency.begin(), qs_pos_consistency.end());
@@ -365,7 +365,7 @@ void runEvaluationTests()
     
     // energy consistency
     double mj_energy = jerkOpt.getObjective();
-    double qs_energy = quinticSpline.getEnergy();
+    double qs_energy = quinticSpline.energy();
     bool energy_consistent = std::abs(mj_energy - qs_energy) < 1e-6;
 
     // Check if results are consistent (within reasonable tolerance)
@@ -452,7 +452,7 @@ int main()
             minJerkTime_us += std::chrono::duration_cast<std::chrono::microseconds>(tc1 - tc0).count();
 
             // 准备 QuinticSpline 数据
-            QuinticSpline3D::MatrixType spline_points = convertRouteToSplineMatrix(route);
+            QuinticSpline3D::CoefficientMatrix spline_points = convertRouteToSplineMatrix(route);
             std::vector<double> time_segments = convertVectorXdToStdVector(ts);
             
             // 设置边界条件（零速度和加速度）

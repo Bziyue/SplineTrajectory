@@ -1,57 +1,26 @@
 # SplineTrajectory
 
-[中文](README_zh.md) · [Optimizer protocols](include/SplineOptimizerProtocols.md) · [Refactor validation](docs/refactor_validation.md)
+[中文](README_zh.md) · [Optimizer protocols](include/SplineOptimizerProtocols.md) · [API migration](docs/api_migration.md)
 
-A C++17/Eigen header-only library for N-dimensional minimum-control-effort trajectories,
+A C++17/Eigen header-only library for N-dimensional minimum-control-effort splines,
 mathematically equivalent to MINCO. Cubic, quintic and septic splines minimize squared
-acceleration, jerk and snap respectively. Construction and adjoint propagation use an O(N)
-block-tridiagonal solve; energy also has a direct analytic parameter-gradient path.
+acceleration, jerk and snap. Their specialized O(N) solvers and adjoints share owning
+polynomial storage; construction does not copy a second coefficient matrix.
 
 | Public header | Responsibility |
 | --- | --- |
-| `SplineTrajectory.hpp` | Splines, validated piecewise polynomials, derivatives, sampling, exact extraction/append, energy and adjoints |
-| `SplineOptimizer.hpp` | Prepared problems, variable maps/masks, statically bound costs, quadrature and gradient assembly |
-| `SplineConvexHull.hpp` | Bezier/MINVO control hulls, physical derivatives, subdivision and coefficient/time pullback |
+| `SplineTrajectory.hpp` | Interpolation, energy, adjoints, owning piecewise polynomials and sampling |
+| `SplineOptimizer.hpp` | Problems, parameterization, objective evaluation and an exclusive solve workspace |
+| `SplineConvexHull.hpp` | Bezier/MINVO conversion, subdivision and coefficient/time adjoints |
 
-The optimizer and hull headers independently depend on the trajectory header. ROS, geometry
-policies and L-BFGS remain application dependencies. Hull penalties are soft objectives;
-applications still need their own feasibility acceptance policy.
+The optimizer and hull headers each depend only on the trajectory header. Coordinates and
+application policies belong to the caller; ROS and external solvers are not library dependencies.
 
-## Sampling without prewarming
+## Basic optimization
 
-```cpp
-const auto &polynomial = spline.getTrajectory();
-auto sampler = polynomial.makeSampler<3>();
-for (double t : increasing_times) {
-    const auto state = sampler.evaluate(t); // position, velocity, acceleration, jerk
-    consume(state[0], state[1], state[2], state[3]);
-}
-```
-
-A sampler borrows an immutable polynomial. The source must outlive it; source update,
-assignment or move invalidates it, so construct another afterwards. Each traversal owns
-its own sampler. Source const queries never write lazy caches, including the first query.
-Fixed-order sampler construction and evaluation need no heap allocation. Dynamic-order
-samplers allocate only their current-piece storage at construction. Derivative coefficients
-are prepared only on entering a different piece, then reused for every query in that piece.
-
-Forward queries advance through pieces; backward queries relocate with binary search.
-Internal knots belong to the right piece; the final knot belongs to the last piece. Outside
-the domain, both ordinary evaluation and samplers extrapolate. Invalid polynomials or
-nonfinite query times return NaNs. Derivatives above the polynomial degree are zero.
-For random access, use `evaluate(t, derivative)` or `evaluateDerivatives<N>(t)`; the latter
-locates once and returns an array. Legacy `last_idx_hint` overloads remain source compatible,
-but new traversal code should own a sampler instead of exposing an index.
-
-`extractInterval()` and `appendRebased()` operate on coefficients exactly (up to floating
-point roundoff). They do not decide application frame, identity or seam acceptance policy.
-
-## Optimizing a trajectory
-
-Define a problem and configuration, prepare a context, repeatedly evaluate candidates, then
-synchronize the accepted solver vector. Configuration is copied at preparation; maps and
-cost objects are borrowed. Keep the optimizer, maps and costs alive throughout their use.
-Use one context per active evaluation; parallel execution also requires thread-safe costs.
+An optimizer owns its maps, problem snapshot and buffers. An objective is an ordinary struct
+with named callable members; declare only the stages needed. No builder, context or inherited
+objective interface is required.
 
 ```cpp
 #include "SplineOptimizer.hpp"
@@ -61,98 +30,126 @@ struct VelocityCost {
     double operator()(const SplineTrajectory::IntegralPointInfo &,
                       const SplineTrajectory::SampleState<3> &state,
                       SplineTrajectory::SampleGradient<3> &gradient) const {
-        gradient.v = state.v;
+        gradient.v += state.v;
         return 0.5 * state.v.squaredNorm();
     }
 };
+struct ProblemObjective { VelocityCost integral; };
 
 int main() {
-    using Opt = SplineTrajectory::SplineOptimizer<3>;
-    Opt optimizer;
-    Opt::ProblemDefinition problem;
-    problem.time_segments = {1.2, 1.5};
+    using Spline = SplineTrajectory::QuinticSplineND<3>;
+    SplineTrajectory::SplineOptimizer<Spline> optimizer;
+    SplineTrajectory::SplineProblem<Spline> problem;
+    problem.durations = {1.2, 1.5};
     problem.waypoints.resize(3, 3);
     problem.waypoints << 0,0,0, 1,0.2,0, 2,0,0;
-    Opt::OptimizerConfig config;
-    config.integral_num_steps = 16;
-    config.rho_energy = 0.1;
-    Opt::OptimizationContext context;
-    if (!optimizer.prepareContext(problem, context, config)) return 1;
-    SplineTrajectory::VoidTimeCost time_cost;
-    VelocityCost integral_cost;
-    const auto spec = Opt::makeEvaluateSpec(time_cost, integral_cost);
-    auto x = optimizer.generateInitialGuess(context);
-    Eigen::VectorXd gradient;
-    const auto result = optimizer.evaluate(context, x, gradient, spec);
-    if (!result) return 2;
-    // Pass evaluatePrepared(context, x, gradient, spec) to an external solver.
-    // After that solver returns its accepted x:
-    if (!optimizer.synchronizeWorkingState(context, x)) return 3;
-    const auto &accepted = optimizer.getWorkingSpline(context);
-    return accepted.isInitialized() ? 0 : 4;
+    SplineTrajectory::OptimizerOptions options;
+    options.integration_steps = 16;
+    options.energy_weight = 0.1;
+    if (!optimizer.prepare(problem, options)) return 1;
+    auto x = optimizer.initialGuess();
+    Eigen::VectorXd gradient(x.size());
+    ProblemObjective objective;
+    if (!optimizer.evaluate(x, gradient, objective)) return 2;
+    // An external solver repeatedly calls optimizer.costAndGradient(x, gradient, objective).
+    // Use its accepted x, which may differ from the last trial passed to that callback:
+    if (!optimizer.updateAccepted(x)) return 3;
+    auto snapshot = optimizer.copyPolynomial();
+    return snapshot.isValid() ? 0 : 4;
 }
 ```
 
-Local partials start at zero and exclude integration weights. `gradient.time` is the explicit
-global-time partial at fixed state. `kDerivativeOrder` defaults to 4; declaring a lower order
-removes unused state work, while retaining one more derivative for physical-time drift.
-Quadrature bases are prepared on normalized time once and reused across pieces/evaluations.
-A piece scales its coefficients once; accumulated gradients are converted back before the adjoint.
-GCC/Clang flatten the internal quadrature call chain to keep statically bound costs
-visible for inlining; the guarded annotation leaves other compilers on standard C++ code.
+Supported members are `duration`, `integral`, `sample`, `coefficient`, `parameter` and `decision`.
+Use `NoObjective` for an explicitly empty objective, optionally with minimum-derivative energy.
+A missing integral member skips quadrature unless recording or a sample cost needs it.
+The [protocol reference](include/SplineOptimizerProtocols.md) specifies signatures, additive
+gradients, masks, custom maps, explicit borrowing and concurrency.
 
-Optional waypoint, cross-sample, coefficient and trajectory costs bind with `with...Cost()`.
-Coefficient costs retain their concrete type and execute before one shared spline adjoint.
-Use `VoidIntegralCost` to disable quadrature (unless samples are explicitly requested).
-Masks, boundary optimization, custom time/spatial maps and auxiliary state variables remain
-available. See the [protocol reference](include/SplineOptimizerProtocols.md) for exact contracts.
+After preparation, a normal evaluation with correctly sized output uses no library heap
+allocation, including its first call. User callbacks must satisfy this separately. A `sample`
+member needs `prepare(problem, options, objective)` to allocate recording storage. Topology or
+recording capability changes require preparation. The optimizer is movable and noncopyable;
+independent concurrent solves use independent optimizers and mutable cost workspaces.
 
-## Failure and migration contracts
+Complete examples:
 
-Invalid dimensions, nonfinite coefficients, collapsed cumulative knots and failed numerical
-construction produce an invalid spline/status. A failed evaluation returns +infinity and a
-zero gradient; failed construction clears the working spline. The prepared context can be
-reused for a later valid candidate. A gradient check rejects invalid perturbations and restores
-the base candidate. Always check status before consuming working state.
+- [Basic optimizer](examples/basic_optimizer.cpp): a named objective and a small external descent loop.
+- [Custom parameterization](examples/parameterized_optimizer.cpp): bounded coordinates, positive
+  times, shared variables, a moving time origin, integral and Bezier costs, and gradient checking.
+- [Hull optimization](examples/convex_hull_optimization_demo.cpp): a C-style L-BFGS callback and
+  reusable hull workspaces. Hull penalties are soft; final feasibility remains an application decision.
 
-Migration from the old main branch:
+## Polynomials and sampling
 
-- Replace `setConfig(config); prepareContext(problem, context)` with
-  `prepareContext(problem, context, config)`. Reprepare to change configuration.
-- Rename `ConvexHullBasis.hpp` to `SplineConvexHull.hpp`; include metadata via
-  `SplineOptimizer.hpp` instead of downstream copies of `IntegralPointInfo.hpp`.
-- Prefer the structured integral callback shown above. Legacy long callbacks remain available
-  for incremental migration; all three maintained planners use the structured form.
-- Use `auto`/`decltype` for composed specifications, including `.withCoefficientCost(cost)`;
-  it now changes the specification type. Cost binding accepts lvalues with sufficient lifetime.
-- Auxiliary maps moving the origin should accept the explicit start-time gradient in their
-  extended `backward()` overload; remove application-side duplicate accumulation.
+`PPolyND<DIM, MaxCoefficients>` owns rows arranged by piece, then ascending powers of local
+physical time in seconds. The compile-time capacity can exceed the actual coefficient count.
+Spline traits are `kDimension`, `kDegree`, `kCoefficientCount` and `kMinDerivativeOrder`.
+`MinDerivativeSplineND<DIM, S>` selects the specialized solver for S = 2, 3 or 4.
 
-Do not compile code relying on NaN/Inf failure semantics with `-ffast-math` or
-`-ffinite-math-only`. The interface target does not override consuming applications' flags.
+```cpp
+const auto &poly = spline.polynomial();
+auto sampler = poly.makeSampler<3>();
+for (double t : increasing_times) {
+    const auto derivatives = sampler.evaluate(t); // position, velocity, acceleration, jerk
+    consume(derivatives);
+}
+```
+
+Each sampler owns its cursor and current-piece derivative coefficients. Entering another piece
+prepares those coefficients once; same-piece queries reuse them. Fixed-capacity samplers need
+no heap allocation. Dynamic-capacity samplers allocate current-piece storage at construction.
+Source const queries have no shared writes and need no warm-up, including concurrent first use.
+The polynomial must outlive its samplers; any update, assignment or move invalidates all borrowed
+views. `copyPolynomial()` provides an independent snapshot.
+
+Use `evaluate(t, order)` for one derivative, `evaluateDerivatives<N>(t)` for several derivatives
+with one lookup, and `evaluateInto(times, output, order)` for caller-owned batch output.
+`Segment::evaluateLocal()` uses time relative to the piece start. Interior knots select the right
+piece, the final knot selects the last piece, and outside queries extrapolate. Backward sampler
+jumps relocate; short polynomials use linear search and larger ones use binary search.
+
+Invalid polynomial/time queries return NaNs; derivatives above degree are zero; negative
+orders throw `std::invalid_argument`. Invalid construction leaves an empty invalid polynomial.
+`generateTimeSequence()` checks finite inputs, positive step, interval direction and representable
+sample count; a zero-length interval returns one endpoint. `at()` checks indices.
+
+## Hull workspaces
+
+```cpp
+SplineTrajectory::ConvexHullWorkspace<3> hull;
+SplineTrajectory::HullOptions options{SplineTrajectory::ConvexHullBasis::Bezier, 0, 2};
+hull.configure(poly, options); // allocations and shared-kernel cache synchronization
+hull.update(poly);            // fixed-topology numeric update: no allocation or lock
+// hull.backwardAdd(control_partials, coefficient_partials, duration_partials);
+```
+
+`isConfigured()` describes prepared topology; `isValid()` describes the latest numeric update;
+`matches(poly, options)` checks reuse. `toBezier()` and `toMINVO()` return ready-to-use workspaces.
+The immutable `ConvexHullKernel` is shared across spatial dimensions. Updates copy the source
+values needed by the adjoint, so a hull does not borrow a polynomial. `backwardAdd()` mutates
+scratch storage and requires exclusive workspace access; destination gradients are accumulated.
+See [the mathematical derivation](docs/convex_hull_basis_zh.md) and [MINVO provenance](THIRD_PARTY_NOTICES.md).
 
 ## Build and validation
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j2
+cmake --build build -j3
 (cd build && ctest --output-on-failure)
-./build/benchmark_optimizer 2000
-./build/benchmark_sampling
+./build/basic_optimizer
+./build/parameterized_optimizer
 ```
 
-`BUILD_TESTING`, `SPLINE_BUILD_BENCHMARKS` and `SPLINE_BUILD_EXAMPLES` can be disabled
-independently. `SPLINE_NATIVE_ARCH` is off by default; comparisons must use matching flags.
-CTest covers MINCO/finite-difference gradients, boundary conditions, sampler semantics and
-first concurrent reads, numerical failure/recovery, masks, coefficient/hull gradients and
-combined explicit start-time gradients. Assertions protecting allocation regressions remain
-active in Release tests.
+`BUILD_TESTING`, `SPLINE_BUILD_EXAMPLES` and `SPLINE_BUILD_BENCHMARKS` select owned targets.
+They use `-Wall -Wextra -Wpedantic -Werror` on GCC/Clang; these flags are not exported to consumers.
+Only vendored dependency directories are treated as system includes. `SPLINE_NATIVE_ARCH` is
+optional and off by default. Consumers relying on finite-value failure handling must preserve
+IEEE NaN/Inf semantics (`-ffast-math` and `-ffinite-math-only` are incompatible with that contract).
 
-The [validation report](docs/refactor_validation.md) separates setup/first use from steady
-sampling, fixed-candidate evaluation and complete solves. Performance depends on topology,
-costs, compiler and solver behavior; a template interface alone does not imply zero overhead.
-The earlier [convex-hull benchmark](docs/convex_hull_performance_zh.md) is historical data.
+CTest includes MINCO/finite-difference gradients, masks and boundary variables, complete objective
+chains, shared time variables, first-use allocation checks, sampling, failures, copy/move behavior
+and targeted compile-failure diagnostics. See [second-refactor validation](docs/refactor_v2_validation.md)
+for measured scope and limitations. [First-refactor results](docs/refactor_validation.md) and
+[historical hull measurements](docs/convex_hull_performance_zh.md) retain their original scope.
 
-See [hull mathematics](docs/convex_hull_basis_zh.md),
-[the optimization example](examples/convex_hull_optimization_demo.cpp),
-[MIT license](LICENSE) and [MINVO attribution](THIRD_PARTY_NOTICES.md).
+[MIT license](LICENSE). Three public headers are maintained here and distributed unchanged to downstream projects.

@@ -1,409 +1,262 @@
-# SplineOptimizer Protocol Reference
+# SplineOptimizer protocols
 
-This file documents the callable and mapper protocols used by `SplineOptimizer`.
+This is the current API contract. The library requires C++17 and Eigen 3.3.7 or newer.
+All examples use generic optimization terminology. Functors and parameterizations are ordinary
+user types: no inheritance, builder, tuple protocol or type-erased callable is needed.
 
-These are reference interfaces only:
-
-- user-defined functors and lambdas do not need to inherit from them
-- they only need to satisfy the signatures checked by `SplineOptimizer` type traits
-
-The current optimizer API also uses a few small integration types:
-
-- `OptimizationContext`: caller-owned prepared problem plus mutable runtime state
-- `EvaluateSpec`: binds borrowed cost functors and an executor
-- `ErrorCode`: structured failure categories for setup and evaluation
-- `Status`: returned by setup/validation style APIs
-- `EvaluationResult`: returned by `evaluate(...)`
-- `GradientCheckResult`: returned by `checkGradients(...)`
-
-Typical flow:
-
-1. create and initialize a `SplineOptimizer`
-2. create one `OptimizationContext` per evaluation context
-3. build an `EvaluateSpec` with `makeEvaluateSpec(...)`
-4. call `evaluate(...)` and inspect `EvaluationResult::ok`
-
-`EvaluateSpec` borrows cost objects through reference-like storage, so cost
-functors passed to `makeEvaluateSpec(...)` and `with...Cost(...)` must be
-lvalues that outlive the spec.
-
-## TimeMap Protocol
+## Ownership and lifecycle
 
 ```cpp
-struct TimeMapProtocol
-{
-    // Convert unconstrained variable 'tau' to physical time 'T'
-    double toTime(double tau) const;
-
-    // Convert physical time 'T' to unconstrained variable 'tau'
-    double toTau(double T) const;
-
-    // Chain rule: dCost/dtau = (dCost/dT) * (dT/dtau)
-    double backward(double tau, double T, double gradT) const;
-};
-```
-
-## SpatialMap Protocol
-
-Global absolute indexing:
-
-- `index = 0`: start point
-- `index = 1 ... N - 1`: inner waypoints
-- `index = N`: end point
-
-```cpp
-struct SpatialMapProtocol
-{
-    // Dimension of unconstrained variable xi for the point at global index
-    int getUnconstrainedDim(int index) const;
-
-    // Forward: xi (unconstrained) -> p (physical)
-    Eigen::VectorXd toPhysical(const Eigen::VectorXd& xi, int index) const;
-
-    // Backward: p (physical) -> xi (unconstrained), used for initial guess
-    Eigen::VectorXd toUnconstrained(const Eigen::VectorXd& p, int index) const;
-
-    // Chain rule: dCost/dxi = (dCost/dp) * (dp/dxi)
-    Eigen::VectorXd backwardGrad(const Eigen::VectorXd& xi,
-                                 const Eigen::VectorXd& grad_p,
-                                 int index) const;
-};
-```
-
-For allocation-free pullback, a spatial map may additionally provide:
-
-```cpp
-void backwardGradInto(const Eigen::Ref<const Eigen::VectorXd>& xi,
-                      const Eigen::Vector3d& grad_p, int index,
-                      Eigen::Ref<Eigen::VectorXd> grad_xi) const;
-```
-
-The output is a borrowed, correctly sized decision-vector slice. Write the full
-pullback there; do not resize it. The optimizer selects this overload at compile
-time, falling back to owning `backwardGrad()` for existing maps. `toPhysical()`
-may also accept a const Eigen Ref and return a fixed-size vector. Optional domain
-penalties must add to the existing decision gradient instead of clearing it.
-
-## IntegralCost Protocol
-
-An integral cost may optionally implement `beginEvaluation() const`. The optimizer
-calls it once after decoding the current decision vector and before visiting any
-integration sample. It is only for resetting adapter-owned diagnostics; adapters
-must not borrow or retain optimizer working state:
-
-```cpp
-void beginEvaluation() const;
-```
-
-```cpp
-struct IntegralCostProtocol
-{
-    static constexpr int kDerivativeOrder = 3;
-    double operator()(const SplineTrajectory::IntegralPointInfo& point,
-                      const SplineTrajectory::SampleState<3>& state,
-                      SplineTrajectory::SampleGradient<3>& gradient) const;
-};
-```
-
-`SampleGradient` starts at zero; add unweighted integrand partials to `p/v/a/j/s`
-and the explicit global-time partial to `time`. The optimizer supplies trapezoidal
-weights and the state time drift. `kDerivativeOrder` defaults to 4 and may be 0--4;
-the framework also computes the next derivative needed by that drift. State above
-the declared order must not be consumed. Legacy callbacks with separate state and
-gradient arguments remain supported for downstream migration.
-
-Normalized basis rows are prepared once for the fixed quadrature rule. Each piece
-scales coefficients once, reuses them across samples, and converts coefficient
-partials back to the physical polynomial before the adjoint. `VoidIntegralCost`
-skips quadrature unless sample recording/cross-sample costs request it.
-`VoidTimeCost` explicitly disables the duration objective. Disabled coefficient,
-trajectory and auxiliary paths are discarded at compile time.
-
-## TimeCost Protocol
-
-```cpp
-struct TimeCostProtocol
-{
-    double operator()(const std::vector<double>& Ts,
-                      Eigen::VectorXd& grad) const;
-};
-```
-
-## WaypointsCost Protocol
-
-```cpp
-struct WaypointsCostProtocol
-{
-    double operator()(const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic>& waypoints,
-                      Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic>& grad_q) const;
-};
-```
-
-## SampleCost Protocol
-
-```cpp
-struct SampleCostProtocol
-{
-    template <typename SamplesType>
-    double operator()(const SamplesType& samples,
-                      Eigen::Matrix<double, 3, Eigen::Dynamic>& grad_p,
-                      Eigen::VectorXd& grad_t_global) const;
-};
-```
-
-`samples` is the recorded integration buffer. Each sample provides:
-
-- `point`: immutable integration metadata (`segment_index`, `segment_count`,
-  `step_index`, `step_count`, `alpha`, `segment_duration`, `step_size`,
-  `local_time`, `global_time`, and exact endpoint helpers)
-- `trap_weight`: trapezoidal integration weight factor
-- `b_p`: position basis row for the spline coefficients
-- `p`, `v`: sampled position and velocity
-
-Under the current optimizer data model, `SampleCost` is a discrete cost on:
-
-- sampled position `p`
-- sampled global time `t_global`
-
-It does not currently expose independent sample-backward channels for
-`v/a/j/s`.
-
-## CoefficientCost Protocol
-
-Use this protocol for Bezier/MINVO hull costs and other objectives whose natural
-gradient is expressed on the spline polynomial coefficients:
-
-```cpp
-struct CoefficientCostProtocol
-{
-    double operator()(QuinticSplineND<3>& spline,
-                      const std::vector<double>& Ts,
-                      double start_time,
-                      QuinticSplineND<3>::MatrixType& grad_coeffs,
-                      Eigen::VectorXd& grad_times,
-                      double& grad_start_time) const;
-};
-```
-
-Attach an lvalue callable with:
-
-```cpp
-auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost)
-    .withCoefficientCost(coefficient_cost);
-```
-
-The callback is borrowed as its concrete type and invoked directly; there is no
-`void*` or function-pointer erasure. Binding does not allocate. It runs before the spline adjoint and must add to the
-provided gradients rather than clear or resize them. `SplineOptimizer` then calls
-`propagateGrad()` exactly once for all integral, sample, and coefficient costs.
-
-## TrajectoryCost Protocol
-
-```cpp
-struct TrajectoryCostProtocol
-{
-    // The concrete spline type is determined by SplineOptimizer<DIM, SplineType, ...>
-    double operator()(QuinticSplineND<3>& spline,
-                      const std::vector<double>& Ts,
-                      const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic>& waypoints,
-                      double start_time,
-                      const BoundaryConditions<3>& bc,
-                      QuinticSplineND<3>::Gradients& grads) const;
-};
-```
-
-`TrajectoryCost` runs after the spline coefficient adjoint and works directly on
-the final spline parameter gradients. New polynomial-coefficient or convex-hull
-costs should use `CoefficientCost`; this avoids a second `propagateGrad()` call.
-Existing trajectory callables remain compatible.
-
-## AuxiliaryStateMap Protocol
-
-```cpp
-struct AuxiliaryStateMapProtocol
-{
-    // Dimension of the auxiliary optimization variable block
-    int getDimension() const;
-
-    // Create initial unconstrained auxiliary variables from the reference state
-    Eigen::VectorXd getInitialValue(const std::vector<double>& ref_times,
-                                    const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic>& ref_waypoints,
-                                    double ref_start_time,
-                                    const BoundaryConditions<3>& ref_bc) const;
-
-    // Apply the auxiliary variables onto the working state before spline update
-    void apply(const Eigen::VectorXd& z,
-               std::vector<double>& times,
-               Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic>& waypoints,
-               double& start_time,
-               BoundaryConditions<3>& bc) const;
-
-    // Back-propagate gradients from the working state to z
-    // The concrete spline type is determined by SplineOptimizer<DIM, SplineType, ...>
-    double backward(const Eigen::VectorXd& z,
-                    const QuinticSplineND<3>& spline,
-                    const std::vector<double>& times,
-                    const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic>& waypoints,
-                    double start_time,
-                    const BoundaryConditions<3>& bc,
-                    QuinticSplineND<3>::Gradients& grads,
-                    Eigen::VectorXd& grad_z) const;
-};
-```
-
-If the auxiliary map changes the common trajectory start time, it can use the
-extended backward overload:
-
-```cpp
-double backward(const Eigen::VectorXd& z,
-                const QuinticSplineND<3>& spline,
-                const std::vector<double>& times,
-                const MatrixType& waypoints,
-                double start_time,
-                const BoundaryConditions<3>& bc,
-                QuinticSplineND<3>::Gradients& grads,
-                double grad_start_time,
-                Eigen::VectorXd& grad_z) const;
-```
-
-The optimizer detects this overload at compile time and forwards the sum of explicit
-start-time partials from integral, cross-sample and coefficient costs. State-induced
-time changes are already in the spline parameter gradients; the map applies its
-boundary-motion Jacobian as well. Do not repeat explicit-time accumulation outside the library.
-
-## Runtime Integration Notes
-
-`SplineOptimizer` no longer owns an internal prepared problem or runtime state.
-Callers should provide one `OptimizationContext` per active evaluation flow:
-
-```cpp
-using Optimizer = SplineTrajectory::SplineOptimizer<3>;
-
+using Spline = SplineTrajectory::SepticSplineND<3>;
+using Optimizer = SplineTrajectory::SplineOptimizer<Spline>;
 Optimizer optimizer;
-Optimizer::OptimizationContext context;
+SplineTrajectory::SplineProblem<Spline> problem;
+SplineTrajectory::OptimizerOptions options;
+// Fill problem.durations, problem.waypoints and optional problem.boundary/start_time/mask.
+auto status = optimizer.prepare(problem, options);
+auto x = optimizer.initialGuess();
+Eigen::VectorXd gradient(x.size());
+// objective is a named, caller-owned object.
+auto result = optimizer.evaluate(x, gradient, objective);
+```
 
-auto status = optimizer.prepareContext(problem, context, config);
-if (!status)
-{
-    std::cerr << status.message << std::endl;
+Check `status` before requesting an initial guess and `result` before using a cost. `result.status`
+contains `OptimizationError`, an optional offending knot index (`-1` when absent), and a static
+message pointer. Status carries no owning string or allocation. `lastStatus()` also exposes the
+last result for callers of `costAndGradient()`.
+
+The optimizer privately owns its problem snapshot, prepared quadrature/layout, spline and
+buffers. Default maps are owned by value. There are no internal pointers into movable members.
+The optimizer is noncopyable; movement transfers the prepared solve and makes the source
+unprepared. Preparation and movement invalidate previously borrowed views.
+
+`polynomial()` returns a borrowed read-only polynomial; `copyPolynomial()` returns an allocating,
+independent value. Evaluation and `updateAccepted()` replace the polynomial. `problem()`,
+`layout()` and `activeMask()` borrow prepared data until preparation, movement or destruction.
+Evaluation never changes that layout. A call does not retain any reference to the objective.
+
+One optimizer supports one synchronous evaluation at a time. Independent solves need independent
+optimizers and any mutable cost workspaces. An external solver's final accepted vector may differ
+from its last trial evaluation: call `updateAccepted(x)` successfully before consuming its result.
+
+## Problem, layout and options
+
+`SplineProblem<Spline>` contains:
+
+- `durations`: N positive finite segment durations, in seconds.
+- `waypoints`: (N+1) × DIM matrix, one interpolation point per row.
+- `boundary`: start/end velocity, acceleration and jerk; only derivatives supported by the
+  selected spline participate in construction and validation.
+- `start_time`: common finite time origin, in seconds on the caller's time axis.
+- `mask`: optional `OptimizationMask`.
+
+Empty time masks activate all durations. Empty waypoint masks activate only interior waypoints.
+Explicit waypoint masks have N+1 entries, so endpoints can also be optimized. Nonzero entries
+are active. `mask.start` and `mask.end` select `v/a/j`; requesting an unsupported boundary
+variable fails preparation.
+
+Decision order is active durations, active waypoints, active start derivatives, active end
+derivatives, then auxiliary variables. `layout().time` and `.waypoints` carry global source
+indices and offsets; each waypoint also carries its mapped `dof`. `boundary_offset`,
+`auxiliary_offset` and `dimension` locate the remaining blocks.
+
+`OptimizerOptions` contains `energy_weight` (finite and nonnegative), `integration_steps`
+(positive, per segment), and `record_samples`. Options and capability are fixed at preparation.
+Sample costs require `prepare(problem, options, objective)`; this overload inspects the type
+without retaining the object. Basic preparation does not depend on any cost type.
+
+## Named objective stages
+
+Declare only the required members. They can be values, reference members, or explicit
+`std::reference_wrapper` values. Borrowed objects must outlive the objective that references
+them; `std::ref/std::cref` reject temporaries. The objective passed to `evaluate()` must be an
+lvalue. Const objectives are supported when their actual stage members satisfy const calls.
+
+```cpp
+struct ProblemObjective {
+    DurationCost duration;
+    IntegralCost integral;
+    HullCost coefficient;
+    EndpointCost parameter;
+};
+```
+
+An empty objective is explicitly `SplineTrajectory::NoObjective`; an unrelated empty struct is
+rejected. A present member with an invalid signature produces a targeted compile-time error.
+C++17 does not reflect other member names: extra application data are allowed, and a misspelled
+member alongside another valid stage cannot be diagnosed automatically.
+
+The following signatures use `S` for the spline, `D = S::kDimension`, `Opt = SplineOptimizer<S>`
+and the names in namespace `SplineTrajectory`. Outputs are **additive**. Do not resize a gradient,
+clear contributions from previous stages or include weights already handled by the optimizer.
+Several costs in one stage can be implemented by direct calls inside one named functor.
+
+| Member | Signature returning `double` | Meaning |
+| --- | --- | --- |
+| `duration` | `(const std::vector<double>&, Eigen::Ref<Eigen::VectorXd>)` | Cost and partials with respect to physical durations |
+| `integral` | `(const IntegralPointInfo&, const SampleState<D>&, SampleGradient<D>&)` | Unweighted integrand and local partials |
+| `sample` | `(const Opt::SampleBuffer&, Eigen::Ref<Opt::SampleGradMatrix>, Eigen::Ref<Eigen::VectorXd>)` | Cross-sample cost, position and explicit global-time partials |
+| `coefficient` | `(const ParameterView<S>&, CoefficientGradient<S>&)` | Polynomial coefficient and independent time partials |
+| `parameter` | `(const ParameterView<S>&, ParameterGradient<S>&)` | Total physical parameter partials after the spline adjoint |
+| `decision` | `(const DecisionView&, Eigen::Ref<Eigen::VectorXd>)` | Direct decision-domain cost after mapped gradients have been written |
+
+Each view is valid only during its synchronous callback. The returned cost is added once.
+Sample-stage output matrices have DIM × sample_count columns, unlike the piece-major
+coefficient/waypoint matrices. The corresponding time output has sample_count entries.
+
+### Integral state and time chain
+
+`SampleState<D>` provides `p/v/a/j/s` in physical time. `SampleGradient<D>` provides their
+partials and `time`, the **explicit global-time partial at fixed state**. Each point's partials
+start at zero. Return an integrand without trapezoid weights. The optimizer handles quadrature
+weights, interval length, local-time drift and dependencies on earlier segment durations.
+
+Declare `static constexpr int kDerivativeOrder` from 0 to 4. Position is zero; jerk is three;
+snap is four. The default is four. The optimizer computes one additional derivative for time
+drift, so jerk costs use snap internally even though they do not differentiate a snap objective.
+Writing gradients above the declared order violates the protocol.
+
+`IntegralPointInfo` provides global/local time, normalized `alpha`, segment duration, step size,
+segment/step indices and counts. Segment endpoint samples are duplicated between neighboring
+segments and have half weights. `isTrajectoryStart/End`, `isSegmentStart/End` and
+`interiorBoundaryIndex()` support endpoint-specific policies. An optional `beginEvaluation()`
+hook runs once before the segment loop. It must not allocate if the caller requires an entirely
+allocation-free evaluation.
+
+For a sample-stage partial `g_t`, the optimizer includes both explicit-time dependence and
+position drift through velocity. The sum of explicit-time partials contributes once to the
+common start-time gradient. Do not add that same contribution again in an auxiliary map.
+Recording alone adds no objective or physical adjoint; it uses a zero integrand.
+
+### Coefficient and physical parameter stages
+
+`ParameterView<S>` exposes `polynomial`, physical `durations`, `waypoints`, `boundary` and
+`start_time`, all read-only. Coefficients use piece-major rows in **ascending local physical-time
+powers**. `CoefficientGradient<S>` exposes coefficient partials, independent duration partials
+with those coefficients held fixed, and a common start-time partial. These join the integral and
+sample partials before one general spline adjoint.
+
+The specialized minimum-energy gradient is then added. `ParameterGradient<S>` exposes
+`inner_points`, `durations`, `start/end` boundary gradients and `start_time`. Boundary gradients
+contain `p/v/a/j`; unused higher derivatives remain zero. `addWaypoint(global_index, partial)`
+handles interior points and both endpoint positions, rejecting out-of-range indices.
+
+`decision` sees the original decision vector and immutable layout. Its output already contains
+all physical gradients. This is the stage for direct mapped-domain penalties; use `+=`.
+
+## Parameterization
+
+A custom value object combines `time`, `space` and `auxiliary`. Use `NoAuxiliaryMap` if the
+third role is unused. Missing roles are a malformed parameterization, not disabled costs.
+
+```cpp
+struct ProblemParameterization {
+    PositiveDurationMap time;
+    BoundedCoordinates space;
+    SharedCoordinates auxiliary;
+};
+auto optimizer = SplineTrajectory::makeOptimizer<Spline>(ProblemParameterization{/* ... */});
+// Explicit whole-object borrowing is also supported:
+auto borrowed = SplineTrajectory::makeOptimizer<Spline>(std::cref(existing_parameterization));
+```
+
+Owned map roles are queried through const access. `std::ref` permits mutable borrowed roles;
+`std::cref` retains const access. Borrowed objects must remain alive and address-stable. A parameterization may itself contain `std::ref/std::cref` roles. Do not mutate
+map dimensions or inverse semantics during a prepared solve. Non-default-constructible maps
+are supported when supplied to the constructor/factory.
+
+### Time map
+
+```cpp
+double toTime(double tau) const;
+double toTau(double duration) const;
+double backward(double tau, double duration, double grad_duration) const;
+```
+
+`toTau()` is the inverse used for initial coordinates. `backward()` returns the chain rule for
+one unconstrained coordinate. Its `duration` is the output of `toTime(tau)` **before** any
+auxiliary transformation. This matters for maps whose derivative uses the physical duration,
+such as the exponential map. `QuadInvTimeMap` is the default; `IdentityTimeMap` is also available.
+Nonpositive, nonfinite or unrepresentable cumulative times are rejected before the spline kernel.
+
+### Spatial map
+
+```cpp
+int dimension(int global_index) const;
+Vector toPhysical(const Eigen::Ref<const Eigen::VectorXd>& xi, int global_index) const;
+Eigen::VectorXd toUnconstrained(const Vector& point, int global_index) const;
+void backwardInto(const Eigen::Ref<const Eigen::VectorXd>& xi, const Vector& grad_point,
+                  int global_index, Eigen::Ref<Eigen::VectorXd> destination) const;
+```
+
+`Vector = S::Vector`. Global waypoint indices run from 0 to N, including endpoints. Each mapped
+dimension must be positive. `toPhysical()` must return DIM values; `toUnconstrained()` returns
+the configured mapped dimension and is allowed to allocate in preparation/initial-guess creation.
+A fixed-size vector return also satisfies the inverse protocol. `backwardInto()` **overwrites**
+its exclusive pre-sized decision slice; the optimizer handles accumulation between cost stages.
+There is no owning-vector fallback on the hot path.
+
+### Auxiliary map
+
+```cpp
+int dimension() const;
+Eigen::VectorXd initial(const SplineProblem<S>& reference) const;
+void apply(const Eigen::Ref<const Eigen::VectorXd>& z, MutableParameters<S>& state) const;
+double backward(const Eigen::Ref<const Eigen::VectorXd>& z, const ParameterView<S>& state,
+                ParameterGradient<S>& gradient, Eigen::Ref<Eigen::VectorXd> grad_z) const;
+```
+
+`apply()` runs after ordinary maps and boundary decoding, before spline construction. It may
+transform durations, waypoints, boundary derivatives and the common time origin, but must
+preserve topology. `backward()` sees their final physical values and all accumulated gradients.
+It adds auxiliary gradients to initially zero `grad_z`, transforms physical gradients back to
+pre-auxiliary coordinates when necessary, and can return a direct auxiliary cost. Normal time
+and spatial pullbacks run afterwards. `initial()` is a cold operation and may allocate.
+
+The [parameterized example](../examples/parameterized_optimizer.cpp) checks a coupled chain:
+exponential duration coordinates → shared duration scaling → spline/integral/hull objective,
+plus a movable start time. This detects using post-auxiliary durations in the ordinary time map.
+
+## External solvers and concurrency
+
+A capturing lambda may call `costAndGradient(x, g, objective)`. For C-style callbacks, only the
+outer solver boundary needs `void*`:
+
+```cpp
+struct SolverData { Optimizer& optimizer; ProblemObjective& objective; };
+double callback(void* instance, const Eigen::VectorXd& x, Eigen::VectorXd& g) {
+    auto& data = *static_cast<SolverData*>(instance);
+    return data.optimizer.costAndGradient(x, g, data.objective);
 }
-
-auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
-auto x = optimizer.generateInitialGuess(context);
-auto result = optimizer.evaluate(context, x, grad, spec);
-if (!result)
-{
-    std::cerr << result.message << std::endl;
-}
 ```
 
-`prepareContext(...)` snapshots the config-dependent mapper and scalar state
-needed by later evaluation, including:
+The solver must supply a correctly sized `g`. A wrong shape returns `DimensionMismatch` rather
+than allocating in the callback. The library does not own or run the external solver.
 
-- `TimeMap`
-- `SpatialMap`
-- `AuxiliaryStateMap`
-- `rho_energy`
-- `integral_num_steps`
+`evaluate(x, g, objective, OpenMPExecutor{})` parallelizes segments if compiled with OpenMP;
+otherwise it runs serially. The integral functor and everything it touches must allow concurrent
+calls. Constness alone is not proof of thread safety. Exceptions must not escape OpenMP worker callbacks. Coefficient and parameter stages run once
+outside the parallel loop. Each mutable hull workspace belongs to one active evaluation.
 
-`setConfig()` and active mirrors are removed. Configuration is passed only to
-`prepareContext`; changing the caller's configuration does not change prepared values.
-Explicit map pointers are borrowed, not cloned; the optimizer and maps must outlive
-contexts using their defaults or references.
+## Failures, diagnostics and allocation
 
-For a valid problem, `prepareContext(...)` also sizes the reusable evaluation
-buffers and performs one fixed-topology spline update. Consequently the first
-optimizer callback uses the same preallocated coefficient, gradient, sample-time,
-and auxiliary-gradient storage as later callbacks. The caller-owned output gradient
-and optional sample/coefficient adapters may still allocate on their first use;
-measure setup and the first callback separately from steady evaluation.
+- Failed preparation leaves an unprepared optimizer and invalid polynomial. Initial-guess access
+  while unprepared throws `std::logic_error`.
+- Bad input/shape, missing sample capability, numerical construction failure and nonfinite
+  objective/gradient values return explicit status; failed evaluation clears its output gradient
+  and returns infinity. Failed numeric construction clears the polynomial.
+- A failed cost can leave a numerically valid trial polynomial. It is not an accepted solution.
+  `lastStatus()` and `polynomial().isValid()` represent different facts.
+- User cost exceptions propagate in serial stages; they are not converted to plausible costs. Map rejection by
+  `invalid_argument` during candidate decoding becomes a numerical-failure status. Bad allocation
+  and unexpected user exceptions are not swallowed.
+- `checkGradients(optimizer, x, objective, step, tolerance)` allocates diagnostic vectors, performs
+  central differences and restores the base candidate even after a rejected perturbation.
+  It returns analytical/numerical gradients, norm/relative/max errors, offending index and status.
+  Formatting and printing belong to the caller.
+- Prepared normal library evaluation has no heap allocation. Checks combine Eigen's runtime
+  no-malloc guard and replacement C++ allocation counters, including a fresh optimizer's first
+  evaluation. User maps/costs are responsible for their own behavior. Failure recovery may
+  reallocate spline storage after an invalid candidate has cleared it.
 
-Setup and validation style APIs use `Status`:
-
-```cpp
-Optimizer::OptimizerConfig config;
-config.rho_energy = 0.05;
-config.integral_num_steps = 32;
-
-Optimizer::ProblemDefinition problem;
-problem.time_segments = durations;
-problem.waypoints = waypoints;
-problem.start_time = 0.0;
-problem.bc = bc;
-
-Optimizer::OptimizationContext context;
-auto status = optimizer.prepareContext(problem, context, config);
-if (!status)
-{
-    std::cerr << static_cast<int>(status.code) << std::endl;
-    std::cerr << status.message << std::endl;
-}
-```
-
-If you want an explicit mask for just this problem, attach it directly to the
-problem definition before preparing the context:
-
-```cpp
-Optimizer::OptimizationMask mask;
-mask.time.assign(durations.size(), static_cast<uint8_t>(1));
-mask.waypoints.assign(durations.size() + 1, static_cast<uint8_t>(1));
-mask.waypoints.front() = static_cast<uint8_t>(0);
-mask.waypoints.back() = static_cast<uint8_t>(0);
-
-problem.mask = mask;
-
-auto status = optimizer.prepareContext(problem, context, config);
-```
-
-If your upstream pipeline provides absolute time points instead of durations,
-build the problem with the helper and still use the same `prepareContext(...)`
-entrypoint:
-
-```cpp
-std::vector<double> time_points = {0.0, 1.2, 2.7, 4.0};
-auto problem = Optimizer::makeProblemFromTimePoints(time_points, waypoints, bc);
-auto status = optimizer.prepareContext(problem, context, config);
-```
-
-Evaluation uses `EvaluationResult` with the same error code pattern:
-
-```cpp
-auto result = optimizer.evaluate(context, x, grad, spec);
-if (!result)
-{
-    std::cerr << static_cast<int>(result.code) << std::endl;
-    std::cerr << result.message << std::endl;
-}
-```
-
-LBFGS-style inner loops may use `evaluatePrepared(...)` after a successful
-`prepareContext(...)`. It skips the duplicate defensive decode performed by
-`evaluate(...)`; the context and finite decision-vector preconditions therefore
-belong to the caller. After an external optimizer returns, call
-`synchronizeWorkingState(context, x)` to rebuild only the output spline without
-paying for another complete cost/gradient integration.
-
-Optional costs and a custom executor can be attached fluently:
-
-```cpp
-auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost)
-                .withWaypointsCost(waypoints_cost)
-                .withSampleCost(sample_cost)
-                .withTrajectoryCost(trajectory_cost)
-                .withExecutor(OpenMPExecutor{});
-```
-
-When using `OpenMPExecutor`, the borrowed `integral_cost` object must be
-thread-safe because the same functor instance is invoked concurrently across
-segments.
-
-## 中文契约速查
-
-配置仅在 `prepareContext(problem, context, config)` 冻结；映射和代价借用，
-每个并发评价独占上下文。结构化积分回调使用 `SampleState` 与每次清零的
-`SampleGradient`，后者是未乘积分权重的偏导。`kDerivativeOrder` 只裁掉不用的状态，
-时间梯度仍计算下一阶导数。系数代价在公共伴随之前直接静态调用，轨迹参数代价在其后累加。
-跨样本代价的独立输出仅为位置和显式全局时间偏导。移动起点的全部显式时间偏导统一传入
-扩展辅助映射 `backward`；业务层不可重复补算。自定义空间映射可用 `backwardGradInto`
-直接写已分配决策梯度切片，域惩罚必须保留并累加已有梯度。失败状态、借用期限与接受解同步
-见 [中文 README](../README_zh.md)。
+For old names and downstream call sites, use the [migration guide](../docs/api_migration.md).

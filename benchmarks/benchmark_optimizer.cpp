@@ -1,5 +1,5 @@
 #include "SplineOptimizer.hpp"
-#include "gcopter/minco.hpp"
+#include <minco.hpp>
 #ifdef BENCH_LBFGS_HEADER
 #include BENCH_LBFGS_HEADER
 #endif
@@ -16,18 +16,27 @@
 #ifndef BENCH_DEGREE
 #define BENCH_DEGREE 7
 #endif
+#ifndef BENCH_DERIVATIVE_ORDER
+#define BENCH_DERIVATIVE_ORDER 3
+#endif
+#ifndef BENCH_RECORD_SAMPLES
+#define BENCH_RECORD_SAMPLES 0
+#endif
 #ifndef BENCH_LABEL
 #define BENCH_LABEL "structured"
 #endif
 #if BENCH_DEGREE == 7
 using Spline = SplineTrajectory::SepticSplineND<3>;
 using Minco = minco::MINCO_S4NU;
-#else
+#elif BENCH_DEGREE == 5
 using Spline = SplineTrajectory::QuinticSplineND<3>;
 using Minco = minco::MINCO_S3NU;
+#else
+using Spline = SplineTrajectory::CubicSplineND<3>;
+using Minco = minco::MINCO_S2NU;
 #endif
-using Optimizer = SplineTrajectory::SplineOptimizer<3, Spline>;
-using Matrix = Spline::MatrixType;
+using Optimizer = SplineTrajectory::SplineOptimizer<Spline>;
+using Matrix = Spline::CoefficientMatrix;
 using Clock = std::chrono::steady_clock;
 constexpr int count = BENCH_DEGREE + 1;
 constexpr int steps = 16;
@@ -35,7 +44,7 @@ constexpr double energy_weight = 0.01;
 
 struct TimeCost
 {
-    double operator()(const std::vector<double> &times, Eigen::VectorXd &g) const
+    double operator()(const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> g) const
     {
         g.setConstant(0.2);
         return 0.2 * std::accumulate(times.begin(), times.end(), 0.0);
@@ -43,15 +52,18 @@ struct TimeCost
 };
 struct IntegralCost
 {
-    static constexpr int kDerivativeOrder = 3;
+    static constexpr int kDerivativeOrder = BENCH_DERIVATIVE_ORDER;
     double operator()(const SplineTrajectory::IntegralPointInfo &,
-                      const Eigen::Vector3d &p, const Eigen::Vector3d &v,
-                      const Eigen::Vector3d &a, const Eigen::Vector3d &j, const Eigen::Vector3d &,
-                      Eigen::Vector3d &gp, Eigen::Vector3d &gv, Eigen::Vector3d &ga,
-                      Eigen::Vector3d &gj, Eigen::Vector3d &gs, double &gt) const
+                      const SplineTrajectory::SampleState<3> &state,
+                      SplineTrajectory::SampleGradient<3> &gradient) const
     {
-        gp = p; gv = 0.3 * v; ga = 0.02 * a; gj = 0.002 * j; gs.setZero(); gt = 0;
-        return 0.5*p.squaredNorm() + 0.15*v.squaredNorm() + 0.01*a.squaredNorm() + 0.001*j.squaredNorm();
+        gradient.p = state.p;
+        double cost = 0.5 * state.p.squaredNorm();
+        if constexpr (kDerivativeOrder >= 1) { gradient.v = 0.3 * state.v; cost += 0.15 * state.v.squaredNorm(); }
+        if constexpr (kDerivativeOrder >= 2) { gradient.a = 0.02 * state.a; cost += 0.01 * state.a.squaredNorm(); }
+        if constexpr (kDerivativeOrder >= 3) { gradient.j = 0.002 * state.j; cost += 0.001 * state.j.squaredNorm(); }
+        if constexpr (kDerivativeOrder >= 4) { gradient.s = 0.0002 * state.s; cost += 0.0001 * state.s.squaredNorm(); }
+        return cost;
     }
 };
 
@@ -61,8 +73,7 @@ class Problem
 public:
     const int pieces;
     Optimizer optimizer;
-    Optimizer::OptimizationContext context;
-    Optimizer::ProblemDefinition problem;
+    Optimizer::Problem problem;
     TimeCost time_cost;
     IntegralCost integral_cost;
     std::vector<double> times;
@@ -84,15 +95,13 @@ public:
         times.assign(n, 1.2);
         points.resize(n + 1, 3);
         for (int i = 0; i <= n; ++i) points.row(i) << 0.3*i, std::sin(0.7*i), 0.2*std::cos(0.4*i);
-        problem.time_segments = times; problem.waypoints = points;
+        problem.durations = times; problem.waypoints = points;
 #if BENCH_BACKEND == 0
-        Optimizer::OptimizerConfig config; config.integral_num_steps = steps; config.rho_energy = energy_weight;
-#ifdef BENCH_LEGACY_CONTEXT
-        optimizer.setConfig(config);
-        auto status = optimizer.prepareContext(problem, context);
-#else
-        auto status = optimizer.prepareContext(problem, context, config);
-#endif
+        SplineTrajectory::OptimizerOptions options;
+        options.integration_steps = steps;
+        options.energy_weight = energy_weight;
+        options.record_samples = BENCH_RECORD_SAMPLES;
+        auto status = optimizer.prepare(problem, options);
         if (!status) throw std::runtime_error("benchmark preparation failed");
 #elif BENCH_BACKEND == 1
         Eigen::Matrix<double, 3, (BENCH_DEGREE + 1)/2> head, tail;
@@ -100,7 +109,7 @@ public:
         minco.setConditions(head, tail, n);
         energy_coeff_grad.resize(n * count, 3); energy_time_grad.resize(n);
 #else
-        spline.update(times, points, 0.0, problem.bc);
+        spline.update(times, points, 0.0, problem.boundary);
 #endif
         coeff_grad.resize(n * count, 3); time_grad.resize(n); physical_time_grad.resize(n);
         inner.resize(3, n - 1); point_grad.resize(3, n - 1);
@@ -117,8 +126,8 @@ public:
     double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &gradient)
     {
 #if BENCH_BACKEND == 0
-        const auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
-        return optimizer.evaluate(context, x, gradient, spec).cost;
+        struct Objective { TimeCost &duration; IntegralCost &integral; } objective{time_cost, integral_cost};
+        return optimizer.evaluate(x, gradient, objective).cost;
 #else
         SplineTrajectory::QuadInvTimeMap time_map;
         for (int i = 0; i < pieces; ++i) times[i] = time_map.toTime(x(i));
@@ -131,8 +140,8 @@ public:
         minco.setParameters(inner, Eigen::Map<const Eigen::VectorXd>(times.data(), pieces));
         const auto &coefficients = minco.getCoeffs();
 #else
-        spline.update(times, points, 0.0, problem.bc);
-        const auto &coefficients = spline.getTrajectory().getCoefficients();
+        spline.update(times, points, 0.0, problem.boundary);
+        const auto &coefficients = spline.polynomial().coefficients();
 #endif
         coeff_grad.setZero(); time_grad.setConstant(0.2);
         double cost = 0.2 * std::accumulate(times.begin(), times.end(), 0.0);
@@ -148,12 +157,18 @@ public:
                 Spline::computeBasisFunctions(alpha*times[i],bp,bv,ba,bj,bs,bc);
                 const Eigen::Vector3d p = (bp*block).transpose(), v=(bv*block).transpose();
                 const Eigen::Vector3d a=(ba*block).transpose(), j=(bj*block).transpose(), s=(bs*block).transpose();
-                Eigen::Vector3d gp,gv,ga,gj,gs; double gt;
-                const double local = integral_cost({},p,v,a,j,s,gp,gv,ga,gj,gs,gt);
+                SplineTrajectory::SampleState<3> state;
+                state.p = p; state.v = v; state.a = a; state.j = j; state.s = s;
+                SplineTrajectory::SampleGradient<3> partials;
+                const double local = integral_cost({}, state, partials);
+                const auto &gp = partials.p; const auto &gv = partials.v;
+                const auto &ga = partials.a; const auto &gj = partials.j;
+                const auto &gs = partials.s;
+                const Eigen::Vector3d crackle = (bc * block).transpose();
                 cost += common*local;
                 coeff_grad.template middleRows<count>(i*count).noalias() +=
-                    (bp.transpose()*gp.transpose()+bv.transpose()*gv.transpose()+ba.transpose()*ga.transpose()+bj.transpose()*gj.transpose())*common;
-                time_grad(i) += local*weight/steps + (gp.dot(v)+gv.dot(a)+ga.dot(j)+gj.dot(s))*alpha*common;
+                    (bp.transpose()*gp.transpose()+bv.transpose()*gv.transpose()+ba.transpose()*ga.transpose()+bj.transpose()*gj.transpose()+bs.transpose()*gs.transpose())*common;
+                time_grad(i) += local*weight/steps + (gp.dot(v)+gv.dot(a)+ga.dot(j)+gj.dot(s)+gs.dot(crackle))*alpha*common;
             }
         }
 #if BENCH_BACKEND == 1
@@ -163,9 +178,9 @@ public:
         coeff_grad += energy_weight * gc; time_grad += energy_weight * gt; cost += energy_weight * energy;
         minco.propogateGrad(coeff_grad, time_grad, point_grad, physical_time_grad);
 #else
-        spline.propagateGrad(coeff_grad, time_grad, spline_gradients);
-        spline.getEnergyGrad(energy_gradients); cost += energy_weight*spline.getEnergy();
-        physical_time_grad = spline_gradients.times + energy_weight*energy_gradients.times;
+        spline.backward(coeff_grad, time_grad, spline_gradients);
+        spline.energyGradient(energy_gradients); cost += energy_weight*spline.energy();
+        physical_time_grad = spline_gradients.durations + energy_weight*energy_gradients.durations;
         point_grad = (spline_gradients.inner_points + energy_weight*energy_gradients.inner_points).transpose();
 #endif
         gradient.resize(x.size());
@@ -204,7 +219,7 @@ int main(int argc, char **argv)
                 double cost; const auto start=Clock::now();
                 const int code=lbfgs::lbfgs_optimize(x,cost,evaluate,nullptr,progress,&callback,parameters);
                 const double us=std::chrono::duration<double,std::micro>(Clock::now()-start).count();
-                Eigen::VectorXd gradient; problem.evaluate(x,gradient);
+                Eigen::VectorXd gradient(x.size()); problem.evaluate(x,gradient);
                 std::cout<<BENCH_LABEL<<','<<BENCH_DEGREE<<','<<n<<','<<trial<<','<<us<<','
                          <<callback.evaluations<<','<<callback.iterations<<','<<callback.line_search_evaluations<<','<<code<<','<<cost<<','<<gradient.lpNorm<Eigen::Infinity>()<<'\n';
             }
@@ -215,7 +230,7 @@ int main(int argc, char **argv)
     for (int n : {2,8,32,128})
     {
         const auto begin=Clock::now(); Problem problem(n);
-        auto x=problem.initialGuess(); Eigen::VectorXd gradient;
+        auto x=problem.initialGuess(); Eigen::VectorXd gradient(x.size());
         const auto prepared=Clock::now(); const double cost=problem.evaluate(x,gradient); const auto first=Clock::now();
         const Eigen::VectorXd expected=gradient;
         std::vector<double> timings;

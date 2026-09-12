@@ -7,7 +7,7 @@
 #include "SplineTrajectory.hpp"
 
 static int failed_checks = 0;
-#include "gcopter/minco.hpp"
+#include <minco.hpp>
 
 using std::cout;
 using std::endl;
@@ -35,9 +35,9 @@ static inline void print_triplet(const std::string &name, double spline_grad, do
 template <typename SplineType>
 double loss_from_spline(const SplineType &sp, double alpha_time)
 {
-    const auto &C = sp.getPPoly().getCoefficients();
+    const auto &C = sp.polynomial().coefficients();
     double Lt = 0.0;
-    for (double h : sp.getTimeSegments())
+    for (double h : sp.durations())
     {
         Lt += h * h;
     }
@@ -47,11 +47,11 @@ double loss_from_spline(const SplineType &sp, double alpha_time)
 template <typename SplineType>
 void make_partials(const SplineType &sp,
                    double alpha_time,
-                   typename SplineType::MatrixType &dLdC,
+                   typename SplineType::CoefficientMatrix &dLdC,
                    Eigen::VectorXd &dLdT)
 {
-    dLdC = 2.0 * sp.getPPoly().getCoefficients();
-    const auto &T = sp.getTimeSegments();
+    dLdC = 2.0 * sp.polynomial().coefficients();
+    const auto &T = sp.durations();
     dLdT.resize(static_cast<int>(T.size()));
     for (int i = 0; i < static_cast<int>(T.size()); ++i)
     {
@@ -141,8 +141,8 @@ void test_cubic()
     static_assert(DIM == 3, "MINCO boundary-gradient test currently assumes DIM=3.");
 
     using Spline = SplineTrajectory::CubicSplineND<DIM>;
-    using Vec = typename Spline::VectorType;
-    using Mat = typename Spline::MatrixType;
+    using Vec = typename Spline::Vector;
+    using Mat = typename Spline::CoefficientMatrix;
 
     cout << "\n=== CubicSplineND<" << DIM << "> boundary gradient check ===\n";
 
@@ -174,7 +174,7 @@ void test_cubic()
     Mat dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.propagateGrad(dLdC, dLdT);
+    auto g = sp.backward(dLdC, dLdT);
 
     minco::MINCO_S2NU minco_s2;
     build_minco_s2(T, P, bc, minco_s2);
@@ -203,7 +203,7 @@ void test_cubic()
     };
 
     cout << std::scientific << std::setprecision(6);
-    cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.times - gT_minco).norm() << "\n";
+    cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.durations - gT_minco).norm() << "\n";
     cout << "[Compare] ||dL/dP_inner_spline - dL/dP_inner_minco|| = "
          << (g.inner_points - gP_minco.transpose()).norm() << "\n";
 
@@ -234,7 +234,7 @@ void test_cubic()
         const double fp = eval_loss(Tp, P, bc);
         const double fm = eval_loss(Tm, P, bc);
         const double num = (fp - fm) / (2.0 * eps);
-        const double ana = g.times(i);
+        const double ana = g.durations(i);
         cout << "T[" << i << "]  ana=" << ana << "  num=" << num
              << "  rel=" << rel_err(ana, num) << "\n";
     }
@@ -281,8 +281,8 @@ void test_quintic()
     static_assert(DIM == 3, "MINCO boundary-gradient test currently assumes DIM=3.");
 
     using Spline = SplineTrajectory::QuinticSplineND<DIM>;
-    using Vec = typename Spline::VectorType;
-    using Mat = typename Spline::MatrixType;
+    using Vec = typename Spline::Vector;
+    using Mat = typename Spline::CoefficientMatrix;
 
     cout << "\n=== QuinticSplineND<" << DIM << "> boundary gradient check ===\n";
 
@@ -316,7 +316,7 @@ void test_quintic()
     Mat dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.propagateGrad(dLdC, dLdT);
+    auto g = sp.backward(dLdC, dLdT);
 
     minco::MINCO_S3NU minco_s3;
     build_minco_s3(T, Pvec, bc, minco_s3);
@@ -345,7 +345,7 @@ void test_quintic()
     };
 
     cout << std::scientific << std::setprecision(6);
-    cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.times - gT_minco).norm() << "\n";
+    cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.durations - gT_minco).norm() << "\n";
     cout << "[Compare] ||dL/dP_inner_spline - dL/dP_inner_minco|| = "
          << (g.inner_points - gP_minco.transpose()).norm() << "\n";
 
@@ -376,7 +376,7 @@ void test_quintic()
         const double fp = eval_loss(Tp, Pvec, bc);
         const double fm = eval_loss(Tm, Pvec, bc);
         const double num = (fp - fm) / (2.0 * eps);
-        const double ana = g.times(i);
+        const double ana = g.durations(i);
         cout << "T[" << i << "]  ana=" << ana << "  num=" << num
              << "  rel=" << rel_err(ana, num) << "\n";
     }
@@ -440,8 +440,8 @@ void test_septic()
     static_assert(DIM == 3, "MINCO boundary-gradient test currently assumes DIM=3.");
 
     using Spline = SplineTrajectory::SepticSplineND<DIM>;
-    using Vec = typename Spline::VectorType;
-    using Mat = typename Spline::MatrixType;
+    using Vec = typename Spline::Vector;
+    using Mat = typename Spline::CoefficientMatrix;
 
     cout << "\n=== SepticSplineND<" << DIM << "> boundary gradient check ===\n";
 
@@ -474,10 +474,10 @@ void test_septic()
 
     Spline sp(T, Pvec, 0.0, bc);
 
-    typename Spline::MatrixType dLdC;
+    typename Spline::CoefficientMatrix dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.propagateGrad(dLdC, dLdT);
+    auto g = sp.backward(dLdC, dLdT);
 
     minco::MINCO_S4NU minco_s4;
     build_minco_s4(T, Pvec, bc, minco_s4);
@@ -506,7 +506,7 @@ void test_septic()
     };
 
     cout << std::scientific << std::setprecision(6);
-    cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.times - gT_minco).norm() << "\n";
+    cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.durations - gT_minco).norm() << "\n";
     cout << "[Compare] ||dL/dP_inner_spline - dL/dP_inner_minco|| = "
          << (g.inner_points - gP_minco.transpose()).norm() << "\n";
 
@@ -533,7 +533,7 @@ void test_septic()
         Tp[i] += eps;
         Tm[i] -= eps;
         const double num = (eval_loss(Tp, Pvec, bc) - eval_loss(Tm, Pvec, bc)) / (2.0 * eps);
-        const double ana = g.times(i);
+        const double ana = g.durations(i);
         cout << "T[" << i << "]  ana=" << ana << "  num=" << num
              << "  rel=" << rel_err(ana, num) << "\n";
     }

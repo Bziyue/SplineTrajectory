@@ -1,458 +1,312 @@
-#include <cassert>
-#include <cmath>
-#include <iostream>
-#include <string>
-#include <vector>
-
-#include "SplineConvexHull.hpp"
+#define EIGEN_RUNTIME_NO_MALLOC
 #include "SplineOptimizer.hpp"
+#include "SplineConvexHull.hpp"
+#include <iostream>
+#include <stdexcept>
+#include <type_traits>
 
 namespace
 {
-template <typename T>
-void expectTrue(bool condition, const T &message)
+using Spline = SplineTrajectory::QuinticSplineND<3>;
+using Optimizer = SplineTrajectory::SplineOptimizer<Spline>;
+using Matrix = Spline::CoefficientMatrix;
+
+void require(bool condition, const char *message)
 {
-    if (!condition)
-    {
-        std::cerr << message << std::endl;
-        std::abort();
-    }
+    if (!condition) throw std::runtime_error(message);
 }
 
-struct LinearTimeCost
+template<class Curve = Spline>
+SplineTrajectory::SplineProblem<Curve> makeProblem()
 {
-    double operator()(const std::vector<double> &times, Eigen::VectorXd &grad) const
-    {
-        grad = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(times.size()));
-        double total = 0.0;
-        for (double t : times)
-        {
-            total += t;
-        }
-        return total;
-    }
-};
-
-struct ZeroIntegralCost
-{
-    using Vec = Eigen::Vector3d;
-
-    double operator()(const SplineTrajectory::IntegralPointInfo &point,
-                      const Vec &p,
-                      const Vec &v,
-                      const Vec &a,
-                      const Vec &j,
-                      const Vec &s,
-                      Vec &gp,
-                      Vec &gv,
-                      Vec &ga,
-                      Vec &gj,
-                      Vec &gs,
-                      double &gt) const
-    {
-        (void)point;
-        (void)p;
-        (void)v;
-        (void)a;
-        (void)j;
-        (void)s;
-        gp.setZero();
-        gv.setZero();
-        ga.setZero();
-        gj.setZero();
-        gs.setZero();
-        gt = 0.0;
-        return 0.0;
-    }
-};
-
-struct HookedZeroIntegralCost : ZeroIntegralCost
-{
-    void beginEvaluation() const
-    {
-        ++begin_calls;
-    }
-
-    mutable int begin_calls = 0;
-};
-
-struct RecordingZeroIntegralCost : ZeroIntegralCost
-{
-    using Vec = Eigen::Vector3d;
-
-    double operator()(const SplineTrajectory::IntegralPointInfo &point,
-                      const Vec &p, const Vec &v, const Vec &a,
-                      const Vec &j, const Vec &s,
-                      Vec &gp, Vec &gv, Vec &ga, Vec &gj, Vec &gs,
-                      double &gt) const
-    {
-        points.push_back(point);
-        return ZeroIntegralCost::operator()(point, p, v, a, j, s,
-                                            gp, gv, ga, gj, gs, gt);
-    }
-
-    mutable std::vector<SplineTrajectory::IntegralPointInfo> points;
-};
-
-struct ZeroWaypointsCost
-{
-    template <typename WaypointsType, typename GradMatrixType>
-    double operator()(const WaypointsType &waypoints,
-                      GradMatrixType &grad_q) const
-    {
-        grad_q = GradMatrixType::Zero(waypoints.rows(), waypoints.cols());
-        return 0.0;
-    }
-};
-
-struct ZeroSampleCost
-{
-    template <typename SamplesType>
-    double operator()(const SamplesType &samples,
-                      Eigen::Matrix<double, 3, Eigen::Dynamic> &grad_p,
-                      Eigen::VectorXd &grad_t_global) const
-    {
-        grad_p = Eigen::Matrix<double, 3, Eigen::Dynamic>::Zero(3, static_cast<Eigen::Index>(samples.size()));
-        grad_t_global = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(samples.size()));
-        return 0.0;
-    }
-};
-
-struct ZeroTrajectoryCost
-{
-    double operator()(const SplineTrajectory::QuinticSplineND<3> &spline,
-                      const std::vector<double> &times,
-                      const Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor> &waypoints,
-                      double start_time,
-                      const SplineTrajectory::BoundaryConditions<3> &bc,
-                      SplineTrajectory::QuinticSplineND<3>::Gradients &grads) const
-    {
-        (void)spline;
-        (void)times;
-        (void)waypoints;
-        (void)start_time;
-        (void)bc;
-        (void)grads;
-        return 0.0;
-    }
-};
-
-struct QuadraticHullCoefficientCost
-{
-    using Spline = SplineTrajectory::QuinticSplineND<3>;
-    using Matrix = Spline::MatrixType;
-    using Hull = SplineTrajectory::ConvexHullRepresentation<3>;
-
-    mutable Hull workspace;
-    mutable Matrix control_gradients;
-
-    double operator()(Spline &spline,
-                      const std::vector<double> &,
-                      double,
-                      Matrix &coefficient_gradients,
-                      Eigen::VectorXd &duration_gradients,
-                      double &) const
-    {
-        const auto &polynomial = spline.getPPoly();
-        if (!workspace.kernel() ||
-            workspace.numSourceSegments() !=
-                polynomial.getNumSegments())
-        {
-            workspace.resetTopology(
-                polynomial,
-                SplineTrajectory::ConvexHullBasis::MINVO,
-                1, 2);
-            control_gradients.resize(
-                workspace.controls().rows(), 3);
-        }
-        workspace.update(polynomial);
-        control_gradients = workspace.controls();
-        workspace.backwardAdd(
-            control_gradients, coefficient_gradients,
-            duration_gradients);
-        return 0.5 * workspace.controls().squaredNorm();
-    }
-};
-
-template <int DIM>
-struct ScalingSpatialMap
-{
-    using VectorType = Eigen::Matrix<double, DIM, 1>;
-
-    explicit ScalingSpatialMap(double scale_in = 1.0) : scale(scale_in) {}
-
-    int getUnconstrainedDim(int index) const
-    {
-        (void)index;
-        return DIM;
-    }
-
-    VectorType toPhysical(const VectorType &xi, int index) const
-    {
-        (void)index;
-        return scale * xi;
-    }
-
-    VectorType toUnconstrained(const VectorType &p, int index) const
-    {
-        (void)index;
-        return p / scale;
-    }
-
-    VectorType backwardGrad(const VectorType &xi, const VectorType &grad_p, int index) const
-    {
-        (void)xi;
-        (void)index;
-        return scale * grad_p;
-    }
-
-    double scale = 1.0;
-};
-
-template <typename Optimizer>
-typename Optimizer::ProblemDefinition makeProblem(int num_segments,
-                                                  bool full_waypoint_mask = false)
-{
-    typename Optimizer::ProblemDefinition problem;
-    problem.time_segments.assign(num_segments, 1.0);
-    problem.waypoints.resize(num_segments + 1, 3);
-    for (int i = 0; i <= num_segments; ++i)
-    {
-        problem.waypoints.row(i) << 1.0 + i, 2.0 - 0.5 * i, -0.25 * i;
-    }
-    problem.start_time = 0.25;
-
-    if (full_waypoint_mask)
-    {
-        problem.mask = Optimizer::makeFullOptimizationMask(num_segments);
-    }
-
+    SplineTrajectory::SplineProblem<Curve> problem;
+    problem.durations = {1.2, 1.5};
+    problem.start_time = 2.0;
+    problem.waypoints.resize(3, 3);
+    problem.waypoints << 0,0,0, 1,0.2,0.1, 2,0,0;
     return problem;
 }
 
-void testPrepareRejectsBadMask()
+struct DurationCost
 {
-    using Optimizer = SplineTrajectory::SplineOptimizer<3>;
-    Optimizer optimizer;
-    Optimizer::OptimizationContext context;
-    auto problem = makeProblem<Optimizer>(2);
+    double operator()(const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> gradient) const
+    {
+        double cost = 0.0;
+        for (double duration : times) cost += duration;
+        gradient.array() += 1.0;
+        return cost;
+    }
+};
 
-    SplineTrajectory::OptimizationMask bad_mask;
-    bad_mask.time.assign(1, static_cast<uint8_t>(1));
-    bad_mask.waypoints.assign(3, static_cast<uint8_t>(1));
-    problem.mask = bad_mask;
+struct ScalingSpatialMap
+{
+    explicit ScalingSpatialMap(double factor) : scale(factor) {}
+    double scale;
+    int dimension(int) const { return 3; }
+    Eigen::Vector3d toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const { return scale * x; }
+    Eigen::Vector3d toUnconstrained(const Eigen::Vector3d &point, int) const { return point / scale; }
+    void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &, const Eigen::Vector3d &gradient,
+                      int, Eigen::Ref<Eigen::VectorXd> output) const { output = scale * gradient; }
+};
 
-    const auto status = optimizer.prepareContext(problem, context);
-    expectTrue(!status, "prepareContext should reject mismatched mask sizes.");
+struct Parameterization
+{
+    SplineTrajectory::IdentityTimeMap time;
+    ScalingSpatialMap space;
+    SplineTrajectory::NoAuxiliaryMap auxiliary;
+};
+
+void testOwnershipAndMovement()
+{
+    using Mapped = SplineTrajectory::SplineOptimizer<Spline, Parameterization>;
+    static_assert(!std::is_default_constructible_v<Mapped>, "Non-default maps must not be silently constructed");
+    static_assert(!std::is_copy_constructible_v<Mapped> && !std::is_copy_assignable_v<Mapped>, "A workspace has one owner");
+    static_assert(std::is_move_constructible_v<Mapped>, "Owned workspaces support movement");
+    Parameterization maps{{}, ScalingSpatialMap(2.0), {}};
+    Mapped optimizer(maps);
+    maps.space.scale = 7.0;
+    const auto problem = makeProblem();
+    require(bool(optimizer.prepare(problem)), "owned map preparation");
+    const auto x = optimizer.initialGuess();
+    require(std::abs(x(optimizer.layout().waypoints.front().offset) - 0.5) < 1e-14,
+            "owned maps are independent of later caller changes");
+    struct Objective { DurationCost duration; } objective;
+    Eigen::VectorXd gradient(x.size());
+    auto moved = std::move(optimizer);
+    require(!optimizer.isPrepared() && moved.isPrepared(), "move invalidates source preparation");
+    require(!optimizer.polynomial().isValid(), "moved-from polynomial is invalid");
+    require(bool(moved.evaluate(x, gradient, objective)), "moved workspace remains usable");
+    Mapped assigned(Parameterization{{}, ScalingSpatialMap(3.0), {}});
+    assigned = std::move(moved);
+    require(!moved.isPrepared() && bool(assigned.evaluate(x, gradient, objective)), "move assignment transfers workspace");
+    auto borrowed = SplineTrajectory::makeOptimizer<Spline>(std::cref(maps));
+    require(bool(borrowed.prepare(problem)), "explicitly borrowed parameterization");
+    const auto borrowed_x = borrowed.initialGuess();
+    require(std::abs(borrowed_x(borrowed.layout().waypoints.front().offset) - 1.0 / 7.0) < 1e-14,
+            "borrowed maps use the supplied object");
+    require(bool(assigned.prepare(assigned.problem())), "prepare accepts the optimizer's own immutable problem view");
 }
 
-void testPreparedContextSnapshotsSpatialMap()
+void testInputAndAcceptedState()
 {
-    using Optimizer = SplineTrajectory::SplineOptimizer<3,
-                                                        SplineTrajectory::QuinticSplineND<3>,
-                                                        SplineTrajectory::QuadInvTimeMap,
-                                                        ScalingSpatialMap<3> >;
-
-    ScalingSpatialMap<3> map_prepare(1.0);
-    ScalingSpatialMap<3> map_after(2.0);
-
     Optimizer optimizer;
-    typename Optimizer::OptimizerConfig config;
-    config.spatial_map = &map_prepare;
+    auto problem = makeProblem();
+    SplineTrajectory::OptimizationMask mask;
+    mask.time = {1};
+    problem.mask = mask;
+    require(!optimizer.prepare(problem), "reject malformed mask");
+    require(!optimizer.isPrepared() && !optimizer.polynomial().isValid(), "failed preparation invalidates state");
+    problem.mask.reset();
+    require(bool(optimizer.prepare(problem)), "prepare valid problem after rejection");
+    auto x = optimizer.initialGuess();
+    Eigen::VectorXd gradient;
+    struct Objective { DurationCost duration; } objective;
+    require(!optimizer.evaluate(x, gradient, objective) && gradient.size() == 0,
+            "wrong output shape is rejected without implicit allocation");
+    gradient.resize(x.size());
+    require(bool(optimizer.evaluate(x, gradient, objective)), "evaluate after sizing output");
+    const auto accepted = optimizer.copyPolynomial();
+    const auto original = x;
+    x(0) += 0.4;
+    require(bool(optimizer.evaluate(x, gradient, objective)), "evaluate a later trial");
+    require(bool(optimizer.updateAccepted(original)), "restore the solver's accepted vector");
+    require(optimizer.polynomial().coefficients().isApprox(accepted.coefficients(), 1e-13),
+            "accepted state must not equal the last rejected trial");
+    x(0) = std::numeric_limits<double>::quiet_NaN();
+    require(!optimizer.updateAccepted(x) && !optimizer.polynomial().isValid(), "invalid acceptance clears polynomial");
 
-    typename Optimizer::OptimizationContext context;
-    auto problem = makeProblem<Optimizer>(1, true);
-    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context, config)), "prepareContext should succeed.");
-
-    const Eigen::VectorXd x_before = optimizer.generateInitialGuess(context);
-
-    config.spatial_map = &map_after;
-
-    const Eigen::VectorXd x_after = optimizer.generateInitialGuess(context);
-    expectTrue((x_before - x_after).norm() < 1e-12,
-               "Prepared context should keep using the spatial map snapshot captured during prepareContext.");
+    auto mapped = SplineTrajectory::makeOptimizer<Spline>(Parameterization{{}, ScalingSpatialMap(1.0), {}});
+    require(bool(mapped.prepare(problem)), "prepare identity durations");
+    x = mapped.initialGuess();
+    x(0) = -1.0;
+    require(!mapped.evaluate(x, gradient, objective), "reject nonpositive decoded duration");
+    auto check = SplineTrajectory::checkGradients(optimizer, original, objective, -1.0);
+    require(!check, "reject negative gradient-check step");
 }
 
-void testEvaluateRejectsInvalidDecodedState()
+struct RecordingIntegral
 {
-    using Optimizer = SplineTrajectory::SplineOptimizer<3,
-                                                        SplineTrajectory::QuinticSplineND<3>,
-                                                        SplineTrajectory::IdentityTimeMap>;
+    static constexpr int kDerivativeOrder = 0;
+    int begins = 0, calls = 0;
+    void beginEvaluation() { ++begins; calls = 0; }
+    double operator()(const SplineTrajectory::IntegralPointInfo &,
+                      const SplineTrajectory::SampleState<3> &state,
+                      SplineTrajectory::SampleGradient<3> &gradient)
+    {
+        ++calls;
+        gradient.p += 0.002 * state.p;
+        return 0.001 * state.p.squaredNorm();
+    }
+};
 
+void testRecordingAndBorrowedObjective()
+{
     Optimizer optimizer;
-    typename Optimizer::OptimizationContext context;
-    auto problem = makeProblem<Optimizer>(1);
-    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context)),
-               "prepareContext should succeed for IdentityTimeMap test.");
-
-    LinearTimeCost time_cost;
-    ZeroIntegralCost integral_cost;
-    Eigen::VectorXd grad;
-    Eigen::VectorXd x = optimizer.generateInitialGuess(context);
-    x(0) = -0.5;
-
-    const auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
-    const auto result = optimizer.evaluate(context, x, grad, spec);
-    expectTrue(!result, "evaluate should reject negative durations after decode.");
+    SplineTrajectory::OptimizerOptions options;
+    options.integration_steps = 4;
+    options.record_samples = true;
+    const auto problem = makeProblem();
+    require(bool(optimizer.prepare(problem, options)), "prepare sample recording");
+    auto x = optimizer.initialGuess();
+    Eigen::VectorXd gradient(x.size());
+    RecordingIntegral integral;
+    struct Objective { std::reference_wrapper<RecordingIntegral> integral; } objective{std::ref(integral)};
+    require(bool(optimizer.evaluate(x, gradient, objective)), "borrow integral by concrete type");
+    require(integral.begins == 1 && integral.calls == 10, "begin hook executes once and integration visits each endpoint");
+    const auto &samples = optimizer.recordedSamples();
+    require(samples.size() == 10 && samples.front().point.isTrajectoryStart() &&
+            samples.back().point.isTrajectoryEnd(), "recorded sample topology");
+    require(samples[4].point.interiorBoundaryIndex() == 0 && samples[5].point.interiorBoundaryIndex() == 0,
+            "both quadrature endpoints identify their common boundary");
+    require(samples.front().point.global_time == problem.start_time, "recording uses the source time axis");
+    require(samples.front().trap_weight == 0.5 && samples[1].trap_weight == 1.0, "trapezoidal endpoint weights");
+    const auto expected = optimizer.copyPolynomial();
+    const auto checked = SplineTrajectory::checkGradients(optimizer, x, objective, 1e-6, 1e-4);
+    require(bool(checked) && optimizer.polynomial().coefficients().isApprox(expected.coefficients(), 1e-13),
+            "diagnostics restore the base candidate and borrowed objective state");
 }
 
-void testCheckGradientsRestoresWorkingState()
+/** @brief Tetrahedral softmax coordinates with a redundant vertex on alternate waypoints.
+ * @note Varying decision dimensions exercise the layout needed by polytope maps. */
+struct PolytopeSpatialMap
 {
-    using Optimizer = SplineTrajectory::SplineOptimizer<3,
-                                                        SplineTrajectory::QuinticSplineND<3>,
-                                                        SplineTrajectory::IdentityTimeMap>;
+    int dimension(int index) const { return 4 + index % 2; }
+    static Eigen::Vector3d vertex(Eigen::Index index)
+    {
+        Eigen::Vector3d value = Eigen::Vector3d::Zero();
+        if (index >= 1 && index <= 3) value(index - 1) = 1.0;
+        return value;
+    }
+    Eigen::Vector3d toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const
+    {
+        const double shift = x.maxCoeff();
+        double sum = 0.0;
+        Eigen::Vector3d point = Eigen::Vector3d::Zero();
+        for (Eigen::Index i = 0; i < x.size(); ++i)
+        {
+            const double weight = std::exp(x(i) - shift);
+            sum += weight;
+            point += weight * vertex(i);
+        }
+        return point / sum;
+    }
+    Eigen::VectorXd toUnconstrained(const Eigen::Vector3d &point, int index) const
+    {
+        Eigen::VectorXd x(dimension(index));
+        const double origin_weight = (1.0 - point.sum()) / (x.size() - 3);
+        x.setConstant(std::log(origin_weight));
+        for (int i = 1; i <= 3; ++i) x(i) = std::log(point(i - 1));
+        return x;
+    }
+    void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x, const Eigen::Vector3d &gradient,
+                      int index, Eigen::Ref<Eigen::VectorXd> output) const
+    {
+        const Eigen::Vector3d point = toPhysical(x, index);
+        const double shift = x.maxCoeff();
+        double sum = 0.0;
+        for (Eigen::Index i = 0; i < x.size(); ++i) sum += std::exp(x(i) - shift);
+        for (Eigen::Index i = 0; i < x.size(); ++i)
+            output(i) = std::exp(x(i) - shift) / sum * gradient.dot(vertex(i) - point);
+    }
+};
 
-    Optimizer optimizer;
-    typename Optimizer::OptimizationContext context;
-    auto problem = makeProblem<Optimizer>(1);
-    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context)),
-               "prepareContext should succeed for gradient-check test.");
-
-    LinearTimeCost time_cost;
-    ZeroIntegralCost integral_cost;
-    ZeroWaypointsCost waypoints_cost;
-    ZeroSampleCost sample_cost;
-    ZeroTrajectoryCost trajectory_cost;
-
-    Eigen::VectorXd x = optimizer.generateInitialGuess(context);
-    auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost)
-                    .withWaypointsCost(waypoints_cost)
-                    .withSampleCost(sample_cost)
-                    .withTrajectoryCost(trajectory_cost);
-
-    auto check = optimizer.checkGradients(context, x, spec, 1e-6, 1e-3);
-    expectTrue(check.valid, "checkGradients should succeed on the simple smooth test problem.");
-
-    const auto &times = optimizer.getWorkingSpline(context).getTimeSegments();
-    expectTrue(times.size() == 1, "Working spline should contain the original single time segment.");
-    expectTrue(std::abs(times.front() - problem.time_segments.front()) < 1e-12,
-               "checkGradients should restore the working spline state to the original decision vector.");
+void testVariableDimensionSpatialMap()
+{
+    struct Maps
+    {
+        SplineTrajectory::QuadInvTimeMap time;
+        PolytopeSpatialMap space;
+        SplineTrajectory::NoAuxiliaryMap auxiliary;
+    };
+    auto optimizer = SplineTrajectory::makeOptimizer<Spline>(Maps{});
+    auto problem = makeProblem();
+    problem.durations = {1.2, 1.5, 1.1};
+    problem.waypoints.resize(4, 3);
+    problem.waypoints << 0,0,0, 0.2,0.1,0.1, 0.3,0.2,0.2, 1,0,0;
+    SplineTrajectory::OptimizerOptions options;
+    options.energy_weight = 0.01;
+    options.integration_steps = 8;
+    require(bool(optimizer.prepare(problem, options)), "prepare variable-dimension polytope maps");
+    require(optimizer.layout().waypoints[0].dof == 5 && optimizer.layout().waypoints[1].dof == 4,
+            "spatial dimensions belong to individual global waypoint indices");
+    auto x = optimizer.initialGuess();
+    x.tail(9).array() += 0.1;
+    x(optimizer.layout().waypoints[0].offset + 1) += 0.2;
+    Eigen::VectorXd gradient(x.size());
+    struct Objective { RecordingIntegral integral; } objective;
+    Eigen::internal::set_is_malloc_allowed(false);
+    const auto result = optimizer.evaluate(x, gradient, objective);
+    Eigen::internal::set_is_malloc_allowed(true);
+    require(bool(result), "polytope pullback writes pre-sized variable-width slices without allocation");
+    require(bool(SplineTrajectory::checkGradients(optimizer, x, objective, 1e-6, 1e-5)),
+            "variable-dimension spatial and duration pullbacks match finite differences");
 }
 
-void testPreparedEvaluationAndWorkingStateSynchronization()
+/** @brief Count actual constructions and adjoints, independently of objective adapters. */
+struct CountingSpline : Spline
 {
-    using Optimizer = SplineTrajectory::SplineOptimizer<3>;
-    Optimizer optimizer;
-    Optimizer::OptimizationContext checked_context;
-    Optimizer::OptimizationContext prepared_context;
-    auto problem = makeProblem<Optimizer>(3);
-    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, checked_context)),
-               "Checked context preparation should succeed.");
-    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, prepared_context)),
-               "Prepared context preparation should succeed.");
+    inline static int builds = 0, adjoints = 0;
+    template<class... Arguments>
+    decltype(auto) update(Arguments &&...arguments)
+    {
+        ++builds;
+        return Spline::update(std::forward<Arguments>(arguments)...);
+    }
+    template<class... Arguments>
+    decltype(auto) backward(Arguments &&...arguments)
+    {
+        ++adjoints;
+        return Spline::backward(std::forward<Arguments>(arguments)...);
+    }
+};
 
-    LinearTimeCost time_cost;
-    HookedZeroIntegralCost checked_integral_cost;
-    HookedZeroIntegralCost prepared_integral_cost;
-    const auto checked_spec = Optimizer::makeEvaluateSpec(time_cost, checked_integral_cost);
-    const auto prepared_spec = Optimizer::makeEvaluateSpec(time_cost, prepared_integral_cost);
-    Eigen::VectorXd x = optimizer.generateInitialGuess(checked_context);
-    Eigen::VectorXd checked_grad;
-    Eigen::VectorXd prepared_grad;
-
-    const auto checked = optimizer.evaluate(checked_context, x, checked_grad, checked_spec);
-    const double prepared_cost =
-        optimizer.evaluatePrepared(prepared_context, x, prepared_grad, prepared_spec);
-    expectTrue(static_cast<bool>(checked), "Checked evaluation should succeed.");
-    expectTrue(std::abs(checked.cost - prepared_cost) < 1e-14,
-               "Prepared evaluation must preserve the checked cost.");
-    expectTrue((checked_grad - prepared_grad).norm() < 1e-14,
-               "Prepared evaluation must preserve the checked gradient.");
-    expectTrue(checked_integral_cost.begin_calls == 1 &&
-                   prepared_integral_cost.begin_calls == 1,
-               "Integral beginEvaluation hook should run exactly once per evaluation.");
-
-    x(0) += 0.2;
-    const auto sync = optimizer.synchronizeWorkingState(prepared_context, x);
-    expectTrue(static_cast<bool>(sync), "Working-state synchronization should succeed.");
-    const double expected_time = SplineTrajectory::QuadInvTimeMap().toTime(x(0));
-    const auto &synced_times = optimizer.getWorkingSpline(prepared_context).getTimeSegments();
-    expectTrue(std::abs(synced_times.front() - expected_time) < 1e-14,
-               "Working-state synchronization should rebuild the spline without a cost evaluation.");
-}
-
-void testIntegralPointMetadata()
+struct HullCost
 {
-    using Optimizer = SplineTrajectory::SplineOptimizer<3>;
-    Optimizer optimizer;
-    Optimizer::OptimizerConfig config;
-    config.integral_num_steps = 2;
+    SplineTrajectory::ConvexHullWorkspace<3> workspace;
+    Matrix control_gradient;
+    explicit HullCost(const Spline::Polynomial &polynomial)
+        : workspace(SplineTrajectory::toBezier(polynomial))
+    { control_gradient.resize(workspace.controls().rows(), 3); }
 
-    Optimizer::OptimizationContext context;
-    auto problem = makeProblem<Optimizer>(2);
-    expectTrue(static_cast<bool>(optimizer.prepareContext(problem, context, config)),
-               "Metadata test context preparation should succeed.");
+    template<class Curve>
+    double operator()(const SplineTrajectory::ParameterView<Curve> &state,
+                      SplineTrajectory::CoefficientGradient<Curve> &gradient)
+    {
+        workspace.update(state.polynomial);
+        control_gradient = 0.01 * workspace.controls();
+        workspace.backwardAdd(control_gradient, gradient.coefficients, gradient.durations);
+        return 0.005 * workspace.controls().squaredNorm();
+    }
+};
 
-    LinearTimeCost time_cost;
-    RecordingZeroIntegralCost integral_cost;
-    const auto spec = Optimizer::makeEvaluateSpec(time_cost, integral_cost);
-    Eigen::VectorXd x = optimizer.generateInitialGuess(context);
-    Eigen::VectorXd grad;
-    const auto result = optimizer.evaluate(context, x, grad, spec);
-    expectTrue(static_cast<bool>(result), "Metadata test evaluation should succeed.");
-    expectTrue(integral_cost.points.size() == 6,
-               "Two segments with K=2 must produce six quadrature visits.");
-
-    const auto &left_end = integral_cost.points[2];
-    const auto &right_start = integral_cost.points[3];
-    expectTrue(left_end.segment_index == 0 && left_end.step_index == 2 &&
-                   left_end.interiorBoundaryIndex() == 0,
-               "Left segment endpoint must map to the internal boundary exactly.");
-    expectTrue(right_start.segment_index == 1 && right_start.step_index == 0 &&
-                   right_start.interiorBoundaryIndex() == 0,
-               "Right segment start must map to the same internal boundary exactly.");
-    expectTrue(integral_cost.points.front().isTrajectoryStart() &&
-                   integral_cost.points.back().isTrajectoryEnd(),
-               "Trajectory endpoint metadata must be exact integer topology.");
-    expectTrue(std::abs(left_end.global_time - right_start.global_time) < 1e-14,
-               "Both visits of one internal boundary must share global time.");
-    expectTrue(std::abs(left_end.alpha - 1.0) < 1e-14 &&
-                   std::abs(right_start.alpha) < 1e-14,
-               "Quadrature metadata must expose the existing normalized time.");
-    expectTrue(std::abs(left_end.step_size * left_end.step_count -
-                            left_end.segment_duration) < 1e-14,
-               "Quadrature step size must come from the optimizer's decoded duration.");
-}
-
-void testCoefficientCostUsesSingleSplineAdjoint()
+void testOneConstructionAndAdjoint()
 {
-    using Optimizer = SplineTrajectory::SplineOptimizer<
-        3, SplineTrajectory::MinDerivativeSplineND<3, 3>,
-        SplineTrajectory::IdentityTimeMap>;
-    Optimizer optimizer;
-    Optimizer::OptimizationContext context;
-    auto problem = makeProblem<Optimizer>(2, true);
-    expectTrue(
-        static_cast<bool>(
-            optimizer.prepareContext(problem, context)),
-        "Coefficient-cost context preparation should succeed.");
-
-    LinearTimeCost time_cost;
-    ZeroIntegralCost integral_cost;
-    QuadraticHullCoefficientCost hull_cost;
-    const auto spec =
-        Optimizer::makeEvaluateSpec(time_cost, integral_cost)
-            .withCoefficientCost(hull_cost);
-    const Eigen::VectorXd x =
-        optimizer.generateInitialGuess(context);
-    const auto check =
-        optimizer.checkGradients(context, x, spec, 2e-6, 2e-3);
-    expectTrue(
-        check.valid && check.max_abs_error < 2e-4,
-        "CoefficientCost hull gradients must pass the optimizer-level finite-difference check.");
+    SplineTrajectory::SplineOptimizer<CountingSpline> optimizer;
+    require(bool(optimizer.prepare(makeProblem<CountingSpline>())), "prepare counted spline");
+    struct Objective
+    {
+        RecordingIntegral integral;
+        HullCost coefficient;
+    } objective{{}, HullCost(optimizer.polynomial())};
+    const auto x = optimizer.initialGuess();
+    Eigen::VectorXd gradient(x.size());
+    CountingSpline::builds = CountingSpline::adjoints = 0;
+    Eigen::internal::set_is_malloc_allowed(false);
+    const auto result = optimizer.evaluate(x, gradient, objective);
+    Eigen::internal::set_is_malloc_allowed(true);
+    require(bool(result) && CountingSpline::builds == 1 && CountingSpline::adjoints == 1,
+            "integral and hull gradients share exactly one construction and adjoint");
+    const auto checked = SplineTrajectory::checkGradients(optimizer, x, objective, 2e-6, 2e-3);
+    require(bool(checked), "hull and integral objective finite differences");
 }
 } // namespace
 
 int main()
 {
-    testPrepareRejectsBadMask();
-    testPreparedContextSnapshotsSpatialMap();
-    testEvaluateRejectsInvalidDecodedState();
-    testCheckGradientsRestoresWorkingState();
-    testPreparedEvaluationAndWorkingStateSynchronization();
-    testIntegralPointMetadata();
-    testCoefficientCostUsesSingleSplineAdjoint();
-
-    std::cout << "test_spline_optimizer passed" << std::endl;
-    return 0;
+    testOwnershipAndMovement();
+    testInputAndAcceptedState();
+    testRecordingAndBorrowedObjective();
+    testVariableDimensionSpatialMap();
+    testOneConstructionAndAdjoint();
+    std::cout << "optimizer API and lifecycle passed\n";
 }

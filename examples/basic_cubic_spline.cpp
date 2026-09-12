@@ -17,7 +17,7 @@ int main() {
     std::cout << "=== Basic Cubic Spline Example ===" << std::endl;
     
     // Define 3D waypoints for a trajectory (row = one waypoint)
-    CubicSpline3D::MatrixType waypoints(5, 3);
+    CubicSpline3D::CoefficientMatrix waypoints(5, 3);
     waypoints <<
         0.0, 0.0, 0.0,
         1.0, 2.0, 1.0,
@@ -36,26 +36,25 @@ int main() {
     // Create the cubic spline
     CubicSpline3D spline(time_points, waypoints, boundary_conditions);
     
-    if (!spline.isInitialized()) {
+    if (!spline.isValid()) {
         std::cerr << "Failed to initialize spline!" << std::endl;
         return -1;
     }
     
     std::cout << "Spline created successfully!" << std::endl;
-    std::cout << "Number of segments: " << spline.getNumSegments() << std::endl;
-    std::cout << "Start time: " << spline.getStartTime() << std::endl;
-    std::cout << "End time: " << spline.getEndTime() << std::endl;
-    std::cout << "Duration: " << spline.getDuration() << std::endl;
-    std::cout << "Trajectory energy: " << spline.getEnergy() << std::endl;
+    std::cout << "Number of segments: " << spline.numSegments() << std::endl;
+    std::cout << "Start time: " << spline.startTime() << std::endl;
+    std::cout << "End time: " << spline.endTime() << std::endl;
+    std::cout << "Duration: " << spline.duration() << std::endl;
+    std::cout << "Trajectory energy: " << spline.energy() << std::endl;
     
     // Evaluate at specific time points
     std::cout << "\n=== Trajectory Evaluation ===" << std::endl;
     std::cout << std::fixed << std::setprecision(3);
     
     for (double t = 0.0; t <= 6.0; t += 0.5) {
-        SplinePoint3d pos = spline.getTrajectory().evaluate(t,Deriv::Pos);
-        SplinePoint3d vel = spline.getTrajectory().evaluate(t,Deriv::Vel);
-        SplinePoint3d acc = spline.getTrajectory().evaluate(t,Deriv::Acc);
+        SplinePoint3d pos = spline.polynomial().evaluate(t,Deriv::Pos);
+        SplinePoint3d vel = spline.polynomial().evaluate(t,Deriv::Vel);
         
         std::cout << "t=" << std::setw(4) << t 
                   << " pos=[" << std::setw(6) << pos.x() << "," << std::setw(6) << pos.y() << "," << std::setw(6) << pos.z() << "]"
@@ -64,15 +63,15 @@ int main() {
     }
     
     // Calculate trajectory properties
-    double trajectory_length = spline.getTrajectory().getTrajectoryLength();
+    double trajectory_length = spline.polynomial().length();
     std::cout << "\nTrajectory length: " << trajectory_length << std::endl;
     
     // Batch evaluation for plotting
     std::cout << "\n=== Generating CSV Output ===" << std::endl;
-    std::vector<double> eval_times = spline.getTrajectory().generateTimeSequence(0.02);
-    auto positions = spline.getTrajectory().evaluate(eval_times, Deriv::Pos);
-    auto velocities = spline.getTrajectory().evaluate(eval_times, Deriv::Vel);
-    auto accelerations = spline.getTrajectory().evaluate(eval_times, Deriv::Acc);
+    std::vector<double> eval_times = spline.polynomial().generateTimeSequence(0.02);
+    auto positions = spline.polynomial().evaluate(eval_times, Deriv::Pos);
+    auto velocities = spline.polynomial().evaluate(eval_times, Deriv::Vel);
+    auto accelerations = spline.polynomial().evaluate(eval_times, Deriv::Acc);
     
     // Save to CSV file for plotting
     std::ofstream csv_file("cubic_spline_trajectory.csv");

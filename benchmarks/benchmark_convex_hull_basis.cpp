@@ -16,8 +16,8 @@ namespace
 {
 using Clock = std::chrono::steady_clock;
 using PPoly = SplineTrajectory::PPolyND<3>;
-using Matrix = PPoly::MatrixType;
-using Hull = SplineTrajectory::ConvexHullRepresentation<3>;
+using Matrix = PPoly::CoefficientMatrix;
+using Hull = SplineTrajectory::ConvexHullWorkspace<3>;
 
 volatile double benchmark_sink = 0.0;
 
@@ -121,7 +121,7 @@ void addForwardMeasurement(std::vector<Measurement> &measurements,
         (1 << subdivision_depth);
     const double elapsed = medianNanoseconds([&]()
     {
-        const auto representation = Hull::fromPPoly(
+        auto representation = Hull::fromPPoly(
             polynomial, basis, derivative, subdivision_depth);
         benchmark_sink +=
             representation.controls()(representation.controls().rows() - 1, 0);
@@ -146,8 +146,8 @@ void addWorkspaceMeasurement(
         basis == SplineTrajectory::ConvexHullBasis::Bezier
             ? "Bezier" : "MINVO";
     Hull workspace;
-    workspace.resetTopology(
-        polynomial, basis, derivative, subdivision_depth);
+    workspace.configure(
+        polynomial, {basis, derivative, subdivision_depth});
     workspace.update(polynomial);
     const Matrix gradients =
         makeGradients(workspace.controls().rows(), generator);
@@ -195,7 +195,7 @@ void addBackwardMeasurement(std::vector<Measurement> &measurements,
     const char *basis_name =
         basis == SplineTrajectory::ConvexHullBasis::Bezier
             ? "Bezier" : "MINVO";
-    const auto representation = Hull::fromPPoly(
+    auto representation = Hull::fromPPoly(
         polynomial, basis, derivative, subdivision_depth);
     const Matrix gradients =
         makeGradients(representation.controls().rows(), generator);
@@ -281,8 +281,8 @@ int main(int argc, char **argv)
             const double elapsed = medianNanoseconds([&]()
             {
                 const auto result = polynomial.derivative(derivative);
-                benchmark_sink += result.getCoefficients()(
-                    result.getCoefficients().rows() - 1, 0);
+                benchmark_sink += result.coefficients()(
+                    result.coefficients().rows() - 1, 0);
             });
             measurements.push_back({
                 "segments", segments, 5, derivative, "Power", 0,

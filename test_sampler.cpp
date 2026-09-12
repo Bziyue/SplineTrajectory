@@ -15,7 +15,7 @@ void checkSampler()
 {
     using Poly = SplineTrajectory::PPolyND<DIM, ORDER>;
     constexpr int count = ORDER == Eigen::Dynamic ? 11 : ORDER;
-    typename Poly::MatrixType coefficients(4 * count, DIM);
+    typename Poly::CoefficientMatrix coefficients(4 * count, DIM);
     for (int i = 0; i < coefficients.rows(); ++i)
         for (int axis = 0; axis < DIM; ++axis)
             coefficients(i, axis) = std::sin(0.17 * (i + 1) * (axis + 1));
@@ -30,7 +30,7 @@ void checkSampler()
         const auto combined = poly.template evaluateDerivatives<5>(t);
         for (int d = 0; d <= 5; ++d)
         {
-            typename Poly::VectorType expected = Poly::VectorType::Zero();
+            typename Poly::Vector expected = Poly::Vector::Zero();
             for (int k = d; k < count; ++k)
             {
                 double factor = 1.0;

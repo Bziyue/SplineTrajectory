@@ -22,6 +22,9 @@
     SOFTWARE.
 */
 
+/** @file SplineTrajectory.hpp
+ * @brief Owning piecewise polynomials, independent samplers and specialized minimum-derivative splines. */
+
 #ifndef SPLINE_TRAJECTORY_HPP
 #define SPLINE_TRAJECTORY_HPP
 
@@ -29,41 +32,48 @@
 #include <array>
 #include <vector>
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <iterator>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 
 namespace SplineTrajectory
 {
     template <typename T>
     using SplineVector = std::vector<T, Eigen::aligned_allocator<T>>;
 
+    /** @brief Physical boundary derivatives in caller-defined coordinates; positions are waypoints. */
     template <int DIM>
     struct BoundaryConditions
     {
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-        using VectorType = Eigen::Matrix<double, DIM, 1>;
+        using Vector = Eigen::Matrix<double, DIM, 1>;
 
-        VectorType start_velocity = VectorType::Zero();
-        VectorType start_acceleration = VectorType::Zero();
-        VectorType start_jerk = VectorType::Zero();
+        Vector start_velocity = Vector::Zero();
+        Vector start_acceleration = Vector::Zero();
+        Vector start_jerk = Vector::Zero();
 
-        VectorType end_velocity = VectorType::Zero();
-        VectorType end_acceleration = VectorType::Zero();
-        VectorType end_jerk = VectorType::Zero();
+        Vector end_velocity = Vector::Zero();
+        Vector end_acceleration = Vector::Zero();
+        Vector end_jerk = Vector::Zero();
 
         BoundaryConditions() = default;
 
-        BoundaryConditions(const VectorType &start_vel, const VectorType &end_vel)
+        BoundaryConditions(const Vector &start_vel, const Vector &end_vel)
             : start_velocity(start_vel), end_velocity(end_vel) {}
 
-        BoundaryConditions(const VectorType &start_vel, const VectorType &start_acc,
-                           const VectorType &end_vel, const VectorType &end_acc)
+        BoundaryConditions(const Vector &start_vel, const Vector &start_acc,
+                           const Vector &end_vel, const Vector &end_acc)
             : start_velocity(start_vel), start_acceleration(start_acc),
               end_velocity(end_vel), end_acceleration(end_acc) {}
 
-        BoundaryConditions(const VectorType &start_vel, const VectorType &start_acc, const VectorType &start_jerk,
-                           const VectorType &end_vel, const VectorType &end_acc, const VectorType &end_jerk)
-            : start_velocity(start_vel), start_acceleration(start_acc), start_jerk(start_jerk),
-              end_velocity(end_vel), end_acceleration(end_acc), end_jerk(end_jerk) {}
+        BoundaryConditions(const Vector &start_vel, const Vector &start_acc, const Vector &start_jerk_value,
+                           const Vector &end_vel, const Vector &end_acc, const Vector &end_jerk_value)
+            : start_velocity(start_vel), start_acceleration(start_acc), start_jerk(start_jerk_value),
+              end_velocity(end_vel), end_acceleration(end_acc), end_jerk(end_jerk_value) {}
     };
 
     enum class Deriv : int
@@ -77,22 +87,34 @@ namespace SplineTrajectory
         Pop = 6
     };
 
-    template <int DIM, int ORDER = Eigen::Dynamic>
+    /** @brief Owning piecewise polynomial in caller-defined coordinates and seconds.
+     * @tparam DIM Positive spatial dimension.
+     * @tparam MaxCoefficients Compile-time coefficient capacity, or Eigen::Dynamic.
+     * @note Rows are piece-major, then ascending powers of local physical time. Actual
+     *       coefficient count may be smaller than capacity. Const queries never write
+     *       shared state. Updates invalidate every borrowed segment, iterator and sampler.
+     *       Invalid numeric construction produces an empty, invalid value. */
+    template <int DIM, int MaxCoefficients = Eigen::Dynamic>
     class PPolyND
     {
     public:
-        using VectorType = Eigen::Matrix<double, DIM, 1>;
-        using RowVectorType = Eigen::Matrix<double, 1, DIM>;
+        static_assert(DIM > 0, "Spatial dimension must be positive");
+        static_assert(MaxCoefficients == Eigen::Dynamic || MaxCoefficients > 0,
+                      "Coefficient capacity must be positive or dynamic");
+        static constexpr int kDimension = DIM;
+        static constexpr int kMaxCoefficients = MaxCoefficients;
+        using Vector = Eigen::Matrix<double, DIM, 1>;
+        using RowVector = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+        using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
     private:
-        static constexpr bool kHasFixedOrder = (ORDER != Eigen::Dynamic);
-        static constexpr int kOrderHint = ORDER;
+        static constexpr bool kHasFixedCapacity = (MaxCoefficients != Eigen::Dynamic);
+        static constexpr int kCapacity = MaxCoefficients;
 
         std::vector<double> breakpoints_;
-        MatrixType coefficients_;
+        CoefficientMatrix coefficients_;
         int num_segments_{0};
         int num_coeffs_{0};
         bool is_initialized_{false};
@@ -121,7 +143,7 @@ namespace SplineTrajectory
         {
             if (k < 0 || k > n)
                 return 0.0;
-            if constexpr (kHasFixedOrder && kOrderHint <= kStaticFactorMaxOrder)
+            if constexpr (kHasFixedCapacity && kCapacity <= kStaticFactorMaxOrder)
                 return kStaticDerivativeFactorTable_[n][k];
             if (n < kStaticFactorMaxOrder && num_coeffs_ <= kStaticFactorMaxOrder)
                 return kStaticDerivativeFactorTable_[n][k];
@@ -130,13 +152,13 @@ namespace SplineTrajectory
             return factor;
         }
 
-        inline VectorType evaluateSegmentHorner(int segment_idx, double t, int derivative_order) const
+        inline Vector evaluateSegmentHorner(int segment_idx, double t, int derivative_order) const
         {
             if (derivative_order >= num_coeffs_ || derivative_order < 0)
-                return VectorType::Zero();
+                return Vector::Zero();
 
             const int base_row = segment_idx * num_coeffs_;
-            VectorType result = derivativeFactor(num_coeffs_ - 1, derivative_order) *
+            Vector result = derivativeFactor(num_coeffs_ - 1, derivative_order) *
                                 coefficients_.row(base_row + num_coeffs_ - 1).transpose();
             for (int k = num_coeffs_ - 2; k >= derivative_order; --k)
                 result = result * t + derivativeFactor(k, derivative_order) *
@@ -156,7 +178,7 @@ namespace SplineTrajectory
         class Sampler
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            using PieceMatrix = Eigen::Matrix<double, ORDER, DIM, kMatrixOptions>;
+            using PieceMatrix = Eigen::Matrix<double, MaxCoefficients, DIM, kMatrixOptions>;
             const PPolyND *source_;
             std::array<PieceMatrix, MAX_DERIVATIVE + 1> coefficients_;
             int segment_ = -1;
@@ -172,16 +194,16 @@ namespace SplineTrajectory
             }
 
         public:
-            using Sample = std::array<VectorType, MAX_DERIVATIVE + 1>;
+            using Sample = std::array<Vector, MAX_DERIVATIVE + 1>;
 
             /** @brief Bind a sampler without changing or warming the source.
              * @param source Borrowed immutable polynomial; must outlive this sampler.
              * @note Dynamic-order polynomials allocate piece storage here; fixed-order ones do not. */
             explicit Sampler(const PPolyND &source) : source_(&source)
             {
-                if constexpr (!kHasFixedOrder)
-                    for (auto &coefficients : coefficients_)
-                        coefficients.resize(source.num_coeffs_, DIM);
+                if constexpr (!kHasFixedCapacity)
+                    for (int d = 0; d <= MAX_DERIVATIVE && d < source.num_coeffs_; ++d)
+                        coefficients_[d].resize(source.num_coeffs_ - d, DIM);
             }
             Sampler(PPolyND &&) = delete;
             Sampler(const PPolyND &&) = delete;
@@ -257,26 +279,34 @@ namespace SplineTrajectory
 
             int index() const { return idx_; }
 
-            VectorType evaluate(double t, Deriv type = Deriv::Pos) const
+            /** @brief Evaluate in seconds relative to this piece's start; extrapolation is allowed.
+             * @return Requested derivative, NaNs for invalid time, zero above degree.
+             * @throws std::invalid_argument For a negative derivative order. */
+            Vector evaluateLocal(double t, Deriv type = Deriv::Pos) const
             {
-                return evaluate(t, static_cast<int>(type));
+                return evaluateLocal(t, static_cast<int>(type));
             }
 
-            VectorType evaluate(double t, int derivative_order) const
+            Vector evaluateLocal(double t, int derivative_order) const
             {
+                if (derivative_order < 0)
+                    throw std::invalid_argument("Derivative order must be nonnegative");
+                if (!parent_->is_initialized_ || !std::isfinite(t))
+                    return Vector::Constant(std::numeric_limits<double>::quiet_NaN());
                 return parent_->evaluateSegmentHorner(idx_, t, derivative_order);
             }
 
-            auto getCoeffs() const -> decltype(parent_->coefficients_.block(0, 0, 0, 0))
+            auto coefficients() const -> decltype(parent_->coefficients_.block(0, 0, 0, 0))
             {
                 return parent_->coefficients_.block(idx_ * parent_->num_coeffs_, 0, parent_->num_coeffs_, DIM);
             }
         };
 
+        /** @brief Random-access iterator over borrowed segment proxies; compare only within one source. */
         class ConstIterator
         {
-            const PPolyND *ptr_;
-            int idx_;
+            const PPolyND *ptr_ = nullptr;
+            int idx_ = 0;
 
         public:
             using iterator_category = std::random_access_iterator_tag;
@@ -285,6 +315,7 @@ namespace SplineTrajectory
             using pointer = Segment *;
             using reference = Segment;
 
+            ConstIterator() = default;
             ConstIterator(const PPolyND *ptr, int idx) : ptr_(ptr), idx_(idx) {}
 
             reference operator*() const { return Segment(ptr_, idx_); }
@@ -327,46 +358,87 @@ namespace SplineTrajectory
 
             difference_type operator-(const ConstIterator &other) const { return idx_ - other.idx_; }
             ConstIterator operator+(difference_type n) const { return ConstIterator(ptr_, idx_ + n); }
+            ConstIterator operator-(difference_type n) const { return *this + (-n); }
+            ConstIterator &operator+=(difference_type n) { idx_ += n; return *this; }
+            ConstIterator &operator-=(difference_type n) { return *this += -n; }
+            reference operator[](difference_type n) const { return *(*this + n); }
+            bool operator<(const ConstIterator &other) const { return idx_ < other.idx_; }
+            bool operator>(const ConstIterator &other) const { return other < *this; }
+            bool operator<=(const ConstIterator &other) const { return !(other < *this); }
+            bool operator>=(const ConstIterator &other) const { return !(*this < other); }
+            friend ConstIterator operator+(difference_type n, ConstIterator it) { return it + n; }
         };
 
-        PPolyND() : num_segments_(0), num_coeffs_(0), is_initialized_(false) {}
+        PPolyND() = default;
 
+        /** @brief Copy N+1 knots and N*coefficient_count ascending-power coefficient rows.
+         * @note Invalid input produces an empty invalid value. Actual count must fit capacity. */
         PPolyND(const std::vector<double> &breakpoints,
-                const MatrixType &coefficients,
-                int order)
-            : is_initialized_(false)
+                const CoefficientMatrix &coefficients, int coefficient_count)
+        { initializeInternal(breakpoints, coefficients, coefficient_count); }
+
+        PPolyND(const PPolyND &) = default;
+        PPolyND &operator=(const PPolyND &) = default;
+        PPolyND(PPolyND &&other) { *this = std::move(other); }
+        PPolyND &operator=(PPolyND &&other)
         {
-            initializeInternal(breakpoints, coefficients, order);
+            if (this != &other)
+            {
+                breakpoints_ = std::move(other.breakpoints_);
+                coefficients_ = std::move(other.coefficients_);
+                num_segments_ = other.num_segments_;
+                num_coeffs_ = other.num_coeffs_;
+                is_initialized_ = other.is_initialized_;
+                other.clear();
+            }
+            return *this;
+        }
+
+        /** @brief Invalidate the polynomial and all its borrowed views. */
+        void clear()
+        {
+            is_initialized_ = false;
+            num_segments_ = num_coeffs_ = 0;
+            breakpoints_.clear();
+            coefficients_.resize(0, DIM);
         }
 
         ConstIterator begin() const { return ConstIterator(this, 0); }
         ConstIterator end() const { return ConstIterator(this, num_segments_); }
 
-        Segment operator[](int idx) const
+        Segment operator[](int idx) const &
         {
             return Segment(this, idx);
         }
 
-        Segment at(int idx) const
+        Segment operator[](int) const && = delete;
+        Segment at(int) const && = delete;
+        /** @brief Borrow a segment with bounds checking; source mutation invalidates it. */
+        Segment at(int idx) const &
         {
             if (idx < 0 || idx >= num_segments_)
                 throw std::out_of_range("Segment index out of range");
             return Segment(this, idx);
         }
 
-        VectorType evaluate(double t, int derivative_order) const
+        /** @brief Query the trajectory time axis in seconds, extrapolating outside its domain.
+         * @return Requested physical derivative; NaNs for invalid source/time, zero above degree.
+         * @throws std::invalid_argument For a negative derivative order. No allocation or shared write occurs. */
+        Vector evaluate(double t, int derivative_order) const
         {
-            if (!is_initialized_ || !std::isfinite(t) || derivative_order < 0)
-                return VectorType::Constant(std::numeric_limits<double>::quiet_NaN());
+            if (derivative_order < 0)
+                throw std::invalid_argument("Derivative order must be nonnegative");
+            if (!is_initialized_ || !std::isfinite(t))
+                return Vector::Constant(std::numeric_limits<double>::quiet_NaN());
             if (derivative_order >= num_coeffs_)
-                return VectorType::Zero();
+                return Vector::Zero();
             int segment_idx = findSegment(t);
             double dt = t - breakpoints_[segment_idx];
 
             return evaluateSegmentHorner(segment_idx, dt, derivative_order);
         }
 
-        VectorType evaluate(double t, Deriv type = Deriv::Pos) const
+        Vector evaluate(double t, Deriv type = Deriv::Pos) const
         {
             return evaluate(t, static_cast<int>(type));
         }
@@ -376,10 +448,10 @@ namespace SplineTrajectory
          * @return Fixed-size derivative array; invalid spline/time produces NaN. Outside times extrapolate the end piece.
          * @note Const calls are reentrant; update requires exclusive ownership. No heap allocation occurs during evaluation. */
         template <int MAX_DERIVATIVE>
-        std::array<VectorType, MAX_DERIVATIVE + 1> evaluateDerivatives(double t) const
+        std::array<Vector, MAX_DERIVATIVE + 1> evaluateDerivatives(double t) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            std::array<VectorType, MAX_DERIVATIVE + 1> values;
+            std::array<Vector, MAX_DERIVATIVE + 1> values;
             if (!is_initialized_ || !std::isfinite(t))
             {
                 for (auto &value : values) value.setConstant(std::numeric_limits<double>::quiet_NaN());
@@ -392,44 +464,46 @@ namespace SplineTrajectory
             return values;
         }
 
-        SplineVector<VectorType> evaluate(const std::vector<double> &t, int derivative_order) const
+        /** @brief Evaluate one derivative into caller-owned rows without allocating.
+         * @param times Query times on the trajectory axis.
+         * @param[out] output Matrix with times.size() rows and DIM columns.
+         * @param derivative_order Nonnegative physical derivative order.
+         * @throws std::invalid_argument For a wrong output shape or negative order. */
+        void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output,
+                          int derivative_order = 0) const
         {
-            SplineVector<VectorType> results;
+            if (output.rows() != static_cast<Eigen::Index>(times.size()) || derivative_order < 0)
+                throw std::invalid_argument("Invalid batch shape or derivative order");
+            for (std::size_t i = 0; i < times.size(); ++i)
+                output.row(static_cast<Eigen::Index>(i)) = evaluate(times[i], derivative_order).transpose();
+        }
+
+        /** @brief Allocating batch convenience; each element uses evaluate()'s time and error contract. */
+        SplineVector<Vector> evaluate(const std::vector<double> &t, int derivative_order) const
+        {
+            if (derivative_order < 0) throw std::invalid_argument("Derivative order must be nonnegative");
+            SplineVector<Vector> results;
             results.reserve(t.size());
             for (double time : t)
                 results.push_back(evaluate(time, derivative_order));
             return results;
         }
 
-        SplineVector<VectorType> evaluate(const std::vector<double> &t, Deriv type = Deriv::Pos) const
+        SplineVector<Vector> evaluate(const std::vector<double> &t, Deriv type = Deriv::Pos) const
         {
             return evaluate(t, static_cast<int>(type));
         }
 
-        VectorType evaluate(double t, int *last_idx_hint, Deriv type = Deriv::Pos) const
+
+
+
+
+        double length(double dt = 0.01) const
         {
-            return evaluate(t, last_idx_hint, static_cast<int>(type));
+            return length(startTime(), endTime(), dt);
         }
 
-        VectorType evaluate(double t, int *last_idx_hint, int derivative_order) const
-        {
-            if (!is_initialized_ || !std::isfinite(t) || derivative_order < 0)
-                return VectorType::Constant(std::numeric_limits<double>::quiet_NaN());
-            if (derivative_order >= num_coeffs_)
-                return VectorType::Zero();
-
-            int segment_idx = findSegment(t, last_idx_hint);
-            double dt = t - breakpoints_[segment_idx];
-
-            return evaluateSegmentHorner(segment_idx, dt, derivative_order);
-        }
-
-        double getTrajectoryLength(double dt = 0.01) const
-        {
-            return getTrajectoryLength(getStartTime(), getEndTime(), dt);
-        }
-
-        double getTrajectoryLength(double start_t, double end_t, double dt = 0.01) const
+        double length(double start_t, double end_t, double dt = 0.01) const
         {
             std::vector<double> time_sequence = generateTimeSequence(start_t, end_t, dt);
 
@@ -440,66 +514,76 @@ namespace SplineTrajectory
                 double t_next = time_sequence[i + 1];
                 double dt_actual = t_next - t_current;
 
-                VectorType velocity = evaluate(t_current, Deriv::Vel);
+                Vector velocity = evaluate(t_current, Deriv::Vel);
                 total_length += velocity.norm() * dt_actual;
             }
             return total_length;
         }
 
-        void update(const std::vector<double> &breakpoints, const MatrixType &coefficients, int num_coefficients)
+        /** @brief Replace owning data, invalidating borrowed views; invalid input clears the value. */
+        void update(const std::vector<double> &breakpoints, const CoefficientMatrix &coefficients, int num_coefficients)
         {
             initializeInternal(breakpoints, coefficients, num_coefficients);
         }
 
-        bool isInitialized() const { return is_initialized_; }
-        int getDimension() const { return DIM; }
-        int getNumCoeffs() const { return num_coeffs_; }
-        int getDegree() const { return num_coeffs_ > 0 ? num_coeffs_ - 1 : 0; }
-        int getNumSegments() const { return num_segments_; }
-        double getStartTime() const { return breakpoints_.empty() ? 0.0 : breakpoints_.front(); }
-        double getEndTime() const { return breakpoints_.empty() ? 0.0 : breakpoints_.back(); }
-        double getDuration() const { return getEndTime() - getStartTime(); }
-        const std::vector<double> &getBreakpoints() const { return breakpoints_; }
-        const MatrixType &getCoefficients() const { return coefficients_; }
+        bool isValid() const { return is_initialized_; }
+        int dimension() const { return DIM; }
+        int coefficientCount() const { return num_coeffs_; }
+        int degree() const { return num_coeffs_ > 0 ? num_coeffs_ - 1 : 0; }
+        int numSegments() const { return num_segments_; }
+        double startTime() const { return breakpoints_.empty() ? 0.0 : breakpoints_.front(); }
+        double endTime() const { return breakpoints_.empty() ? 0.0 : breakpoints_.back(); }
+        double duration() const { return endTime() - startTime(); }
+        const std::vector<double> &breakpoints() const { return breakpoints_; }
+        const CoefficientMatrix &coefficients() const { return coefficients_; }
 
+        /** @brief Generate increasing query times, including both endpoints.
+         * @return One value for a zero-length interval.
+         * @throws std::invalid_argument For nonfinite inputs, nonpositive step or reversed interval.
+         * @throws std::length_error For an unrepresentable sample count or advancing step. */
         std::vector<double> generateTimeSequence(double start_t, double end_t, double dt) const
         {
-            std::vector<double> time_sequence;
-            double duration = end_t - start_t;
-            int num_steps = std::floor(duration / dt);
-
-            time_sequence.reserve(num_steps + 1);
-
-            for (int i = 0; i <= num_steps; ++i)
+            if (!std::isfinite(start_t) || !std::isfinite(end_t) || !std::isfinite(dt) ||
+                dt <= 0.0 || end_t < start_t)
+                throw std::invalid_argument("Time sequence requires a finite forward interval and positive step");
+            const double steps = std::floor((end_t - start_t) / dt);
+            if (!std::isfinite(steps) || steps > static_cast<double>(std::numeric_limits<int>::max() - 2) ||
+                (start_t < end_t && start_t + dt <= start_t))
+                throw std::length_error("Time sequence cannot be represented");
+            std::vector<double> result;
+            result.reserve(static_cast<std::size_t>(steps) + 2);
+            result.push_back(start_t);
+            for (int i = 1; i <= static_cast<int>(steps); ++i)
             {
-                time_sequence.push_back(start_t + i * dt);
+                const double t = start_t + i * dt;
+                if (t >= end_t) break;
+                if (t <= result.back()) throw std::length_error("Time sequence cannot advance");
+                result.push_back(t);
             }
-
-            if (time_sequence.empty() || std::abs(time_sequence.back() - end_t) > 1e-6)
-            {
-                time_sequence.push_back(end_t);
-            }
-
-            return time_sequence;
+            if (end_t != start_t) result.push_back(end_t);
+            return result;
         }
 
         std::vector<double> generateTimeSequence(double dt) const
         {
-            return generateTimeSequence(getStartTime(), getEndTime(), dt);
+            return generateTimeSequence(startTime(), endTime(), dt);
         }
 
+        /** @brief Return an owning derivative polynomial; negative orders throw invalid_argument. */
         PPolyND derivative(int derivative_order = 1) const
         {
+            if (derivative_order < 0)
+                throw std::invalid_argument("Derivative order must be nonnegative");
             if (num_segments_ == 0 || derivative_order >= num_coeffs_)
             {
                 if (num_segments_ == 0)
                     return PPolyND();
-                MatrixType zero_coeffs = MatrixType::Zero(num_segments_, DIM);
+                CoefficientMatrix zero_coeffs = CoefficientMatrix::Zero(num_segments_, DIM);
                 return PPolyND(breakpoints_, zero_coeffs, 1);
             }
 
             int new_order = num_coeffs_ - derivative_order;
-            MatrixType new_coeffs(num_segments_ * new_order, DIM);
+            CoefficientMatrix new_coeffs(num_segments_ * new_order, DIM);
 
             for (int seg = 0; seg < num_segments_; ++seg)
             {
@@ -507,7 +591,7 @@ namespace SplineTrajectory
                 {
                     int orig_k = k + derivative_order;
                     double coeff_factor = derivativeFactor(orig_k, derivative_order);
-                    RowVectorType orig_coeff = coefficients_.row(seg * num_coeffs_ + orig_k);
+                    RowVector orig_coeff = coefficients_.row(seg * num_coeffs_ + orig_k);
                     new_coeffs.row(seg * new_order + k) = coeff_factor * orig_coeff;
                 }
             }
@@ -522,11 +606,11 @@ namespace SplineTrajectory
         PPolyND extractInterval(double start, double end) const
         {
             if (!is_initialized_ || !std::isfinite(start) || !std::isfinite(end) ||
-                start < getStartTime() || end > getEndTime() || end <= start) return {};
+                start < startTime() || end > endTime() || end <= start) return {};
             const int first = findSegment(start);
             const int last = static_cast<int>(std::lower_bound(breakpoints_.begin() + 1,
                 breakpoints_.end(), end) - breakpoints_.begin());
-            MatrixType coefficients = coefficients_.middleRows(first * num_coeffs_, (last - first) * num_coeffs_);
+            CoefficientMatrix coefficients = coefficients_.middleRows(first * num_coeffs_, (last - first) * num_coeffs_);
             const double delta = start - breakpoints_[first];
             if (delta != 0.0)
             {
@@ -553,28 +637,35 @@ namespace SplineTrajectory
          * @note Callers own seam acceptance policy; inputs are read-only, no fitting or resampling occurs. */
         PPolyND appendRebased(const PPolyND &suffix) const
         {
-            if (!is_initialized_ || !suffix.is_initialized_ || getStartTime() != 0.0 ||
-                suffix.getStartTime() != 0.0 || num_coeffs_ != suffix.num_coeffs_) return {};
+            if (!is_initialized_ || !suffix.is_initialized_ || startTime() != 0.0 ||
+                suffix.startTime() != 0.0 || num_coeffs_ != suffix.num_coeffs_) return {};
             std::vector<double> times = breakpoints_;
             for (auto it = suffix.breakpoints_.begin() + 1; it != suffix.breakpoints_.end(); ++it)
-                times.push_back(getEndTime() + *it);
-            MatrixType coefficients(coefficients_.rows() + suffix.coefficients_.rows(), DIM);
+                times.push_back(endTime() + *it);
+            CoefficientMatrix coefficients(coefficients_.rows() + suffix.coefficients_.rows(), DIM);
             coefficients.topRows(coefficients_.rows()) = coefficients_;
             coefficients.bottomRows(suffix.coefficients_.rows()) = suffix.coefficients_;
             return PPolyND(times, coefficients, num_coeffs_);
         }
 
+        /** @brief Construct an owning zero polynomial; coefficient count must fit the capacity. */
         static PPolyND zero(const std::vector<double> &breakpoints, int num_coefficients = 1)
         {
-            int num_segments = breakpoints.size() > 1 ? static_cast<int>(breakpoints.size()) - 1 : 0;
-            MatrixType zero_coeffs = MatrixType::Zero(num_segments * num_coefficients, DIM);
+            if (num_coefficients <= 0 || (kHasFixedCapacity && num_coefficients > kCapacity) ||
+                breakpoints.size() < 2 || breakpoints.size() - 1 >
+                    static_cast<std::size_t>(std::numeric_limits<int>::max() / num_coefficients)) return {};
+            int num_segments = static_cast<int>(breakpoints.size()) - 1;
+            CoefficientMatrix zero_coeffs = CoefficientMatrix::Zero(num_segments * num_coefficients, DIM);
             return PPolyND(breakpoints, zero_coeffs, num_coefficients);
         }
 
-        static PPolyND constant(const std::vector<double> &breakpoints, const VectorType &constant_value)
+        /** @brief Construct an owning constant polynomial, or an invalid value for invalid input. */
+        static PPolyND constant(const std::vector<double> &breakpoints, const Vector &constant_value)
         {
+            if (breakpoints.size() < 2 || breakpoints.size() - 1 >
+                static_cast<std::size_t>(std::numeric_limits<int>::max())) return {};
             int num_segments = breakpoints.size() > 1 ? static_cast<int>(breakpoints.size()) - 1 : 0;
-            MatrixType coeffs = MatrixType::Zero(num_segments, DIM);
+            CoefficientMatrix coeffs = CoefficientMatrix::Zero(num_segments, DIM);
             for (int i = 0; i < num_segments; ++i)
             {
                 coeffs.row(i) = constant_value.transpose();
@@ -583,13 +674,56 @@ namespace SplineTrajectory
         }
 
     private:
+        template <int> friend class CubicSplineND;
+        template <int> friend class QuinticSplineND;
+        template <int> friend class SepticSplineND;
+
+        /** @brief Prepare exclusive solver access; invalidate before writing any numeric data. */
+        template <int MinDerivativeOrder>
+        bool beginSpline(const std::vector<double> &durations, const CoefficientMatrix &points,
+                         const BoundaryConditions<DIM> &boundary, double start, int count)
+        {
+            is_initialized_ = false;
+            bool valid = !durations.empty() && durations.size() <=
+                static_cast<std::size_t>(std::numeric_limits<int>::max() / count) &&
+                points.rows() == static_cast<Eigen::Index>(durations.size()) + 1 &&
+                points.allFinite() && std::isfinite(start) &&
+                boundary.start_velocity.allFinite() && boundary.end_velocity.allFinite();
+            if constexpr (MinDerivativeOrder >= 3)
+                valid = valid && boundary.start_acceleration.allFinite() && boundary.end_acceleration.allFinite();
+            if constexpr (MinDerivativeOrder >= 4)
+                valid = valid && boundary.start_jerk.allFinite() && boundary.end_jerk.allFinite();
+            if (!valid) { clear(); return false; }
+            breakpoints_.resize(durations.size() + 1);
+            breakpoints_[0] = start;
+            for (std::size_t i = 0; i < durations.size(); ++i)
+            {
+                const double next = breakpoints_[i] + durations[i];
+                if (!std::isfinite(durations[i]) || durations[i] <= 0.0 ||
+                    !std::isfinite(next) || next <= breakpoints_[i])
+                { clear(); return false; }
+                breakpoints_[i + 1] = next;
+            }
+            num_segments_ = static_cast<int>(durations.size());
+            num_coeffs_ = count;
+            coefficients_.resize(num_segments_ * count, DIM);
+            return true;
+        }
+
+        /** @brief Publish only finite coefficients; no copy of knots or coefficients is made. */
+        void finishSpline()
+        {
+            if (!coefficients_.allFinite()) clear();
+            else is_initialized_ = true;
+        }
+
         inline void initializeInternal(const std::vector<double> &breakpoints,
-                                       const MatrixType &coefficients,
+                                       const CoefficientMatrix &coefficients,
                                        int num_coefficients)
         {
             const bool valid = breakpoints.size() >= 2 && num_coefficients > 0 &&
                 breakpoints.size() - 1 <= static_cast<size_t>(std::numeric_limits<int>::max() / num_coefficients) &&
-                (!kHasFixedOrder || num_coefficients <= kOrderHint) &&
+                (!kHasFixedCapacity || num_coefficients <= kCapacity) &&
                 coefficients.rows() == static_cast<Eigen::Index>(breakpoints.size() - 1) * num_coefficients &&
                 coefficients.allFinite() &&
                 std::all_of(breakpoints.begin(), breakpoints.end(), [](double t) { return std::isfinite(t); }) &&
@@ -630,105 +764,100 @@ namespace SplineTrajectory
             return static_cast<int>(std::distance(breakpoints_.begin(), it)) - 1;
         }
 
-        inline int findSegment(double t, int *last_idx_hint) const
+
+    };
+
+    /** @brief Boundary adjoints; unused higher derivatives remain zero. */
+    template <int DIM>
+    struct BoundaryGradient
+    {
+        using Vector = Eigen::Matrix<double, DIM, 1>;
+        Vector p = Vector::Zero(), v = Vector::Zero(), a = Vector::Zero(), j = Vector::Zero();
+    };
+
+    /** @brief Start and end boundary adjoints in the same coordinate frame. */
+    template <int DIM>
+    struct BoundaryGradientPair
+    {
+        BoundaryGradient<DIM> start, end;
+    };
+
+    /** @brief Total derivatives with respect to interpolation data, in physical coordinates. */
+    template <int DIM>
+    struct SplineGradients
+    {
+        using CoefficientMatrix = typename PPolyND<DIM>::CoefficientMatrix;
+        CoefficientMatrix inner_points;
+        Eigen::VectorXd durations;
+        BoundaryGradient<DIM> start, end;
+        /** @brief Allocate output storage for a topology; does not initialize values. */
+        void resetTopology(int segments)
         {
-            if (!last_idx_hint)
-                return findSegment(t);
-
-            int idx = *last_idx_hint;
-
-            if (idx >= 0 && idx < num_segments_)
-            {
-                if (t >= breakpoints_[idx] && t < breakpoints_[idx + 1])
-                {
-                    return idx;
-                }
-
-                if (idx + 1 < num_segments_)
-                {
-                    if (t >= breakpoints_[idx + 1] && t < breakpoints_[idx + 2])
-                    {
-                        *last_idx_hint = idx + 1;
-                        return idx + 1;
-                    }
-                }
-            }
-
-            int found_idx = findSegment(t);
-
-            *last_idx_hint = found_idx;
-
-            return found_idx;
+            if (segments < 0) throw std::invalid_argument("Negative segment count");
+            inner_points.resize(std::max(0, segments - 1), DIM);
+            durations.resize(segments);
+        }
+        void setZero()
+        {
+            inner_points.setZero(); durations.setZero();
+            start = {}; end = {};
         }
     };
 
+    namespace detail
+    {
+        /** @brief Convert absolute knots to durations; empty input yields an invalid empty topology. */
+        inline void durationsFromKnots(const std::vector<double> &knots,
+                                       std::vector<double> &durations, double &start)
+        {
+            start = knots.empty() ? 0.0 : knots.front();
+            durations.resize(knots.empty() ? 0 : knots.size() - 1);
+            for (std::size_t i = 0; i < durations.size(); ++i)
+                durations[i] = knots[i + 1] - knots[i];
+        }
+    }
+
+    /** @brief Minimum-acceleration interpolation with a specialized O(N) scalar tridiagonal solver.
+     * @note Minimize the squared 2-th physical derivative integral with fixed waypoint
+     *       positions and endpoint derivatives of orders 1 through 1. Coordinates
+     *       are caller-defined; durations use seconds. Polynomial coefficients and knots
+     *       have one owner. Updates and backward() require exclusive access; const energy
+     *       and polynomial queries may run concurrently on an unchanged valid object.
+     *       Copies own independent data. Moving invalidates borrowed views and the source polynomial.
+     *       Numeric construction failure clears the polynomial; inspect isValid(). */
     template <int DIM>
     class CubicSplineND
     {
     public:
-        using VectorType = Eigen::Matrix<double, DIM, 1>;
-        using RowVectorType = Eigen::Matrix<double, 1, DIM>;
+        using Vector = Eigen::Matrix<double, DIM, 1>;
+        using RowVector = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+        using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
-        static constexpr int ORDER = 3;
-        static constexpr int COEFF_NUM = 4;
-        using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
+        static constexpr int kDimension = DIM;
+        static constexpr int kDegree = 3;
+        static constexpr int kCoefficientCount = 4;
+        static constexpr int kMinDerivativeOrder = 2;
+        using Polynomial = PPolyND<DIM, kCoefficientCount>;
 
-        struct BoundaryStateGrads
-        {
-            VectorType p;
-            VectorType v;
-
-            BoundaryStateGrads() : p(VectorType::Zero()), v(VectorType::Zero()) {}
-        };
-
-        struct BoundaryDualGrads
-        {
-            BoundaryStateGrads start;
-            BoundaryStateGrads end;
-        };
-
-        struct Gradients
-        {
-            MatrixType inner_points;
-            Eigen::VectorXd times;
-            BoundaryStateGrads start;
-            BoundaryStateGrads end;
-
-            void resetTopology(int num_segments)
-            {
-                inner_points.resize(
-                    std::max(0, num_segments - 1), DIM);
-                times.resize(num_segments);
-            }
-
-            void setZero()
-            {
-                inner_points.setZero();
-                times.setZero();
-                start = BoundaryStateGrads();
-                end = BoundaryStateGrads();
-            }
-        };
+        using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
+        using BoundaryGradients = BoundaryGradientPair<DIM>;
+        using Gradients = SplineGradients<DIM>;
 
     private:
         std::vector<double> time_segments_;
-        MatrixType spatial_points_;
+        CoefficientMatrix spatial_points_;
         BoundaryConditions<DIM> boundary_velocities_;
         int num_segments_;
-        MatrixType coeffs_;
-        bool is_initialized_;
         double start_time_;
-        std::vector<double> cumulative_times_;
-        TrajectoryType trajectory_;
+        Polynomial trajectory_;
 
-        MatrixType internal_derivatives_;
-        MatrixType point_diffs_;
-        MatrixType scaled_point_diffs_;
+        CoefficientMatrix internal_derivatives_;
+        CoefficientMatrix point_diffs_;
+        CoefficientMatrix scaled_point_diffs_;
         Eigen::VectorXd cached_c_prime_;
         Eigen::VectorXd cached_inv_denoms_;
-        MatrixType ws_lambda_;
+        CoefficientMatrix ws_lambda_;
 
         struct TimePowers
         {
@@ -742,39 +871,48 @@ namespace SplineTrajectory
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-        CubicSplineND() : num_segments_(0), is_initialized_(false), start_time_(0.0) {}
+        CubicSplineND() : num_segments_(0), start_time_(0.0) {}
 
+        /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
+         * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         CubicSplineND(const std::vector<double> &t_points,
-                      const MatrixType &spatial_points,
+                      const CoefficientMatrix &spatial_points,
                       const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_velocities_(boundary_velocities), is_initialized_(false)
+            : spatial_points_(spatial_points), boundary_velocities_(boundary_velocities)
         {
-            convertTimePointsToSegments(t_points);
+            detail::durationsFromKnots(t_points, time_segments_, start_time_);
             updateSplineInternal();
         }
 
+        /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
+         * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         CubicSplineND(const std::vector<double> &time_segments,
-                      const MatrixType &spatial_points,
+                      const CoefficientMatrix &spatial_points,
                       double start_time,
                       const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
             : time_segments_(time_segments), spatial_points_(spatial_points), boundary_velocities_(boundary_velocities),
-              is_initialized_(false), start_time_(start_time)
+              start_time_(start_time)
         {
             updateSplineInternal();
         }
 
+        /** @brief Replace interpolation data using absolute knots; invalid input clears the polynomial.
+         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views. */
         void update(const std::vector<double> &t_points,
-                    const MatrixType &spatial_points,
+                    const CoefficientMatrix &spatial_points,
                     const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
         {
             spatial_points_ = spatial_points;
             boundary_velocities_ = boundary_velocities;
-            convertTimePointsToSegments(t_points);
+            detail::durationsFromKnots(t_points, time_segments_, start_time_);
             updateSplineInternal();
         }
 
+        /** @brief Replace interpolation data using positive durations and a common time origin.
+         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
+         *       Invalid shapes, times, boundary data or numeric output clear the polynomial. */
         void update(const std::vector<double> &time_segments,
-                    const MatrixType &spatial_points,
+                    const CoefficientMatrix &spatial_points,
                     double start_time,
                     const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
         {
@@ -785,51 +923,52 @@ namespace SplineTrajectory
             updateSplineInternal();
         }
 
-        bool isInitialized() const { return is_initialized_; }
-        int getDimension() const { return DIM; }
+        bool isValid() const { return trajectory_.isValid(); }
+        int dimension() const { return DIM; }
 
-        double getStartTime() const
+        double startTime() const
         {
-            return start_time_;
+            return trajectory_.startTime();
         }
 
-        double getEndTime() const
+        double endTime() const
         {
-            return cumulative_times_.back();
+            return trajectory_.endTime();
         }
 
-        double getDuration() const
+        double duration() const
         {
-            return cumulative_times_.back() - start_time_;
+            return trajectory_.duration();
         }
 
-        size_t getNumPoints() const
+        size_t numPoints() const
         {
             return static_cast<size_t>(spatial_points_.rows());
         }
 
-        int getNumSegments() const
+        int numSegments() const
         {
-            return num_segments_;
+            return trajectory_.numSegments();
         }
 
-        const MatrixType &getSpacePoints() const { return spatial_points_; }
-        const std::vector<double> &getTimeSegments() const { return time_segments_; }
-        const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
-        const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_velocities_; }
+        const CoefficientMatrix &waypoints() const { return spatial_points_; }
+        const std::vector<double> &durations() const { return time_segments_; }
+        const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
+        const BoundaryConditions<DIM> &boundary() const { return boundary_velocities_; }
 
-        const TrajectoryType &getTrajectory() const { return trajectory_; }
-        TrajectoryType getTrajectoryCopy() const { return trajectory_; }
-        const TrajectoryType &getPPoly() const { return trajectory_; }
-        TrajectoryType getPPolyCopy() const { return trajectory_; }
+        /** @brief Borrow the polynomial until the next update, assignment or move. */
+        const Polynomial &polynomial() const & { return trajectory_; }
+        const Polynomial &polynomial() const && = delete;
+        /** @brief Make an independent owning snapshot, allocating its data. */
+        Polynomial copyPolynomial() const { return trajectory_; }
 
         static inline void computeBasisFunctions(double t,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_acc,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_jerk,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
         {
             double t1 = t, t2 = t1 * t1, t3 = t2 * t1;
 
@@ -841,10 +980,11 @@ namespace SplineTrajectory
             b_crackle.setZero();
         }
 
-        double getEnergy() const
+        /** @brief Integral of the squared minimum derivative; returns NaN for an invalid spline. */
+        double energy() const
         {
-            if (!is_initialized_)
-                return 0.0;
+            if (!trajectory_.isValid())
+                return std::numeric_limits<double>::quiet_NaN();
 
             double total_energy = 0.0;
             for (int i = 0; i < num_segments_; ++i)
@@ -856,8 +996,8 @@ namespace SplineTrajectory
                 const double T2 = T * T;
                 const double T3 = T2 * T;
 
-                RowVectorType c = coeffs_.row(i * 4 + 2);
-                RowVectorType d = coeffs_.row(i * 4 + 3);
+                RowVector c = trajectory_.coefficients_.row(i * 4 + 2);
+                RowVector d = trajectory_.coefficients_.row(i * 4 + 3);
 
                 total_energy += 12.0 * d.squaredNorm() * T3 +
                                 12.0 * c.dot(d) * T2 +
@@ -869,12 +1009,13 @@ namespace SplineTrajectory
         /**
          * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
          *
-         * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 4) × DIM.
-         *         Each row corresponds to one coefficient dimension.
+         * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 4) × DIM.
+         *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
          * @note This computes only the direct partial derivative, not the full gradient.
          */
-        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             gdC.resize(num_segments_ * 4, DIM);
             gdC.setZero();
 
@@ -884,8 +1025,8 @@ namespace SplineTrajectory
                 double T2 = T * T;
                 double T3 = T2 * T;
 
-                const RowVectorType c2 = coeffs_.row(i * 4 + 2);
-                const RowVectorType c3 = coeffs_.row(i * 4 + 3);
+                const RowVector c2 = trajectory_.coefficients_.row(i * 4 + 2);
+                const RowVector c3 = trajectory_.coefficients_.row(i * 4 + 3);
 
                 gdC.row(i * 4 + 2) = 8.0 * c2 * T + 12.0 * c3 * T2;
 
@@ -893,41 +1034,42 @@ namespace SplineTrajectory
             }
         }
 
-        MatrixType getEnergyPartialGradByCoeffs() const
+        CoefficientMatrix energyCoefficientPartials() const
         {
-            MatrixType gdC;
-            getEnergyPartialGradByCoeffs(gdC);
+            CoefficientMatrix gdC;
+            energyCoefficientPartials(gdC);
             return gdC;
         }
 
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
          *
-         * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
+         * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
-         * @note This computes only the explicit time dependency, not the full gradient.
+         * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
          */
-        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             gdT.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
                 const double T = time_powers_[i].h;
 
-                const RowVectorType c2 = coeffs_.row(i * 4 + 2);
-                const RowVectorType c3 = coeffs_.row(i * 4 + 3);
+                const RowVector c2 = trajectory_.coefficients_.row(i * 4 + 2);
+                const RowVector c3 = trajectory_.coefficients_.row(i * 4 + 3);
 
-                RowVectorType acc_end = 2.0 * c2 + (6.0 * T) * c3;
+                RowVector acc_end = 2.0 * c2 + (6.0 * T) * c3;
 
                 gdT(i) = acc_end.squaredNorm();
             }
         }
 
-        Eigen::VectorXd getEnergyPartialGradByTimes() const
+        Eigen::VectorXd energyDurationPartials() const
         {
             Eigen::VectorXd gdT;
-            getEnergyPartialGradByTimes(gdT);
+            energyDurationPartials(gdT);
             return gdT;
         }
 
@@ -937,15 +1079,16 @@ namespace SplineTrajectory
          * @return VectorXd Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
-        void getEnergyGradTimes(Eigen::VectorXd &grad) const
+        void energyDurationGradient(Eigen::VectorXd &grad) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             grad.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                const RowVectorType c1 = coeffs_.row(i * 4 + 1);
-                const RowVectorType c2 = coeffs_.row(i * 4 + 2);
-                const RowVectorType c3 = coeffs_.row(i * 4 + 3);
+                const RowVector c1 = trajectory_.coefficients_.row(i * 4 + 1);
+                const RowVector c2 = trajectory_.coefficients_.row(i * 4 + 2);
+                const RowVector c3 = trajectory_.coefficients_.row(i * 4 + 3);
 
                 double term_acc = 4.0 * c2.squaredNorm();
                 double term_jv = 12.0 * c1.dot(c3);
@@ -954,20 +1097,21 @@ namespace SplineTrajectory
             }
         }
 
-        Eigen::VectorXd getEnergyGradTimes() const
+        Eigen::VectorXd energyDurationGradient() const
         {
             Eigen::VectorXd grad;
-            getEnergyGradTimes(grad);
+            energyDurationGradient(grad);
             return grad;
         }
 
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @return MatrixType Full gradient dE/dP for inner points only.
+         * @return CoefficientMatrix Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
-        void getEnergyGradInnerPoints(MatrixType &grad) const
+        void energyWaypointGradient(CoefficientMatrix &grad) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             if (num_segments_ < 1)
             {
                 grad.resize(0, DIM);
@@ -979,31 +1123,32 @@ namespace SplineTrajectory
 
             for (int i = 1; i < num_segments_; ++i)
             {
-                const RowVectorType c3_L = coeffs_.row((i - 1) * 4 + 3);
-                const RowVectorType c3_R = coeffs_.row(i * 4 + 3);
+                const RowVector c3_L = trajectory_.coefficients_.row((i - 1) * 4 + 3);
+                const RowVector c3_R = trajectory_.coefficients_.row(i * 4 + 3);
                 grad.row(i - 1) = 12.0 * (c3_R - c3_L);
             }
         }
 
-        MatrixType getEnergyGradInnerPoints() const
+        CoefficientMatrix energyWaypointGradient() const
         {
-            MatrixType grad;
-            getEnergyGradInnerPoints(grad);
+            CoefficientMatrix grad;
+            energyWaypointGradient(grad);
             return grad;
         }
 
         /**
          * @brief Compute partial gradient of energy w.r.t. boundary conditions (Position, Velocity).
-         * @return BoundaryDualGrads containing gradients for start/end pos and vel.
+         * @return BoundaryGradients containing gradients for start/end pos and vel.
          */
-        BoundaryDualGrads getEnergyGradBoundary() const
+        BoundaryGradients energyBoundaryGradient() const
         {
-            BoundaryDualGrads res;
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
+            BoundaryGradients res;
             if (num_segments_ < 1)
                 return res;
 
-            const RowVectorType c2_first = coeffs_.row(2);
-            const RowVectorType c3_first = coeffs_.row(3);
+            const RowVector c2_first = trajectory_.coefficients_.row(2);
+            const RowVector c3_first = trajectory_.coefficients_.row(3);
 
             res.start.p = 12.0 * c3_first.transpose();
             res.start.v = -4.0 * c2_first.transpose();
@@ -1011,11 +1156,11 @@ namespace SplineTrajectory
             int last_idx = num_segments_ - 1;
             double T = time_segments_[last_idx];
 
-            const RowVectorType c2_last = coeffs_.row(last_idx * 4 + 2);
-            const RowVectorType c3_last = coeffs_.row(last_idx * 4 + 3);
+            const RowVector c2_last = trajectory_.coefficients_.row(last_idx * 4 + 2);
+            const RowVector c3_last = trajectory_.coefficients_.row(last_idx * 4 + 3);
 
-            RowVectorType acc_end = 2.0 * c2_last + 6.0 * c3_last * T;
-            RowVectorType jerk_end = 6.0 * c3_last;
+            RowVector acc_end = 2.0 * c2_last + 6.0 * c3_last * T;
+            RowVector jerk_end = 6.0 * c3_last;
 
             res.end.p = -2.0 * jerk_end.transpose();
             res.end.v = 2.0 * acc_end.transpose();
@@ -1028,26 +1173,26 @@ namespace SplineTrajectory
          *
          * @return Gradients Structure containing:
          *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
+         *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity)
          */
-        Gradients getEnergyGrad() const
+        Gradients energyGradient() const
         {
             Gradients res;
-            getEnergyGrad(res);
+            energyGradient(res);
             return res;
         }
 
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param grads Output gradients structure to populate
+         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
-        void getEnergyGrad(Gradients &grads) const
+        void energyGradient(Gradients &grads) const
         {
-            getEnergyGradInnerPoints(grads.inner_points);
-            getEnergyGradTimes(grads.times);
-            BoundaryDualGrads boundary = getEnergyGradBoundary();
+            energyWaypointGradient(grads.inner_points);
+            energyDurationGradient(grads.durations);
+            BoundaryGradients boundary = energyBoundaryGradient();
             grads.start = boundary.start;
             grads.end = boundary.end;
         }
@@ -1059,16 +1204,16 @@ namespace SplineTrajectory
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @return Gradients Structure containing:
          *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
+         *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity)
          */
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+        Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
 
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.times, res.start, res.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes,
+                                  res.inner_points, res.durations, res.start, res.end);
 
             return res;
         }
@@ -1078,30 +1223,38 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param grads               Output gradients structure to populate
+         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
+        void backward(const CoefficientMatrix &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
         {
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.times, grads.start, grads.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes,
+                                  grads.inner_points, grads.durations, grads.start, grads.end);
         }
 
     private:
-        void propagateGradInternal(const MatrixType &partialGradByCoeffs,
+        /** @brief Pull back the coefficient map through the cached continuity solve.
+         * @note With A(T)q = b(T,P,boundary), solve A^T lambda = dL/dq and accumulate
+         *       lambda^T (db/dtheta - dA/dtheta*q) plus direct coefficient-map partials.
+         *       Input duration partials hold local power coefficients fixed. Outputs are
+         *       overwritten; correctly sized output and adjoint storage are reused. */
+        void backwardImpl(const CoefficientMatrix &partialGradByCoeffs,
                                    const Eigen::VectorXd &partialGradByTimes,
-                                   MatrixType &innerPointsGrad,
+                                   CoefficientMatrix &innerPointsGrad,
                                    Eigen::VectorXd &gradByTimes,
-                                   BoundaryStateGrads &startGrads,
-                                   BoundaryStateGrads &endGrads)
+                                   BoundaryGradient &startGrads,
+                                   BoundaryGradient &endGrads)
         {
             const int n = num_segments_;
-            const MatrixType &M = internal_derivatives_;
+            const CoefficientMatrix &M = internal_derivatives_;
 
+            if (!trajectory_.isValid() || partialGradByCoeffs.rows() != n * kCoefficientCount ||
+                partialGradByTimes.size() != n)
+                throw std::invalid_argument("Adjoint requires a valid spline and matching partial shapes");
             gradByTimes = partialGradByTimes;
-            startGrads = BoundaryStateGrads();
-            endGrads = BoundaryStateGrads();
+            startGrads = BoundaryGradient();
+            endGrads = BoundaryGradient();
 
             if (n > 1)
             {
@@ -1113,7 +1266,7 @@ namespace SplineTrajectory
                 innerPointsGrad.resize(0, DIM);
             }
 
-            auto add_point_grad = [&](int idx, const RowVectorType &grad)
+            auto add_point_grad = [&](int idx, const RowVector &grad)
             {
                 if (idx == 0)
                 {
@@ -1139,13 +1292,13 @@ namespace SplineTrajectory
                 const double h_inv = tp.h_inv;
                 const double h2_inv = tp.h2_inv;
 
-                const RowVectorType g_c0 = partialGradByCoeffs.row(i * 4 + 0);
-                const RowVectorType g_c1 = partialGradByCoeffs.row(i * 4 + 1);
-                const RowVectorType g_c2 = partialGradByCoeffs.row(i * 4 + 2);
-                const RowVectorType g_c3 = partialGradByCoeffs.row(i * 4 + 3);
+                const RowVector g_c0 = partialGradByCoeffs.row(i * 4 + 0);
+                const RowVector g_c1 = partialGradByCoeffs.row(i * 4 + 1);
+                const RowVector g_c2 = partialGradByCoeffs.row(i * 4 + 2);
+                const RowVector g_c3 = partialGradByCoeffs.row(i * 4 + 3);
 
-                const RowVectorType grad_p_i = g_c0 - g_c1 * h_inv;
-                const RowVectorType grad_p_i1 = g_c1 * h_inv;
+                const RowVector grad_p_i = g_c0 - g_c1 * h_inv;
+                const RowVector grad_p_i1 = g_c1 * h_inv;
                 add_point_grad(i, grad_p_i);
                 add_point_grad(i + 1, grad_p_i1);
 
@@ -1155,9 +1308,9 @@ namespace SplineTrajectory
                 ws_lambda_.row(i) -= g_c3 * (h_inv / 6.0);
                 ws_lambda_.row(i + 1) += g_c3 * (h_inv / 6.0);
 
-                const RowVectorType dP_row = point_diffs_.row(i);
-                const RowVectorType term_dC1_dh = -dP_row * h2_inv - (2.0 * M.row(i) + M.row(i + 1)) / 6.0;
-                const RowVectorType term_dC3_dh = -(M.row(i + 1) - M.row(i)) * (h2_inv / 6.0);
+                const RowVector dP_row = point_diffs_.row(i);
+                const RowVector term_dC1_dh = -dP_row * h2_inv - (2.0 * M.row(i) + M.row(i + 1)) / 6.0;
+                const RowVector term_dC3_dh = -(M.row(i + 1) - M.row(i)) * (h2_inv / 6.0);
 
                 gradByTimes(i) += g_c1.dot(term_dC1_dh) + g_c3.dot(term_dC3_dh);
             }
@@ -1168,22 +1321,22 @@ namespace SplineTrajectory
             {
                 const auto &tp = time_powers_[k];
                 double h2_inv = tp.h2_inv;
-                const RowVectorType dP_row = point_diffs_.row(k);
+                const RowVector dP_row = point_diffs_.row(k);
 
-                const RowVectorType common_term = ws_lambda_.row(k) - ws_lambda_.row(k + 1);
+                const RowVector common_term = ws_lambda_.row(k) - ws_lambda_.row(k + 1);
 
-                const RowVectorType grad_R_P = 6.0 * tp.h_inv * common_term;
+                const RowVector grad_R_P = 6.0 * tp.h_inv * common_term;
                 add_point_grad(k + 1, grad_R_P);
                 add_point_grad(k, -grad_R_P);
 
-                const RowVectorType grad_R_h = -6.0 * dP_row * h2_inv;
+                const RowVector grad_R_h = -6.0 * dP_row * h2_inv;
                 gradByTimes(k) += common_term.dot(grad_R_h);
 
-                const RowVectorType M_k = M.row(k);
-                const RowVectorType M_k1 = M.row(k + 1);
+                const RowVector M_k = M.row(k);
+                const RowVector M_k1 = M.row(k + 1);
 
-                const RowVectorType term_k = 2.0 * M_k + M_k1;
-                const RowVectorType term_k1 = M_k + 2.0 * M_k1;
+                const RowVector term_k = 2.0 * M_k + M_k1;
+                const RowVector term_k1 = M_k + 2.0 * M_k1;
 
                 gradByTimes(k) -= ws_lambda_.row(k).dot(term_k);
                 gradByTimes(k) -= ws_lambda_.row(k + 1).dot(term_k1);
@@ -1196,39 +1349,21 @@ namespace SplineTrajectory
         /**
          * @brief Rebuild the interpolating spline and expose the generated polynomial's validity.
          * @note Requires validated input shapes and exclusive ownership; finite inputs can still produce
-         *       invalid coefficients or time knots, in which case isInitialized() becomes false.
+         *       invalid coefficients or time knots, in which case isValid() becomes false.
          */
         inline void updateSplineInternal()
         {
+            if (!trajectory_.template beginSpline<kMinDerivativeOrder>(
+                    time_segments_, spatial_points_, boundary_velocities_, start_time_, kCoefficientCount))
+            { num_segments_ = 0; return; }
             num_segments_ = static_cast<int>(time_segments_.size());
-            updateCumulativeTimes();
+            // Prepare adjoint storage with the topology so the first pullback does not allocate.
+            ws_lambda_.resize(num_segments_ + 1, DIM);
             precomputeTimePowers();
             precomputePointDiffs();
             solveSplineInPlace();
-            initializePPoly();
+            trajectory_.finishSpline();
             // A finite input can still produce invalid coefficients or collapsed breakpoints.
-            is_initialized_ = trajectory_.isInitialized();
-        }
-
-        void convertTimePointsToSegments(const std::vector<double> &t_points)
-        {
-            start_time_ = t_points.front();
-            time_segments_.clear();
-            time_segments_.reserve(t_points.size() - 1);
-            for (size_t i = 1; i < t_points.size(); ++i)
-                time_segments_.push_back(t_points[i] - t_points[i - 1]);
-        }
-
-        void updateCumulativeTimes()
-        {
-            if (num_segments_ <= 0)
-                return;
-            cumulative_times_.resize(num_segments_ + 1);
-            cumulative_times_[0] = start_time_;
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
-            }
         }
 
         void precomputeTimePowers()
@@ -1271,7 +1406,7 @@ namespace SplineTrajectory
             }
 
             internal_derivatives_.resize(n + 1, DIM);
-            MatrixType &M = internal_derivatives_;
+            CoefficientMatrix &M = internal_derivatives_;
 
             if (n >= 2)
             {
@@ -1288,7 +1423,6 @@ namespace SplineTrajectory
 
             computeLUAndSolve(M);
 
-            coeffs_.resize(n * 4, DIM);
 
             for (int i = 0; i < n; ++i)
             {
@@ -1296,16 +1430,16 @@ namespace SplineTrajectory
                 double h_i = tp.h;
                 double h_inv = tp.h_inv;
 
-                coeffs_.row(i * 4 + 0) = spatial_points_.row(i);
+                trajectory_.coefficients_.row(i * 4 + 0) = spatial_points_.row(i);
 
-                coeffs_.row(i * 4 + 1) =
+                trajectory_.coefficients_.row(i * 4 + 1) =
                     scaled_point_diffs_.row(i) -
                     (h_i / 6.0) *
                         (2.0 * M.row(i) + M.row(i + 1));
 
-                coeffs_.row(i * 4 + 2) = M.row(i) * 0.5;
+                trajectory_.coefficients_.row(i * 4 + 2) = M.row(i) * 0.5;
 
-                coeffs_.row(i * 4 + 3) =
+                trajectory_.coefficients_.row(i * 4 + 3) =
                     (M.row(i + 1) - M.row(i)) *
                     (h_inv / 6.0);
             }
@@ -1387,86 +1521,55 @@ namespace SplineTrajectory
             }
         }
 
-        void initializePPoly()
-        {
-            trajectory_.update(cumulative_times_, coeffs_, 4);
-        }
     };
 
+    /** @brief Minimum-jerk interpolation with a specialized O(N) 2-by-2 block tridiagonal solver.
+     * @note Minimize the squared 3-th physical derivative integral with fixed waypoint
+     *       positions and endpoint derivatives of orders 1 through 2. Coordinates
+     *       are caller-defined; durations use seconds. Polynomial coefficients and knots
+     *       have one owner. Updates and backward() require exclusive access; const energy
+     *       and polynomial queries may run concurrently on an unchanged valid object.
+     *       Copies own independent data. Moving invalidates borrowed views and the source polynomial.
+     *       Numeric construction failure clears the polynomial; inspect isValid(). */
     template <int DIM>
     class QuinticSplineND
     {
     public:
-        using VectorType = Eigen::Matrix<double, DIM, 1>;
-        using RowVectorType = Eigen::Matrix<double, 1, DIM>;
+        using Vector = Eigen::Matrix<double, DIM, 1>;
+        using RowVector = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+        using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
-        static constexpr int ORDER = 5;
-        static constexpr int COEFF_NUM = 6;
-        using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
+        static constexpr int kDimension = DIM;
+        static constexpr int kDegree = 5;
+        static constexpr int kCoefficientCount = 6;
+        static constexpr int kMinDerivativeOrder = 3;
+        using Polynomial = PPolyND<DIM, kCoefficientCount>;
 
-        struct BoundaryStateGrads
-        {
-            VectorType p;
-            VectorType v;
-            VectorType a;
-
-            BoundaryStateGrads() : p(VectorType::Zero()), v(VectorType::Zero()), a(VectorType::Zero()) {}
-        };
-
-        struct BoundaryDualGrads
-        {
-            BoundaryStateGrads start;
-            BoundaryStateGrads end;
-        };
-
-        struct Gradients
-        {
-            MatrixType inner_points;
-            Eigen::VectorXd times;
-            BoundaryStateGrads start;
-            BoundaryStateGrads end;
-
-            void resetTopology(int num_segments)
-            {
-                inner_points.resize(
-                    std::max(0, num_segments - 1), DIM);
-                times.resize(num_segments);
-            }
-
-            void setZero()
-            {
-                inner_points.setZero();
-                times.setZero();
-                start = BoundaryStateGrads();
-                end = BoundaryStateGrads();
-            }
-        };
+        using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
+        using BoundaryGradients = BoundaryGradientPair<DIM>;
+        using Gradients = SplineGradients<DIM>;
 
     private:
         std::vector<double> time_segments_;
-        std::vector<double> cumulative_times_;
         double start_time_{0.0};
 
-        MatrixType spatial_points_;
-        MatrixType point_diffs_;
+        CoefficientMatrix spatial_points_;
+        CoefficientMatrix point_diffs_;
 
         BoundaryConditions<DIM> boundary_;
 
         int num_segments_{0};
-        bool is_initialized_{false};
 
-        MatrixType coeffs_;
-        TrajectoryType trajectory_;
+        Polynomial trajectory_;
 
         using BlockMatrix2x2Storage = Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor>;
         BlockMatrix2x2Storage D_inv_cache_;
         BlockMatrix2x2Storage U_blocks_cache_;
         BlockMatrix2x2Storage L_blocks_cache_;
         BlockMatrix2x2Storage D_inv_T_mul_L_next_T_cache_;
-        MatrixType internal_vel_;
-        MatrixType internal_acc_;
+        CoefficientMatrix internal_vel_;
+        CoefficientMatrix internal_acc_;
 
         struct TimePowers
         {
@@ -1480,27 +1583,31 @@ namespace SplineTrajectory
         };
 
         std::vector<TimePowers> time_powers_;
-        MatrixType ws_rhs_mod_;
-        MatrixType ws_solution_;
-        MatrixType ws_lambda_;
+        CoefficientMatrix ws_rhs_mod_;
+        CoefficientMatrix ws_solution_;
+        CoefficientMatrix ws_lambda_;
         Eigen::Matrix<double, Eigen::Dynamic, 2 * DIM, Eigen::RowMajor> ws_gd_internal_;
 
     private:
         /**
          * @brief Rebuild the interpolating spline and expose the generated polynomial's validity.
          * @note Requires validated input shapes and exclusive ownership; finite inputs can still produce
-         *       invalid coefficients or time knots, in which case isInitialized() becomes false.
+         *       invalid coefficients or time knots, in which case isValid() becomes false.
          */
         void updateSplineInternal()
         {
+            if (!trajectory_.template beginSpline<kMinDerivativeOrder>(
+                    time_segments_, spatial_points_, boundary_, start_time_, kCoefficientCount))
+            { num_segments_ = 0; return; }
             num_segments_ = static_cast<int>(time_segments_.size());
-            updateCumulativeTimes();
+            // Prepare adjoint storage with the topology so the first pullback does not allocate.
+            ws_lambda_.resize(std::max(0, num_segments_ - 1) * 2, DIM);
+            ws_gd_internal_.resize(num_segments_ + 1, 2 * DIM);
             precomputeTimePowers();
             precomputePointDiffs();
             solveQuinticInPlace();
-            initializePPoly();
+            trajectory_.finishSpline();
             // A finite input can still produce invalid coefficients or collapsed breakpoints.
-            is_initialized_ = trajectory_.isInitialized();
         }
 
     public:
@@ -1508,40 +1615,49 @@ namespace SplineTrajectory
 
         QuinticSplineND() = default;
 
+        /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
+         * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         QuinticSplineND(const std::vector<double> &t_points,
-                        const MatrixType &spatial_points,
+                        const CoefficientMatrix &spatial_points,
                         const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
             : spatial_points_(spatial_points),
               boundary_(boundary)
         {
-            convertTimePointsToSegments(t_points);
+            detail::durationsFromKnots(t_points, time_segments_, start_time_);
             updateSplineInternal();
         }
 
+        /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
+         * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         QuinticSplineND(const std::vector<double> &time_segments,
-                        const MatrixType &spatial_points,
+                        const CoefficientMatrix &spatial_points,
                         double start_time,
                         const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
             : time_segments_(time_segments),
-              spatial_points_(spatial_points),
               start_time_(start_time),
+              spatial_points_(spatial_points),
               boundary_(boundary)
         {
             updateSplineInternal();
         }
 
+        /** @brief Replace interpolation data using absolute knots; invalid input clears the polynomial.
+         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views. */
         void update(const std::vector<double> &t_points,
-                    const MatrixType &spatial_points,
+                    const CoefficientMatrix &spatial_points,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
             spatial_points_ = spatial_points;
             boundary_ = boundary;
-            convertTimePointsToSegments(t_points);
+            detail::durationsFromKnots(t_points, time_segments_, start_time_);
             updateSplineInternal();
         }
 
+        /** @brief Replace interpolation data using positive durations and a common time origin.
+         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
+         *       Invalid shapes, times, boundary data or numeric output clear the polynomial. */
         void update(const std::vector<double> &time_segments,
-                    const MatrixType &spatial_points,
+                    const CoefficientMatrix &spatial_points,
                     double start_time,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
@@ -1552,51 +1668,52 @@ namespace SplineTrajectory
             updateSplineInternal();
         }
 
-        bool isInitialized() const { return is_initialized_; }
-        int getDimension() const { return DIM; }
+        bool isValid() const { return trajectory_.isValid(); }
+        int dimension() const { return DIM; }
 
-        double getStartTime() const
+        double startTime() const
         {
-            return start_time_;
+            return trajectory_.startTime();
         }
 
-        double getEndTime() const
+        double endTime() const
         {
-            return cumulative_times_.back();
+            return trajectory_.endTime();
         }
 
-        double getDuration() const
+        double duration() const
         {
-            return cumulative_times_.back() - start_time_;
+            return trajectory_.duration();
         }
 
-        size_t getNumPoints() const
+        size_t numPoints() const
         {
             return static_cast<size_t>(spatial_points_.rows());
         }
 
-        int getNumSegments() const
+        int numSegments() const
         {
-            return num_segments_;
+            return trajectory_.numSegments();
         }
 
-        const MatrixType &getSpacePoints() const { return spatial_points_; }
-        const std::vector<double> &getTimeSegments() const { return time_segments_; }
-        const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
-        const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
+        const CoefficientMatrix &waypoints() const { return spatial_points_; }
+        const std::vector<double> &durations() const { return time_segments_; }
+        const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
+        const BoundaryConditions<DIM> &boundary() const { return boundary_; }
 
-        const TrajectoryType &getTrajectory() const { return trajectory_; }
-        TrajectoryType getTrajectoryCopy() const { return trajectory_; }
-        const TrajectoryType &getPPoly() const { return trajectory_; }
-        TrajectoryType getPPolyCopy() const { return trajectory_; }
+        /** @brief Borrow the polynomial until the next update, assignment or move. */
+        const Polynomial &polynomial() const & { return trajectory_; }
+        const Polynomial &polynomial() const && = delete;
+        /** @brief Make an independent owning snapshot, allocating its data. */
+        Polynomial copyPolynomial() const { return trajectory_; }
 
         static inline void computeBasisFunctions(double t,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_acc,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_jerk,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
         {
             double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1;
 
@@ -1608,12 +1725,11 @@ namespace SplineTrajectory
             b_crackle << 0, 0, 0, 0, 0, 120;
         }
 
-        double getEnergy() const
+        /** @brief Integral of the squared minimum derivative; returns NaN for an invalid spline. */
+        double energy() const
         {
-            if (!is_initialized_)
-            {
-                return 0.0;
-            }
+            if (!trajectory_.isValid())
+                return std::numeric_limits<double>::quiet_NaN();
 
             double total_energy = 0.0;
             for (int i = 0; i < num_segments_; ++i)
@@ -1627,9 +1743,9 @@ namespace SplineTrajectory
                 const double T4 = T3 * T;
                 const double T5 = T4 * T;
 
-                RowVectorType c3 = coeffs_.row(i * 6 + 3);
-                RowVectorType c4 = coeffs_.row(i * 6 + 4);
-                RowVectorType c5 = coeffs_.row(i * 6 + 5);
+                RowVector c3 = trajectory_.coefficients_.row(i * 6 + 3);
+                RowVector c4 = trajectory_.coefficients_.row(i * 6 + 4);
+                RowVector c5 = trajectory_.coefficients_.row(i * 6 + 5);
 
                 total_energy += 36.0 * c3.squaredNorm() * T +
                                 144.0 * c4.dot(c3) * T2 +
@@ -1644,12 +1760,13 @@ namespace SplineTrajectory
         /**
          * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
          *
-         * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 6) × DIM.
-         *         Each row corresponds to one coefficient dimension.
+         * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 6) × DIM.
+         *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
          * @note This computes only the direct partial derivative, not the full gradient.
          */
-        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             gdC.resize(num_segments_ * 6, DIM);
             gdC.setZero();
 
@@ -1661,9 +1778,9 @@ namespace SplineTrajectory
                 double T4 = T3 * T;
                 double T5 = T4 * T;
 
-                const RowVectorType c3 = coeffs_.row(i * 6 + 3);
-                const RowVectorType c4 = coeffs_.row(i * 6 + 4);
-                const RowVectorType c5 = coeffs_.row(i * 6 + 5);
+                const RowVector c3 = trajectory_.coefficients_.row(i * 6 + 3);
+                const RowVector c4 = trajectory_.coefficients_.row(i * 6 + 4);
+                const RowVector c5 = trajectory_.coefficients_.row(i * 6 + 5);
 
                 gdC.row(i * 6 + 3) = 72.0 * c3 * T +
                                      144.0 * c4 * T2 +
@@ -1679,42 +1796,43 @@ namespace SplineTrajectory
             }
         }
 
-        MatrixType getEnergyPartialGradByCoeffs() const
+        CoefficientMatrix energyCoefficientPartials() const
         {
-            MatrixType gdC;
-            getEnergyPartialGradByCoeffs(gdC);
+            CoefficientMatrix gdC;
+            energyCoefficientPartials(gdC);
             return gdC;
         }
 
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
          *
-         * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
+         * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
-         * @note This computes only the explicit time dependency, not the full gradient.
+         * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
          */
-        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             gdT.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
                 const double T = time_segments_[i];
 
-                const RowVectorType c3 = coeffs_.row(i * 6 + 3);
-                const RowVectorType c4 = coeffs_.row(i * 6 + 4);
-                const RowVectorType c5 = coeffs_.row(i * 6 + 5);
+                const RowVector c3 = trajectory_.coefficients_.row(i * 6 + 3);
+                const RowVector c4 = trajectory_.coefficients_.row(i * 6 + 4);
+                const RowVector c5 = trajectory_.coefficients_.row(i * 6 + 5);
 
-                RowVectorType jerk_end = 6.0 * c3 + T * (24.0 * c4 + (60.0 * T) * c5);
+                RowVector jerk_end = 6.0 * c3 + T * (24.0 * c4 + (60.0 * T) * c5);
 
                 gdT(i) = jerk_end.squaredNorm();
             }
         }
 
-        Eigen::VectorXd getEnergyPartialGradByTimes() const
+        Eigen::VectorXd energyDurationPartials() const
         {
             Eigen::VectorXd gdT;
-            getEnergyPartialGradByTimes(gdT);
+            energyDurationPartials(gdT);
             return gdT;
         }
 
@@ -1724,17 +1842,18 @@ namespace SplineTrajectory
          * @return VectorXd Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
-        void getEnergyGradTimes(Eigen::VectorXd &grad) const
+        void energyDurationGradient(Eigen::VectorXd &grad) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             grad.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                const RowVectorType c1 = coeffs_.row(i * 6 + 1);
-                const RowVectorType c2 = coeffs_.row(i * 6 + 2);
-                const RowVectorType c3 = coeffs_.row(i * 6 + 3);
-                const RowVectorType c4 = coeffs_.row(i * 6 + 4);
-                const RowVectorType c5 = coeffs_.row(i * 6 + 5);
+                const RowVector c1 = trajectory_.coefficients_.row(i * 6 + 1);
+                const RowVector c2 = trajectory_.coefficients_.row(i * 6 + 2);
+                const RowVector c3 = trajectory_.coefficients_.row(i * 6 + 3);
+                const RowVector c4 = trajectory_.coefficients_.row(i * 6 + 4);
+                const RowVector c5 = trajectory_.coefficients_.row(i * 6 + 5);
 
                 double term_jerk = 36.0 * c3.squaredNorm();
                 double term_sa = 96.0 * c2.dot(c4);
@@ -1744,20 +1863,21 @@ namespace SplineTrajectory
             }
         }
 
-        Eigen::VectorXd getEnergyGradTimes() const
+        Eigen::VectorXd energyDurationGradient() const
         {
             Eigen::VectorXd grad;
-            getEnergyGradTimes(grad);
+            energyDurationGradient(grad);
             return grad;
         }
 
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @return MatrixType Full gradient dE/dP for inner points only.
+         * @return CoefficientMatrix Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
-        void getEnergyGradInnerPoints(MatrixType &grad) const
+        void energyWaypointGradient(CoefficientMatrix &grad) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             if (num_segments_ < 1)
             {
                 grad.resize(0, DIM);
@@ -1769,32 +1889,33 @@ namespace SplineTrajectory
 
             for (int i = 1; i < num_segments_; ++i)
             {
-                const RowVectorType c5_L = coeffs_.row((i - 1) * 6 + 5);
-                const RowVectorType c5_R = coeffs_.row(i * 6 + 5);
+                const RowVector c5_L = trajectory_.coefficients_.row((i - 1) * 6 + 5);
+                const RowVector c5_R = trajectory_.coefficients_.row(i * 6 + 5);
                 grad.row(i - 1) = 240.0 * (c5_L - c5_R);
             }
         }
 
-        MatrixType getEnergyGradInnerPoints() const
+        CoefficientMatrix energyWaypointGradient() const
         {
-            MatrixType grad;
-            getEnergyGradInnerPoints(grad);
+            CoefficientMatrix grad;
+            energyWaypointGradient(grad);
             return grad;
         }
 
         /**
          * @brief Compute partial gradient of energy w.r.t. boundary conditions (Pos, Vel, Acc).
-         * @return BoundaryDualGrads containing gradients.
+         * @return BoundaryGradients containing gradients.
          */
-        BoundaryDualGrads getEnergyGradBoundary() const
+        BoundaryGradients energyBoundaryGradient() const
         {
-            BoundaryDualGrads res;
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
+            BoundaryGradients res;
             if (num_segments_ < 1)
                 return res;
 
-            const RowVectorType c3_first = coeffs_.row(3);
-            const RowVectorType c4_first = coeffs_.row(4);
-            const RowVectorType c5_first = coeffs_.row(5);
+            const RowVector c3_first = trajectory_.coefficients_.row(3);
+            const RowVector c4_first = trajectory_.coefficients_.row(4);
+            const RowVector c5_first = trajectory_.coefficients_.row(5);
 
             res.start.p = -240.0 * c5_first.transpose();
             res.start.v = 48.0 * c4_first.transpose();
@@ -1804,13 +1925,13 @@ namespace SplineTrajectory
             double T = time_segments_[last_idx];
             double T2 = T * T;
 
-            const RowVectorType c3_last = coeffs_.row(last_idx * 6 + 3);
-            const RowVectorType c4_last = coeffs_.row(last_idx * 6 + 4);
-            const RowVectorType c5_last = coeffs_.row(last_idx * 6 + 5);
+            const RowVector c3_last = trajectory_.coefficients_.row(last_idx * 6 + 3);
+            const RowVector c4_last = trajectory_.coefficients_.row(last_idx * 6 + 4);
+            const RowVector c5_last = trajectory_.coefficients_.row(last_idx * 6 + 5);
 
-            RowVectorType jerk_end = 6.0 * c3_last + 24.0 * c4_last * T + 60.0 * c5_last * T2;
-            RowVectorType snap_end = 24.0 * c4_last + 120.0 * c5_last * T;
-            RowVectorType crackle_end = 120.0 * c5_last;
+            RowVector jerk_end = 6.0 * c3_last + 24.0 * c4_last * T + 60.0 * c5_last * T2;
+            RowVector snap_end = 24.0 * c4_last + 120.0 * c5_last * T;
+            RowVector crackle_end = 120.0 * c5_last;
 
             res.end.p = 2.0 * crackle_end.transpose();
             res.end.v = -2.0 * snap_end.transpose();
@@ -1824,26 +1945,26 @@ namespace SplineTrajectory
          *
          * @return Gradients Structure containing:
          *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
+         *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
          */
-        Gradients getEnergyGrad() const
+        Gradients energyGradient() const
         {
             Gradients res;
-            getEnergyGrad(res);
+            energyGradient(res);
             return res;
         }
 
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param grads Output gradients structure to populate
+         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
-        void getEnergyGrad(Gradients &grads) const
+        void energyGradient(Gradients &grads) const
         {
-            getEnergyGradInnerPoints(grads.inner_points);
-            getEnergyGradTimes(grads.times);
-            BoundaryDualGrads boundary = getEnergyGradBoundary();
+            energyWaypointGradient(grads.inner_points);
+            energyDurationGradient(grads.durations);
+            BoundaryGradients boundary = energyBoundaryGradient();
             grads.start = boundary.start;
             grads.end = boundary.end;
         }
@@ -1855,16 +1976,16 @@ namespace SplineTrajectory
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @return Gradients Structure containing:
          *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
+         *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
          */
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+        Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
 
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.times, res.start, res.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes,
+                                  res.inner_points, res.durations, res.start, res.end);
 
             return res;
         }
@@ -1874,30 +1995,38 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param grads               Output gradients structure to populate
+         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
+        void backward(const CoefficientMatrix &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
         {
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.times, grads.start, grads.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes,
+                                  grads.inner_points, grads.durations, grads.start, grads.end);
         }
 
     private:
-        void propagateGradInternal(const MatrixType &partialGradByCoeffs,
+        /** @brief Pull back the coefficient map through the cached continuity solve.
+         * @note With A(T)q = b(T,P,boundary), solve A^T lambda = dL/dq and accumulate
+         *       lambda^T (db/dtheta - dA/dtheta*q) plus direct coefficient-map partials.
+         *       Input duration partials hold local power coefficients fixed. Outputs are
+         *       overwritten; correctly sized output and adjoint storage are reused. */
+        void backwardImpl(const CoefficientMatrix &partialGradByCoeffs,
                                    const Eigen::VectorXd &partialGradByTimes,
-                                   MatrixType &innerPointsGrad,
+                                   CoefficientMatrix &innerPointsGrad,
                                    Eigen::VectorXd &gradByTimes,
-                                   BoundaryStateGrads &startGrads,
-                                   BoundaryStateGrads &endGrads)
+                                   BoundaryGradient &startGrads,
+                                   BoundaryGradient &endGrads)
         {
             const int n = num_segments_;
             const int n_pts = static_cast<int>(spatial_points_.rows());
 
+            if (!trajectory_.isValid() || partialGradByCoeffs.rows() != n * kCoefficientCount ||
+                partialGradByTimes.size() != n)
+                throw std::invalid_argument("Adjoint requires a valid spline and matching partial shapes");
             gradByTimes = partialGradByTimes;
-            startGrads = BoundaryStateGrads();
-            endGrads = BoundaryStateGrads();
+            startGrads = BoundaryGradient();
+            endGrads = BoundaryGradient();
 
             if (n > 1)
             {
@@ -1909,7 +2038,7 @@ namespace SplineTrajectory
                 innerPointsGrad.resize(0, DIM);
             }
 
-            auto add_point_grad = [&](int idx, const RowVectorType &grad)
+            auto add_point_grad = [&](int idx, const RowVector &grad)
             {
                 if (idx == 0)
                 {
@@ -1928,7 +2057,7 @@ namespace SplineTrajectory
             ws_gd_internal_.resize(n_pts, 2 * DIM);
             ws_gd_internal_.setZero();
 
-            auto add_grad_d = [&](int idx, const RowVectorType &d_vel, const RowVectorType &d_acc)
+            auto add_grad_d = [&](int idx, const RowVector &d_vel, const RowVector &d_acc)
             {
                 ws_gd_internal_.row(idx).segment(0, DIM) += d_vel;
                 ws_gd_internal_.row(idx).segment(DIM, DIM) += d_acc;
@@ -1939,58 +2068,58 @@ namespace SplineTrajectory
                 const auto &tp = time_powers_[i];
                 const int coeff_idx = i * 6;
 
-                const RowVectorType &gc0 = partialGradByCoeffs.row(coeff_idx + 0);
-                const RowVectorType &gc1 = partialGradByCoeffs.row(coeff_idx + 1);
-                const RowVectorType &gc2 = partialGradByCoeffs.row(coeff_idx + 2);
-                const RowVectorType &gc3 = partialGradByCoeffs.row(coeff_idx + 3);
-                const RowVectorType &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
-                const RowVectorType &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
+                const RowVector &gc0 = partialGradByCoeffs.row(coeff_idx + 0);
+                const RowVector &gc1 = partialGradByCoeffs.row(coeff_idx + 1);
+                const RowVector &gc2 = partialGradByCoeffs.row(coeff_idx + 2);
+                const RowVector &gc3 = partialGradByCoeffs.row(coeff_idx + 3);
+                const RowVector &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
+                const RowVector &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
 
                 double k_P3 = 10.0 * tp.h3_inv;
                 double k_P4 = -15.0 * tp.h4_inv;
                 double k_P5 = 6.0 * tp.h5_inv;
 
-                RowVectorType sum_grad_P = gc3 * k_P3 + gc4 * k_P4 + gc5 * k_P5;
+                RowVector sum_grad_P = gc3 * k_P3 + gc4 * k_P4 + gc5 * k_P5;
                 add_point_grad(i, gc0 - sum_grad_P);
                 add_point_grad(i + 1, sum_grad_P);
 
-                RowVectorType grad_v_curr = gc1;
+                RowVector grad_v_curr = gc1;
                 grad_v_curr += gc3 * (-6.0 * tp.h2_inv);
                 grad_v_curr += gc4 * (8.0 * tp.h3_inv);
                 grad_v_curr += gc5 * (-3.0 * tp.h4_inv);
 
-                RowVectorType grad_v_next = gc3 * (-4.0 * tp.h2_inv);
+                RowVector grad_v_next = gc3 * (-4.0 * tp.h2_inv);
                 grad_v_next += gc4 * (7.0 * tp.h3_inv);
                 grad_v_next += gc5 * (-3.0 * tp.h4_inv);
 
-                RowVectorType grad_a_curr = gc2 * 0.5;
+                RowVector grad_a_curr = gc2 * 0.5;
                 grad_a_curr += gc3 * (-1.5 * tp.h_inv);
                 grad_a_curr += gc4 * (1.5 * tp.h2_inv);
                 grad_a_curr += gc5 * (-0.5 * tp.h3_inv);
 
-                RowVectorType grad_a_next = gc3 * (0.5 * tp.h_inv);
+                RowVector grad_a_next = gc3 * (0.5 * tp.h_inv);
                 grad_a_next += gc4 * (-1.0 * tp.h2_inv);
                 grad_a_next += gc5 * (0.5 * tp.h3_inv);
 
                 add_grad_d(i, grad_v_curr, grad_a_curr);
                 add_grad_d(i + 1, grad_v_next, grad_a_next);
 
-                const RowVectorType &V_curr = internal_vel_.row(i);
-                const RowVectorType &V_next = internal_vel_.row(i + 1);
-                const RowVectorType &A_curr = internal_acc_.row(i);
-                const RowVectorType &A_next = internal_acc_.row(i + 1);
+                const RowVector &V_curr = internal_vel_.row(i);
+                const RowVector &V_next = internal_vel_.row(i + 1);
+                const RowVector &A_curr = internal_acc_.row(i);
+                const RowVector &A_next = internal_acc_.row(i + 1);
 
-                const RowVectorType P_diff = point_diffs_.row(i);
+                const RowVector P_diff = point_diffs_.row(i);
 
-                RowVectorType dc3_dh = -30.0 * tp.h4_inv * P_diff +
+                RowVector dc3_dh = -30.0 * tp.h4_inv * P_diff +
                                        12.0 * tp.h3_inv * V_curr + 8.0 * tp.h3_inv * V_next +
                                        1.5 * tp.h2_inv * A_curr - 0.5 * tp.h2_inv * A_next;
 
-                RowVectorType dc4_dh = 60.0 * tp.h5_inv * P_diff -
+                RowVector dc4_dh = 60.0 * tp.h5_inv * P_diff -
                                        24.0 * tp.h4_inv * V_curr - 21.0 * tp.h4_inv * V_next -
                                        3.0 * tp.h3_inv * A_curr + 2.0 * tp.h3_inv * A_next;
 
-                RowVectorType dc5_dh = -30.0 * tp.h6_inv * P_diff +
+                RowVector dc5_dh = -30.0 * tp.h6_inv * P_diff +
                                        12.0 * tp.h5_inv * V_curr + 12.0 * tp.h5_inv * V_next +
                                        1.5 * tp.h4_inv * A_curr - 1.5 * tp.h4_inv * A_next;
 
@@ -2039,22 +2168,22 @@ namespace SplineTrajectory
 
                 for (int i = 0; i < num_blocks; ++i)
                 {
-                    const RowVectorType lam_snap = ws_lambda_.row(2 * i);
-                    const RowVectorType lam_jerk = ws_lambda_.row(2 * i + 1);
+                    const RowVector lam_snap = ws_lambda_.row(2 * i);
+                    const RowVector lam_jerk = ws_lambda_.row(2 * i + 1);
 
                     const int m = i + 1;
                     const auto &tp_L = time_powers_[m - 1];
                     const auto &tp_R = time_powers_[m];
 
-                    const RowVectorType dP_L = point_diffs_.row(m - 1);
-                    const RowVectorType dP_R = point_diffs_.row(m);
-                    const RowVectorType &V_prev = internal_vel_.row(m - 1);
-                    const RowVectorType &V_curr = internal_vel_.row(m);
-                    const RowVectorType &V_next = internal_vel_.row(m + 1);
+                    const RowVector dP_L = point_diffs_.row(m - 1);
+                    const RowVector dP_R = point_diffs_.row(m);
+                    const RowVector &V_prev = internal_vel_.row(m - 1);
+                    const RowVector &V_curr = internal_vel_.row(m);
+                    const RowVector &V_next = internal_vel_.row(m + 1);
 
-                    const RowVectorType &A_prev = internal_acc_.row(m - 1);
-                    const RowVectorType &A_curr = internal_acc_.row(m);
-                    const RowVectorType &A_next = internal_acc_.row(m + 1);
+                    const RowVector &A_prev = internal_acc_.row(m - 1);
+                    const RowVector &A_curr = internal_acc_.row(m);
+                    const RowVector &A_next = internal_acc_.row(m + 1);
 
                     const double dD00_dhL = 576.0 * tp_L.h4_inv;
                     const double dD01_dhL = -72.0 * tp_L.h3_inv;
@@ -2076,25 +2205,25 @@ namespace SplineTrajectory
                     const double dU10_dhR = -48.0 * tp_R.h3_inv;
                     const double dU11_dhR = 3.0 * tp_R.h2_inv;
 
-                    const RowVectorType drhs0_dhL = 1440.0 * dP_L * tp_L.h5_inv;
-                    const RowVectorType drhs1_dhL = 180.0 * dP_L * tp_L.h4_inv;
+                    const RowVector drhs0_dhL = 1440.0 * dP_L * tp_L.h5_inv;
+                    const RowVector drhs1_dhL = 180.0 * dP_L * tp_L.h4_inv;
 
-                    RowVectorType rhs0_L = drhs0_dhL -
+                    RowVector rhs0_L = drhs0_dhL -
                                            (dD00_dhL * V_curr + dD01_dhL * A_curr +
                                             dL00_dhL * V_prev + dL01_dhL * A_prev);
-                    RowVectorType rhs1_L = drhs1_dhL -
+                    RowVector rhs1_L = drhs1_dhL -
                                            (dD10_dhL * V_curr + dD11_dhL * A_curr +
                                             dL10_dhL * V_prev + dL11_dhL * A_prev);
 
                     gradByTimes(m - 1) += lam_snap.dot(rhs0_L) + lam_jerk.dot(rhs1_L);
 
-                    const RowVectorType drhs0_dhR = 1440.0 * dP_R * tp_R.h5_inv;
-                    const RowVectorType drhs1_dhR = -180.0 * dP_R * tp_R.h4_inv;
+                    const RowVector drhs0_dhR = 1440.0 * dP_R * tp_R.h5_inv;
+                    const RowVector drhs1_dhR = -180.0 * dP_R * tp_R.h4_inv;
 
-                    RowVectorType rhs0_R = drhs0_dhR -
+                    RowVector rhs0_R = drhs0_dhR -
                                            (dD00_dhR * V_curr + dD01_dhR * A_curr +
                                             dU00_dhR * V_next + dU01_dhR * A_next);
-                    RowVectorType rhs1_R = drhs1_dhR -
+                    RowVector rhs1_R = drhs1_dhR -
                                            (dD10_dhR * V_curr + dD11_dhR * A_curr +
                                             dU10_dhR * V_next + dU11_dhR * A_next);
 
@@ -2108,9 +2237,9 @@ namespace SplineTrajectory
                     double dr3_dp_curr = -60.0 * (tp_R.h3_inv + tp_L.h3_inv);
                     double dr3_dp_prev = 60.0 * tp_L.h3_inv;
 
-                    RowVectorType grad_P_next = lam_snap * dr4_dp_next + lam_jerk * dr3_dp_next;
-                    RowVectorType grad_P_curr = lam_snap * dr4_dp_curr + lam_jerk * dr3_dp_curr;
-                    RowVectorType grad_P_prev = lam_snap * dr4_dp_prev + lam_jerk * dr3_dp_prev;
+                    RowVector grad_P_next = lam_snap * dr4_dp_next + lam_jerk * dr3_dp_next;
+                    RowVector grad_P_curr = lam_snap * dr4_dp_curr + lam_jerk * dr3_dp_curr;
+                    RowVector grad_P_prev = lam_snap * dr4_dp_prev + lam_jerk * dr3_dp_prev;
 
                     add_point_grad(i + 2, grad_P_next);
                     add_point_grad(i + 1, grad_P_curr);
@@ -2136,25 +2265,6 @@ namespace SplineTrajectory
             endGrads.v = raw_end_grad.row(0).transpose();
             endGrads.a = raw_end_grad.row(1).transpose();
         }
-        void convertTimePointsToSegments(const std::vector<double> &t_points)
-        {
-            start_time_ = t_points.front();
-            time_segments_.clear();
-            time_segments_.reserve(t_points.size() - 1);
-            for (size_t i = 1; i < t_points.size(); ++i)
-                time_segments_.push_back(t_points[i] - t_points[i - 1]);
-        }
-
-        void updateCumulativeTimes()
-        {
-            if (num_segments_ <= 0)
-                return;
-            cumulative_times_.resize(num_segments_ + 1);
-            cumulative_times_[0] = start_time_;
-            for (int i = 0; i < num_segments_; ++i)
-                cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
-        }
-
         void precomputeTimePowers()
         {
             int n = static_cast<int>(time_segments_.size());
@@ -2280,7 +2390,7 @@ namespace SplineTrajectory
             }
         }
 
-        void solveInternalDerivatives(const MatrixType &P, MatrixType &p_out, MatrixType &q_out)
+        void solveInternalDerivatives(const CoefficientMatrix &P, CoefficientMatrix &p_out, CoefficientMatrix &q_out)
         {
             const int n = static_cast<int>(P.rows());
             p_out.resize(n, DIM);
@@ -2314,8 +2424,8 @@ namespace SplineTrajectory
                 const auto &tp_R = time_powers_[k - 1];
 
                 auto rhs_block = ws_rhs_mod_.template middleRows<2>(2 * i);
-                const RowVectorType dP_L = point_diffs_.row(k - 2);
-                const RowVectorType dP_R = point_diffs_.row(k - 1);
+                const RowVector dP_L = point_diffs_.row(k - 2);
+                const RowVector dP_R = point_diffs_.row(k - 1);
                 rhs_block.row(0) = -360.0 * (dP_R * tp_R.h4_inv + dP_L * tp_L.h4_inv);
                 rhs_block.row(1) = 60.0 * (dP_R * tp_R.h3_inv - dP_L * tp_L.h3_inv);
 
@@ -2401,107 +2511,73 @@ namespace SplineTrajectory
 
             solveInternalDerivatives(spatial_points_, internal_vel_, internal_acc_);
 
-            coeffs_.resize(n * 6, DIM);
 
             for (int i = 0; i < n; ++i)
             {
                 const auto &tp = time_powers_[i];
 
-                const RowVectorType c0 = spatial_points_.row(i);
-                const RowVectorType c1 = internal_vel_.row(i);
-                const RowVectorType c2 = internal_acc_.row(i) * 0.5;
+                const RowVector c0 = spatial_points_.row(i);
+                const RowVector c1 = internal_vel_.row(i);
+                const RowVector c2 = internal_acc_.row(i) * 0.5;
 
-                const RowVectorType rhs1 = point_diffs_.row(i) - c1 * tp.h - c2 * (tp.h * tp.h);
-                const RowVectorType rhs2 = internal_vel_.row(i + 1) - c1 - (2.0 * c2) * tp.h;
-                const RowVectorType rhs3 = internal_acc_.row(i + 1) - (2.0 * c2);
+                const RowVector rhs1 = point_diffs_.row(i) - c1 * tp.h - c2 * (tp.h * tp.h);
+                const RowVector rhs2 = internal_vel_.row(i + 1) - c1 - (2.0 * c2) * tp.h;
+                const RowVector rhs3 = internal_acc_.row(i + 1) - (2.0 * c2);
 
-                const RowVectorType c3 = (10.0 * tp.h3_inv) * rhs1 - (4.0 * tp.h2_inv) * rhs2 + (0.5 * tp.h_inv) * rhs3;
-                const RowVectorType c4 = (-15.0 * tp.h4_inv) * rhs1 + (7.0 * tp.h3_inv) * rhs2 - (tp.h2_inv) * rhs3;
-                const RowVectorType c5 = (6.0 * tp.h5_inv) * rhs1 - (3.0 * tp.h4_inv) * rhs2 + (0.5 * tp.h3_inv) * rhs3;
+                const RowVector c3 = (10.0 * tp.h3_inv) * rhs1 - (4.0 * tp.h2_inv) * rhs2 + (0.5 * tp.h_inv) * rhs3;
+                const RowVector c4 = (-15.0 * tp.h4_inv) * rhs1 + (7.0 * tp.h3_inv) * rhs2 - (tp.h2_inv) * rhs3;
+                const RowVector c5 = (6.0 * tp.h5_inv) * rhs1 - (3.0 * tp.h4_inv) * rhs2 + (0.5 * tp.h3_inv) * rhs3;
 
-                coeffs_.row(i * 6 + 0) = c0;
-                coeffs_.row(i * 6 + 1) = c1;
-                coeffs_.row(i * 6 + 2) = c2;
-                coeffs_.row(i * 6 + 3) = c3;
-                coeffs_.row(i * 6 + 4) = c4;
-                coeffs_.row(i * 6 + 5) = c5;
+                trajectory_.coefficients_.row(i * 6 + 0) = c0;
+                trajectory_.coefficients_.row(i * 6 + 1) = c1;
+                trajectory_.coefficients_.row(i * 6 + 2) = c2;
+                trajectory_.coefficients_.row(i * 6 + 3) = c3;
+                trajectory_.coefficients_.row(i * 6 + 4) = c4;
+                trajectory_.coefficients_.row(i * 6 + 5) = c5;
             }
         }
 
-        void initializePPoly()
-        {
-            trajectory_.update(cumulative_times_, coeffs_, 6);
-        }
     };
 
+    /** @brief Minimum-snap interpolation with a specialized O(N) 3-by-3 block tridiagonal solver.
+     * @note Minimize the squared 4-th physical derivative integral with fixed waypoint
+     *       positions and endpoint derivatives of orders 1 through 3. Coordinates
+     *       are caller-defined; durations use seconds. Polynomial coefficients and knots
+     *       have one owner. Updates and backward() require exclusive access; const energy
+     *       and polynomial queries may run concurrently on an unchanged valid object.
+     *       Copies own independent data. Moving invalidates borrowed views and the source polynomial.
+     *       Numeric construction failure clears the polynomial; inspect isValid(). */
     template <int DIM>
     class SepticSplineND
     {
     public:
-        using VectorType = Eigen::Matrix<double, DIM, 1>;
-        using RowVectorType = Eigen::Matrix<double, 1, DIM>;
+        using Vector = Eigen::Matrix<double, DIM, 1>;
+        using RowVector = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using MatrixType = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+        using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
-        static constexpr int ORDER = 7;
-        static constexpr int COEFF_NUM = 8;
-        using TrajectoryType = PPolyND<DIM, COEFF_NUM>;
+        static constexpr int kDimension = DIM;
+        static constexpr int kDegree = 7;
+        static constexpr int kCoefficientCount = 8;
+        static constexpr int kMinDerivativeOrder = 4;
+        using Polynomial = PPolyND<DIM, kCoefficientCount>;
 
-        struct BoundaryStateGrads
-        {
-            VectorType p;
-            VectorType v;
-            VectorType a;
-            VectorType j;
-
-            BoundaryStateGrads() : p(VectorType::Zero()), v(VectorType::Zero()),
-                                   a(VectorType::Zero()), j(VectorType::Zero()) {}
-        };
-
-        struct BoundaryDualGrads
-        {
-            BoundaryStateGrads start;
-            BoundaryStateGrads end;
-        };
-
-        struct Gradients
-        {
-            MatrixType inner_points;
-            Eigen::VectorXd times;
-            BoundaryStateGrads start;
-            BoundaryStateGrads end;
-
-            void resetTopology(int num_segments)
-            {
-                inner_points.resize(
-                    std::max(0, num_segments - 1), DIM);
-                times.resize(num_segments);
-            }
-
-            void setZero()
-            {
-                inner_points.setZero();
-                times.setZero();
-                start = BoundaryStateGrads();
-                end = BoundaryStateGrads();
-            }
-        };
+        using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
+        using BoundaryGradients = BoundaryGradientPair<DIM>;
+        using Gradients = SplineGradients<DIM>;
 
     private:
         std::vector<double> time_segments_;
-        std::vector<double> cumulative_times_;
         double start_time_{0.0};
 
-        MatrixType spatial_points_;
-        MatrixType point_diffs_;
+        CoefficientMatrix spatial_points_;
+        CoefficientMatrix point_diffs_;
 
         BoundaryConditions<DIM> boundary_;
 
         int num_segments_{0};
-        bool is_initialized_{false};
 
-        MatrixType coeffs_;
-        TrajectoryType trajectory_;
+        Polynomial trajectory_;
 
         struct TimePowers
         {
@@ -2522,31 +2598,35 @@ namespace SplineTrajectory
         BlockMatrix3x3Storage L_blocks_cache_;
         BlockMatrix3x3Storage D_inv_T_mul_L_next_T_cache_;
 
-        MatrixType ws_rhs_mod_;
-        MatrixType ws_solution_;
-        MatrixType ws_lambda_;
+        CoefficientMatrix ws_rhs_mod_;
+        CoefficientMatrix ws_solution_;
+        CoefficientMatrix ws_lambda_;
         Eigen::Matrix<double, Eigen::Dynamic, 3 * DIM, Eigen::RowMajor> ws_gd_internal_;
 
-        MatrixType internal_vel_;
-        MatrixType internal_acc_;
-        MatrixType internal_jerk_;
+        CoefficientMatrix internal_vel_;
+        CoefficientMatrix internal_acc_;
+        CoefficientMatrix internal_jerk_;
 
     private:
         /**
          * @brief Rebuild the interpolating spline and expose the generated polynomial's validity.
          * @note Requires validated input shapes and exclusive ownership; finite inputs can still produce
-         *       invalid coefficients or time knots, in which case isInitialized() becomes false.
+         *       invalid coefficients or time knots, in which case isValid() becomes false.
          */
         void updateSplineInternal()
         {
+            if (!trajectory_.template beginSpline<kMinDerivativeOrder>(
+                    time_segments_, spatial_points_, boundary_, start_time_, kCoefficientCount))
+            { num_segments_ = 0; return; }
             num_segments_ = static_cast<int>(time_segments_.size());
-            updateCumulativeTimes();
+            // Prepare adjoint storage with the topology so the first pullback does not allocate.
+            ws_lambda_.resize(std::max(0, num_segments_ - 1) * 3, DIM);
+            ws_gd_internal_.resize(num_segments_ + 1, 3 * DIM);
             precomputeTimePowers();
             precomputePointDiffs();
             solveSepticInPlace();
-            initializePPoly();
+            trajectory_.finishSpline();
             // A finite input can still produce invalid coefficients or collapsed breakpoints.
-            is_initialized_ = trajectory_.isInitialized();
         }
 
     public:
@@ -2554,40 +2634,49 @@ namespace SplineTrajectory
 
         SepticSplineND() = default;
 
+        /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
+         * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         SepticSplineND(const std::vector<double> &t_points,
-                       const MatrixType &spatial_points,
+                       const CoefficientMatrix &spatial_points,
                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
             : spatial_points_(spatial_points),
               boundary_(boundary)
         {
-            convertTimePointsToSegments(t_points);
+            detail::durationsFromKnots(t_points, time_segments_, start_time_);
             updateSplineInternal();
         }
 
+        /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
+         * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         SepticSplineND(const std::vector<double> &time_segments,
-                       const MatrixType &spatial_points,
+                       const CoefficientMatrix &spatial_points,
                        double start_time,
                        const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
             : time_segments_(time_segments),
-              spatial_points_(spatial_points),
               start_time_(start_time),
+              spatial_points_(spatial_points),
               boundary_(boundary)
         {
             updateSplineInternal();
         }
 
+        /** @brief Replace interpolation data using absolute knots; invalid input clears the polynomial.
+         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views. */
         void update(const std::vector<double> &t_points,
-                    const MatrixType &spatial_points,
+                    const CoefficientMatrix &spatial_points,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
             spatial_points_ = spatial_points;
             boundary_ = boundary;
-            convertTimePointsToSegments(t_points);
+            detail::durationsFromKnots(t_points, time_segments_, start_time_);
             updateSplineInternal();
         }
 
+        /** @brief Replace interpolation data using positive durations and a common time origin.
+         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
+         *       Invalid shapes, times, boundary data or numeric output clear the polynomial. */
         void update(const std::vector<double> &time_segments,
-                    const MatrixType &spatial_points,
+                    const CoefficientMatrix &spatial_points,
                     double start_time,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
@@ -2598,51 +2687,52 @@ namespace SplineTrajectory
             updateSplineInternal();
         }
 
-        bool isInitialized() const { return is_initialized_; }
-        int getDimension() const { return DIM; }
+        bool isValid() const { return trajectory_.isValid(); }
+        int dimension() const { return DIM; }
 
-        double getStartTime() const
+        double startTime() const
         {
-            return start_time_;
+            return trajectory_.startTime();
         }
 
-        double getEndTime() const
+        double endTime() const
         {
-            return cumulative_times_.back();
+            return trajectory_.endTime();
         }
 
-        double getDuration() const
+        double duration() const
         {
-            return cumulative_times_.back() - start_time_;
+            return trajectory_.duration();
         }
 
-        size_t getNumPoints() const
+        size_t numPoints() const
         {
             return static_cast<size_t>(spatial_points_.rows());
         }
 
-        int getNumSegments() const
+        int numSegments() const
         {
-            return num_segments_;
+            return trajectory_.numSegments();
         }
 
-        const MatrixType &getSpacePoints() const { return spatial_points_; }
-        const std::vector<double> &getTimeSegments() const { return time_segments_; }
-        const std::vector<double> &getCumulativeTimes() const { return cumulative_times_; }
-        const BoundaryConditions<DIM> &getBoundaryConditions() const { return boundary_; }
+        const CoefficientMatrix &waypoints() const { return spatial_points_; }
+        const std::vector<double> &durations() const { return time_segments_; }
+        const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
+        const BoundaryConditions<DIM> &boundary() const { return boundary_; }
 
-        const TrajectoryType &getTrajectory() const { return trajectory_; }
-        TrajectoryType getTrajectoryCopy() const { return trajectory_; }
-        const TrajectoryType &getPPoly() const { return trajectory_; }
-        TrajectoryType getPPolyCopy() const { return trajectory_; }
+        /** @brief Borrow the polynomial until the next update, assignment or move. */
+        const Polynomial &polynomial() const & { return trajectory_; }
+        const Polynomial &polynomial() const && = delete;
+        /** @brief Make an independent owning snapshot, allocating its data. */
+        Polynomial copyPolynomial() const { return trajectory_; }
 
         static inline void computeBasisFunctions(double t,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_pos,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_vel,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_acc,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_jerk,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_snap,
-                                                 Eigen::Matrix<double, 1, COEFF_NUM> &b_crackle)
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_acc,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_jerk,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
+                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
         {
             double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1, t6 = t5 * t1, t7 = t6 * t1;
 
@@ -2654,12 +2744,11 @@ namespace SplineTrajectory
             b_crackle << 0, 0, 0, 0, 0, 120, 720 * t1, 2520 * t2;
         }
 
-        double getEnergy() const
+        /** @brief Integral of the squared minimum derivative; returns NaN for an invalid spline. */
+        double energy() const
         {
-            if (!is_initialized_)
-            {
-                return 0.0;
-            }
+            if (!trajectory_.isValid())
+                return std::numeric_limits<double>::quiet_NaN();
 
             double total_energy = 0.0;
             for (int i = 0; i < num_segments_; ++i)
@@ -2675,10 +2764,10 @@ namespace SplineTrajectory
                 const double T6 = T4 * T2;
                 const double T7 = T4 * T3;
 
-                RowVectorType c4 = coeffs_.row(i * 8 + 4);
-                RowVectorType c5 = coeffs_.row(i * 8 + 5);
-                RowVectorType c6 = coeffs_.row(i * 8 + 6);
-                RowVectorType c7 = coeffs_.row(i * 8 + 7);
+                RowVector c4 = trajectory_.coefficients_.row(i * 8 + 4);
+                RowVector c5 = trajectory_.coefficients_.row(i * 8 + 5);
+                RowVector c6 = trajectory_.coefficients_.row(i * 8 + 6);
+                RowVector c7 = trajectory_.coefficients_.row(i * 8 + 7);
 
                 total_energy += 576.0 * c4.squaredNorm() * T +
                                 2880.0 * c4.dot(c5) * T2 +
@@ -2697,12 +2786,13 @@ namespace SplineTrajectory
         /**
          * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
          *
-         * @return MatrixType Partial gradient ∂E/∂C, size (num_segments * 8) × DIM.
-         *         Each row corresponds to one coefficient dimension.
+         * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 8) × DIM.
+         *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
          * @note This computes only the direct partial derivative, not the full gradient.
          */
-        void getEnergyPartialGradByCoeffs(MatrixType &gdC) const
+        void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             gdC.resize(num_segments_ * 8, DIM);
             gdC.setZero();
 
@@ -2716,10 +2806,10 @@ namespace SplineTrajectory
                 double T6 = T5 * T;
                 double T7 = T6 * T;
 
-                const RowVectorType c4 = coeffs_.row(i * 8 + 4);
-                const RowVectorType c5 = coeffs_.row(i * 8 + 5);
-                const RowVectorType c6 = coeffs_.row(i * 8 + 6);
-                const RowVectorType c7 = coeffs_.row(i * 8 + 7);
+                const RowVector c4 = trajectory_.coefficients_.row(i * 8 + 4);
+                const RowVector c5 = trajectory_.coefficients_.row(i * 8 + 5);
+                const RowVector c6 = trajectory_.coefficients_.row(i * 8 + 6);
+                const RowVector c7 = trajectory_.coefficients_.row(i * 8 + 7);
 
                 gdC.row(i * 8 + 4) = 1152.0 * c4 * T +
                                      2880.0 * c5 * T2 +
@@ -2744,43 +2834,44 @@ namespace SplineTrajectory
 
         }
 
-        MatrixType getEnergyPartialGradByCoeffs() const
+        CoefficientMatrix energyCoefficientPartials() const
         {
-            MatrixType gdC;
-            getEnergyPartialGradByCoeffs(gdC);
+            CoefficientMatrix gdC;
+            energyCoefficientPartials(gdC);
             return gdC;
         }
 
         /**
          * @brief Compute partial gradient of energy w.r.t. segment durations.
          *
-         * @return VectorXd Partial gradient ∂E/∂T, size num_segments.
+         * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
-         * @note This computes only the explicit time dependency, not the full gradient.
+         * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
          */
-        void getEnergyPartialGradByTimes(Eigen::VectorXd &gdT) const
+        void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             gdT.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
                 const double T = time_segments_[i];
 
-                const RowVectorType c4 = coeffs_.row(i * 8 + 4);
-                const RowVectorType c5 = coeffs_.row(i * 8 + 5);
-                const RowVectorType c6 = coeffs_.row(i * 8 + 6);
-                const RowVectorType c7 = coeffs_.row(i * 8 + 7);
+                const RowVector c4 = trajectory_.coefficients_.row(i * 8 + 4);
+                const RowVector c5 = trajectory_.coefficients_.row(i * 8 + 5);
+                const RowVector c6 = trajectory_.coefficients_.row(i * 8 + 6);
+                const RowVector c7 = trajectory_.coefficients_.row(i * 8 + 7);
 
-                RowVectorType snap_end = 24.0 * c4 + T * (120.0 * c5 + T * (360.0 * c6 + (840.0 * T) * c7));
+                RowVector snap_end = 24.0 * c4 + T * (120.0 * c5 + T * (360.0 * c6 + (840.0 * T) * c7));
 
                 gdT(i) = snap_end.squaredNorm();
             }
         }
 
-        Eigen::VectorXd getEnergyPartialGradByTimes() const
+        Eigen::VectorXd energyDurationPartials() const
         {
             Eigen::VectorXd gdT;
-            getEnergyPartialGradByTimes(gdT);
+            energyDurationPartials(gdT);
             return gdT;
         }
 
@@ -2790,21 +2881,22 @@ namespace SplineTrajectory
          * @return VectorXd Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
-        void getEnergyGradTimes(Eigen::VectorXd &grad) const
+        void energyDurationGradient(Eigen::VectorXd &grad) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             grad.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
 
                 const int offset = i * 8;
-                const RowVectorType c1 = coeffs_.row(offset + 1);
-                const RowVectorType c2 = coeffs_.row(offset + 2);
-                const RowVectorType c3 = coeffs_.row(offset + 3);
-                const RowVectorType c4 = coeffs_.row(offset + 4);
-                const RowVectorType c5 = coeffs_.row(offset + 5);
-                const RowVectorType c6 = coeffs_.row(offset + 6);
-                const RowVectorType c7 = coeffs_.row(offset + 7);
+                const RowVector c1 = trajectory_.coefficients_.row(offset + 1);
+                const RowVector c2 = trajectory_.coefficients_.row(offset + 2);
+                const RowVector c3 = trajectory_.coefficients_.row(offset + 3);
+                const RowVector c4 = trajectory_.coefficients_.row(offset + 4);
+                const RowVector c5 = trajectory_.coefficients_.row(offset + 5);
+                const RowVector c6 = trajectory_.coefficients_.row(offset + 6);
+                const RowVector c7 = trajectory_.coefficients_.row(offset + 7);
 
                 double term_snap = 576.0 * c4.squaredNorm();
                 double term_cj = 1440.0 * c3.dot(c5);
@@ -2815,20 +2907,21 @@ namespace SplineTrajectory
             }
         }
 
-        Eigen::VectorXd getEnergyGradTimes() const
+        Eigen::VectorXd energyDurationGradient() const
         {
             Eigen::VectorXd grad;
-            getEnergyGradTimes(grad);
+            energyDurationGradient(grad);
             return grad;
         }
 
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @return MatrixType Full gradient dE/dP for inner points only.
+         * @return CoefficientMatrix Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
-        void getEnergyGradInnerPoints(MatrixType &grad) const
+        void energyWaypointGradient(CoefficientMatrix &grad) const
         {
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             if (num_segments_ < 1)
             {
                 grad.resize(0, DIM);
@@ -2840,33 +2933,34 @@ namespace SplineTrajectory
 
             for (int i = 1; i < num_segments_; ++i)
             {
-                const RowVectorType c7_L = coeffs_.row((i - 1) * 8 + 7);
-                const RowVectorType c7_R = coeffs_.row(i * 8 + 7);
+                const RowVector c7_L = trajectory_.coefficients_.row((i - 1) * 8 + 7);
+                const RowVector c7_R = trajectory_.coefficients_.row(i * 8 + 7);
                 grad.row(i - 1) = 10080.0 * (c7_R - c7_L);
             }
         }
 
-        MatrixType getEnergyGradInnerPoints() const
+        CoefficientMatrix energyWaypointGradient() const
         {
-            MatrixType grad;
-            getEnergyGradInnerPoints(grad);
+            CoefficientMatrix grad;
+            energyWaypointGradient(grad);
             return grad;
         }
 
         /**
          * @brief Compute partial gradient of energy w.r.t. boundary conditions (Pos, Vel, Acc, Jerk).
-         * @return BoundaryDualGrads containing gradients.
+         * @return BoundaryGradients containing gradients.
          */
-        BoundaryDualGrads getEnergyGradBoundary() const
+        BoundaryGradients energyBoundaryGradient() const
         {
-            BoundaryDualGrads res;
+            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
+            BoundaryGradients res;
             if (num_segments_ < 1)
                 return res;
 
-            const RowVectorType c4_first = coeffs_.row(4);
-            const RowVectorType c5_first = coeffs_.row(5);
-            const RowVectorType c6_first = coeffs_.row(6);
-            const RowVectorType c7_first = coeffs_.row(7);
+            const RowVector c4_first = trajectory_.coefficients_.row(4);
+            const RowVector c5_first = trajectory_.coefficients_.row(5);
+            const RowVector c6_first = trajectory_.coefficients_.row(6);
+            const RowVector c7_first = trajectory_.coefficients_.row(7);
 
             res.start.p = 10080.0 * c7_first.transpose();
             res.start.v = -1440.0 * c6_first.transpose();
@@ -2878,16 +2972,16 @@ namespace SplineTrajectory
             double T2 = T * T;
             double T3 = T2 * T;
 
-            const RowVectorType c4_last = coeffs_.row(last_idx * 8 + 4);
-            const RowVectorType c5_last = coeffs_.row(last_idx * 8 + 5);
-            const RowVectorType c6_last = coeffs_.row(last_idx * 8 + 6);
-            const RowVectorType c7_last = coeffs_.row(last_idx * 8 + 7);
+            const RowVector c4_last = trajectory_.coefficients_.row(last_idx * 8 + 4);
+            const RowVector c5_last = trajectory_.coefficients_.row(last_idx * 8 + 5);
+            const RowVector c6_last = trajectory_.coefficients_.row(last_idx * 8 + 6);
+            const RowVector c7_last = trajectory_.coefficients_.row(last_idx * 8 + 7);
 
-            RowVectorType snap_end = 24.0 * c4_last + 120.0 * c5_last * T +
+            RowVector snap_end = 24.0 * c4_last + 120.0 * c5_last * T +
                                      360.0 * c6_last * T2 + 840.0 * c7_last * T3;
-            RowVectorType crackle_end = 120.0 * c5_last + 720.0 * c6_last * T + 2520.0 * c7_last * T2;
-            RowVectorType pop_end = 720.0 * c6_last + 5040.0 * c7_last * T;
-            RowVectorType d7_end = 5040.0 * c7_last;
+            RowVector crackle_end = 120.0 * c5_last + 720.0 * c6_last * T + 2520.0 * c7_last * T2;
+            RowVector pop_end = 720.0 * c6_last + 5040.0 * c7_last * T;
+            RowVector d7_end = 5040.0 * c7_last;
 
             res.end.p = -2.0 * d7_end.transpose();
             res.end.v = 2.0 * pop_end.transpose();
@@ -2902,26 +2996,26 @@ namespace SplineTrajectory
          *
          * @return Gradients Structure containing:
          *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
+         *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
          */
-        Gradients getEnergyGrad() const
+        Gradients energyGradient() const
         {
             Gradients res;
-            getEnergyGrad(res);
+            energyGradient(res);
             return res;
         }
 
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param grads Output gradients structure to populate
+         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
-        void getEnergyGrad(Gradients &grads) const
+        void energyGradient(Gradients &grads) const
         {
-            getEnergyGradInnerPoints(grads.inner_points);
-            getEnergyGradTimes(grads.times);
-            BoundaryDualGrads boundary = getEnergyGradBoundary();
+            energyWaypointGradient(grads.inner_points);
+            energyDurationGradient(grads.durations);
+            BoundaryGradients boundary = energyBoundaryGradient();
             grads.start = boundary.start;
             grads.end = boundary.end;
         }
@@ -2933,16 +3027,16 @@ namespace SplineTrajectory
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @return Gradients Structure containing:
          *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - times: gradient w.r.t. time segments, size N
+         *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
          */
-        Gradients propagateGrad(const MatrixType &partialGradByCoeffs,
+        Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
                                 const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
 
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.times, res.start, res.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes,
+                                  res.inner_points, res.durations, res.start, res.end);
 
             return res;
         }
@@ -2952,30 +3046,38 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param grads               Output gradients structure to populate
+         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
-        void propagateGrad(const MatrixType &partialGradByCoeffs,
+        void backward(const CoefficientMatrix &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes,
                            Gradients &grads)
         {
-            propagateGradInternal(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.times, grads.start, grads.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes,
+                                  grads.inner_points, grads.durations, grads.start, grads.end);
         }
 
     private:
-        void propagateGradInternal(const MatrixType &partialGradByCoeffs,
+        /** @brief Pull back the coefficient map through the cached continuity solve.
+         * @note With A(T)q = b(T,P,boundary), solve A^T lambda = dL/dq and accumulate
+         *       lambda^T (db/dtheta - dA/dtheta*q) plus direct coefficient-map partials.
+         *       Input duration partials hold local power coefficients fixed. Outputs are
+         *       overwritten; correctly sized output and adjoint storage are reused. */
+        void backwardImpl(const CoefficientMatrix &partialGradByCoeffs,
                                    const Eigen::VectorXd &partialGradByTimes,
-                                   MatrixType &innerPointsGrad,
+                                   CoefficientMatrix &innerPointsGrad,
                                    Eigen::VectorXd &gradByTimes,
-                                   BoundaryStateGrads &startGrads,
-                                   BoundaryStateGrads &endGrads)
+                                   BoundaryGradient &startGrads,
+                                   BoundaryGradient &endGrads)
         {
             const int n = num_segments_;
             const int n_pts = static_cast<int>(spatial_points_.rows());
 
+            if (!trajectory_.isValid() || partialGradByCoeffs.rows() != n * kCoefficientCount ||
+                partialGradByTimes.size() != n)
+                throw std::invalid_argument("Adjoint requires a valid spline and matching partial shapes");
             gradByTimes = partialGradByTimes;
-            startGrads = BoundaryStateGrads();
-            endGrads = BoundaryStateGrads();
+            startGrads = BoundaryGradient();
+            endGrads = BoundaryGradient();
 
             if (n > 1)
             {
@@ -2987,7 +3089,7 @@ namespace SplineTrajectory
                 innerPointsGrad.resize(0, DIM);
             }
 
-            auto add_point_grad = [&](int idx, const RowVectorType &grad)
+            auto add_point_grad = [&](int idx, const RowVector &grad)
             {
                 if (idx == 0)
                 {
@@ -3006,7 +3108,7 @@ namespace SplineTrajectory
             ws_gd_internal_.resize(n_pts, 3 * DIM);
             ws_gd_internal_.setZero();
 
-            auto add_grad_d = [&](int idx, const RowVectorType &d_vel, const RowVectorType &d_acc, const RowVectorType &d_jerk)
+            auto add_grad_d = [&](int idx, const RowVector &d_vel, const RowVector &d_acc, const RowVector &d_jerk)
             {
                 ws_gd_internal_.row(idx).segment(0, DIM) += d_vel;
                 ws_gd_internal_.row(idx).segment(DIM, DIM) += d_acc;
@@ -3018,52 +3120,52 @@ namespace SplineTrajectory
                 const auto &tp = time_powers_[i];
                 const int coeff_idx = i * 8;
 
-                const RowVectorType &gc0 = partialGradByCoeffs.row(coeff_idx + 0);
-                const RowVectorType &gc1 = partialGradByCoeffs.row(coeff_idx + 1);
-                const RowVectorType &gc2 = partialGradByCoeffs.row(coeff_idx + 2);
-                const RowVectorType &gc3 = partialGradByCoeffs.row(coeff_idx + 3);
-                const RowVectorType &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
-                const RowVectorType &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
-                const RowVectorType &gc6 = partialGradByCoeffs.row(coeff_idx + 6);
-                const RowVectorType &gc7 = partialGradByCoeffs.row(coeff_idx + 7);
+                const RowVector &gc0 = partialGradByCoeffs.row(coeff_idx + 0);
+                const RowVector &gc1 = partialGradByCoeffs.row(coeff_idx + 1);
+                const RowVector &gc2 = partialGradByCoeffs.row(coeff_idx + 2);
+                const RowVector &gc3 = partialGradByCoeffs.row(coeff_idx + 3);
+                const RowVector &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
+                const RowVector &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
+                const RowVector &gc6 = partialGradByCoeffs.row(coeff_idx + 6);
+                const RowVector &gc7 = partialGradByCoeffs.row(coeff_idx + 7);
 
                 double k_P4 = -(210.0 * tp.h4_inv) / 6.0;
                 double k_P5 = (168.0 * tp.h5_inv) / 2.0;
                 double k_P6 = -(420.0 * tp.h6_inv) / 6.0;
                 double k_P7 = (120.0 * tp.h7_inv) / 6.0;
 
-                RowVectorType sum_grad_P = gc4 * k_P4 + gc5 * k_P5 + gc6 * k_P6 + gc7 * k_P7;
+                RowVector sum_grad_P = gc4 * k_P4 + gc5 * k_P5 + gc6 * k_P6 + gc7 * k_P7;
                 add_point_grad(i, gc0 + sum_grad_P);
                 add_point_grad(i + 1, -sum_grad_P);
 
                 add_grad_d(i, gc1, 0.5 * gc2, (1.0 / 6.0) * gc3);
 
-                RowVectorType grad_v_curr = gc4 * (-20.0 * tp.h3_inv) +
+                RowVector grad_v_curr = gc4 * (-20.0 * tp.h3_inv) +
                                             gc5 * (45.0 * tp.h4_inv) +
                                             gc6 * (-36.0 * tp.h5_inv) +
                                             gc7 * (10.0 * tp.h6_inv);
 
-                RowVectorType grad_v_next = gc4 * (-15.0 * tp.h3_inv) +
+                RowVector grad_v_next = gc4 * (-15.0 * tp.h3_inv) +
                                             gc5 * (39.0 * tp.h4_inv) +
                                             gc6 * (-34.0 * tp.h5_inv) +
                                             gc7 * (10.0 * tp.h6_inv);
 
-                RowVectorType grad_a_curr = gc4 * (-5.0 * tp.h2_inv) +
+                RowVector grad_a_curr = gc4 * (-5.0 * tp.h2_inv) +
                                             gc5 * (10.0 * tp.h3_inv) +
                                             gc6 * (-7.5 * tp.h4_inv) +
                                             gc7 * (2.0 * tp.h5_inv);
 
-                RowVectorType grad_a_next = gc4 * (2.5 * tp.h2_inv) +
+                RowVector grad_a_next = gc4 * (2.5 * tp.h2_inv) +
                                             gc5 * (-7.0 * tp.h3_inv) +
                                             gc6 * (6.5 * tp.h4_inv) +
                                             gc7 * (-2.0 * tp.h5_inv);
 
-                RowVectorType grad_j_curr = gc4 * (-2.0 / 3.0 * tp.h_inv) +
+                RowVector grad_j_curr = gc4 * (-2.0 / 3.0 * tp.h_inv) +
                                             gc5 * (tp.h2_inv) +
                                             gc6 * (-2.0 / 3.0 * tp.h3_inv) +
                                             gc7 * (1.0 / 6.0 * tp.h4_inv);
 
-                RowVectorType grad_j_next = gc4 * (-1.0 / 6.0 * tp.h_inv) +
+                RowVector grad_j_next = gc4 * (-1.0 / 6.0 * tp.h_inv) +
                                             gc5 * (0.5 * tp.h2_inv) +
                                             gc6 * (-0.5 * tp.h3_inv) +
                                             gc7 * (1.0 / 6.0 * tp.h4_inv);
@@ -3072,14 +3174,14 @@ namespace SplineTrajectory
                 add_grad_d(i + 1, grad_v_next, grad_a_next, grad_j_next);
 
                 {
-                    const RowVectorType &P_curr = spatial_points_.row(i);
-                    const RowVectorType &P_next = spatial_points_.row(i + 1);
-                    const RowVectorType &V_curr = internal_vel_.row(i);
-                    const RowVectorType &V_next = internal_vel_.row(i + 1);
-                    const RowVectorType &A_curr = internal_acc_.row(i);
-                    const RowVectorType &A_next = internal_acc_.row(i + 1);
-                    const RowVectorType &J_curr = internal_jerk_.row(i);
-                    const RowVectorType &J_next = internal_jerk_.row(i + 1);
+                    const RowVector &P_curr = spatial_points_.row(i);
+                    const RowVector &P_next = spatial_points_.row(i + 1);
+                    const RowVector &V_curr = internal_vel_.row(i);
+                    const RowVector &V_next = internal_vel_.row(i + 1);
+                    const RowVector &A_curr = internal_acc_.row(i);
+                    const RowVector &A_next = internal_acc_.row(i + 1);
+                    const RowVector &J_curr = internal_jerk_.row(i);
+                    const RowVector &J_next = internal_jerk_.row(i + 1);
                     if constexpr (DIM <= 3)
                     {
                         double h8_inv = tp.h7_inv * tp.h_inv;
@@ -3125,28 +3227,28 @@ namespace SplineTrajectory
                     }
                     else
                     {
-                        RowVectorType dP = P_curr - P_next;
+                        RowVector dP = P_curr - P_next;
 
-                        RowVectorType dc4_dh = ((840.0 * dP * tp.h5_inv) +
+                        RowVector dc4_dh = ((840.0 * dP * tp.h5_inv) +
                                                 (360.0 * V_curr * tp.h4_inv) + (270.0 * V_next * tp.h4_inv) +
                                                 (60.0 * A_curr * tp.h3_inv) - (30.0 * A_next * tp.h3_inv) +
                                                 (4.0 * J_curr * tp.h2_inv) + (J_next * tp.h2_inv)) /
                                                6.0;
 
-                        RowVectorType dc5_dh = ((-840.0 * dP * tp.h6_inv) -
+                        RowVector dc5_dh = ((-840.0 * dP * tp.h6_inv) -
                                                 (360.0 * V_curr * tp.h5_inv) - (312.0 * V_next * tp.h5_inv) -
                                                 (60.0 * A_curr * tp.h4_inv) + (42.0 * A_next * tp.h4_inv) -
                                                 (4.0 * J_curr * tp.h3_inv) - (2.0 * J_next * tp.h3_inv)) /
                                                2.0;
 
-                        RowVectorType dc6_dh = ((2520.0 * dP * tp.h7_inv) +
+                        RowVector dc6_dh = ((2520.0 * dP * tp.h7_inv) +
                                                 (1080.0 * V_curr * tp.h6_inv) + (1020.0 * V_next * tp.h6_inv) +
                                                 (180.0 * A_curr * tp.h5_inv) - (156.0 * A_next * tp.h5_inv) +
                                                 (12.0 * J_curr * tp.h4_inv) + (9.0 * J_next * tp.h4_inv)) /
                                                6.0;
 
                         double h8_inv = tp.h7_inv * tp.h_inv;
-                        RowVectorType dc7_dh = ((-840.0 * dP * h8_inv) -
+                        RowVector dc7_dh = ((-840.0 * dP * h8_inv) -
                                                 (360.0 * V_curr * tp.h7_inv) - (360.0 * V_next * tp.h7_inv) -
                                                 (60.0 * A_curr * tp.h6_inv) + (60.0 * A_next * tp.h6_inv) -
                                                 (4.0 * J_curr * tp.h5_inv) - (4.0 * J_next * tp.h5_inv)) /
@@ -3206,24 +3308,24 @@ namespace SplineTrajectory
                     const auto &tp_L = time_powers_[m - 1];
                     const auto &tp_R = time_powers_[m];
 
-                    const RowVectorType &P_prev = spatial_points_.row(m - 1);
-                    const RowVectorType &P_curr = spatial_points_.row(m);
-                    const RowVectorType &P_next = spatial_points_.row(m + 1);
-                    const RowVectorType &V_prev = internal_vel_.row(m - 1);
-                    const RowVectorType &V_curr = internal_vel_.row(m);
-                    const RowVectorType &V_next = internal_vel_.row(m + 1);
+                    const RowVector &P_prev = spatial_points_.row(m - 1);
+                    const RowVector &P_curr = spatial_points_.row(m);
+                    const RowVector &P_next = spatial_points_.row(m + 1);
+                    const RowVector &V_prev = internal_vel_.row(m - 1);
+                    const RowVector &V_curr = internal_vel_.row(m);
+                    const RowVector &V_next = internal_vel_.row(m + 1);
 
-                    const RowVectorType &A_prev = internal_acc_.row(m - 1);
-                    const RowVectorType &A_curr = internal_acc_.row(m);
-                    const RowVectorType &A_next = internal_acc_.row(m + 1);
+                    const RowVector &A_prev = internal_acc_.row(m - 1);
+                    const RowVector &A_curr = internal_acc_.row(m);
+                    const RowVector &A_next = internal_acc_.row(m + 1);
 
-                    const RowVectorType &J_prev = internal_jerk_.row(m - 1);
-                    const RowVectorType &J_curr = internal_jerk_.row(m);
-                    const RowVectorType &J_next = internal_jerk_.row(m + 1);
+                    const RowVector &J_prev = internal_jerk_.row(m - 1);
+                    const RowVector &J_curr = internal_jerk_.row(m);
+                    const RowVector &J_next = internal_jerk_.row(m + 1);
 
-                    const RowVectorType lam_3 = ws_lambda_.row(3 * i);
-                    const RowVectorType lam_4 = ws_lambda_.row(3 * i + 1);
-                    const RowVectorType lam_5 = ws_lambda_.row(3 * i + 2);
+                    const RowVector lam_3 = ws_lambda_.row(3 * i);
+                    const RowVector lam_4 = ws_lambda_.row(3 * i + 1);
+                    const RowVector lam_5 = ws_lambda_.row(3 * i + 2);
 
                     const double dD00_dhL = -1440.0 * tp_L.h4_inv;
                     const double dD01_dhL = 240.0 * tp_L.h3_inv;
@@ -3311,23 +3413,23 @@ namespace SplineTrajectory
                     }
                     else
                     {
-                        RowVectorType rhs0_L = -3360.0 * (P_curr - P_prev) * tp_L.h5_inv -
+                        RowVector rhs0_L = -3360.0 * (P_curr - P_prev) * tp_L.h5_inv -
                                                (dD00_dhL * V_curr + dD01_dhL * A_curr + dD02_dhL * J_curr +
                                                 dL00_dhL * V_prev + dL01_dhL * A_prev + dL02_dhL * J_prev);
-                        RowVectorType rhs1_L = -50400.0 * (P_curr - P_prev) * tp_L.h6_inv -
+                        RowVector rhs1_L = -50400.0 * (P_curr - P_prev) * tp_L.h6_inv -
                                                (dD10_dhL * V_curr + dD11_dhL * A_curr + dD12_dhL * J_curr +
                                                 dL10_dhL * V_prev + dL11_dhL * A_prev + dL12_dhL * J_prev);
-                        RowVectorType rhs2_L = -302400.0 * (P_curr - P_prev) * tp_L.h7_inv -
+                        RowVector rhs2_L = -302400.0 * (P_curr - P_prev) * tp_L.h7_inv -
                                                (dD20_dhL * V_curr + dD21_dhL * A_curr + dD22_dhL * J_curr +
                                                 dL20_dhL * V_prev + dL21_dhL * A_prev + dL22_dhL * J_prev);
 
-                        RowVectorType rhs0_R = -3360.0 * (P_next - P_curr) * tp_R.h5_inv -
+                        RowVector rhs0_R = -3360.0 * (P_next - P_curr) * tp_R.h5_inv -
                                                (dD00_dhR * V_curr + dD01_dhR * A_curr + dD02_dhR * J_curr +
                                                 dU00_dhR * V_next + dU01_dhR * A_next + dU02_dhR * J_next);
-                        RowVectorType rhs1_R = -50400.0 * (P_curr - P_next) * tp_R.h6_inv -
+                        RowVector rhs1_R = -50400.0 * (P_curr - P_next) * tp_R.h6_inv -
                                                (dD10_dhR * V_curr + dD11_dhR * A_curr + dD12_dhR * J_curr +
                                                 dU10_dhR * V_next + dU11_dhR * A_next + dU12_dhR * J_next);
-                        RowVectorType rhs2_R = -302400.0 * (P_next - P_curr) * tp_R.h7_inv -
+                        RowVector rhs2_R = -302400.0 * (P_next - P_curr) * tp_R.h7_inv -
                                                (dD20_dhR * V_curr + dD21_dhR * A_curr + dD22_dhR * J_curr +
                                                 dU20_dhR * V_next + dU21_dhR * A_next + dU22_dhR * J_next);
 
@@ -3338,17 +3440,17 @@ namespace SplineTrajectory
                     double dr3_dp_next = 840.0 * tp_R.h4_inv;
                     double dr4_dp_next = -10080.0 * tp_R.h5_inv;
                     double dr5_dp_next = 50400.0 * tp_R.h6_inv;
-                    RowVectorType grad_P_next = lam_3 * dr3_dp_next + lam_4 * dr4_dp_next + lam_5 * dr5_dp_next;
+                    RowVector grad_P_next = lam_3 * dr3_dp_next + lam_4 * dr4_dp_next + lam_5 * dr5_dp_next;
 
                     double dr3_dp_curr = -840.0 * (tp_R.h4_inv - tp_L.h4_inv);
                     double dr4_dp_curr = 10080.0 * (tp_R.h5_inv + tp_L.h5_inv);
                     double dr5_dp_curr = -50400.0 * (tp_R.h6_inv - tp_L.h6_inv);
-                    RowVectorType grad_P_curr = lam_3 * dr3_dp_curr + lam_4 * dr4_dp_curr + lam_5 * dr5_dp_curr;
+                    RowVector grad_P_curr = lam_3 * dr3_dp_curr + lam_4 * dr4_dp_curr + lam_5 * dr5_dp_curr;
 
                     double dr3_dp_prev = -840.0 * tp_L.h4_inv;
                     double dr4_dp_prev = -10080.0 * tp_L.h5_inv;
                     double dr5_dp_prev = -50400.0 * tp_L.h6_inv;
-                    RowVectorType grad_P_prev = lam_3 * dr3_dp_prev + lam_4 * dr4_dp_prev + lam_5 * dr5_dp_prev;
+                    RowVector grad_P_prev = lam_3 * dr3_dp_prev + lam_4 * dr4_dp_prev + lam_5 * dr5_dp_prev;
 
                     add_point_grad(i + 2, grad_P_next);
                     add_point_grad(i + 1, grad_P_curr);
@@ -3375,24 +3477,6 @@ namespace SplineTrajectory
             endGrads.v = raw_end_grad.row(0).transpose();
             endGrads.a = raw_end_grad.row(1).transpose();
             endGrads.j = raw_end_grad.row(2).transpose();
-        }
-        void convertTimePointsToSegments(const std::vector<double> &t_points)
-        {
-            start_time_ = t_points.front();
-            time_segments_.clear();
-            time_segments_.reserve(t_points.size() - 1);
-            for (size_t i = 1; i < t_points.size(); ++i)
-                time_segments_.push_back(t_points[i] - t_points[i - 1]);
-        }
-
-        void updateCumulativeTimes()
-        {
-            if (num_segments_ <= 0)
-                return;
-            cumulative_times_.resize(num_segments_ + 1);
-            cumulative_times_[0] = start_time_;
-            for (int i = 0; i < num_segments_; ++i)
-                cumulative_times_[i + 1] = cumulative_times_[i] + time_segments_[i];
         }
         void precomputeTimePowers()
         {
@@ -3569,10 +3653,10 @@ namespace SplineTrajectory
         }
 
     private:
-        void solveInternalDerivatives(const MatrixType &P,
-                                      MatrixType &p_out,
-                                      MatrixType &q_out,
-                                      MatrixType &s_out)
+        void solveInternalDerivatives(const CoefficientMatrix &P,
+                                      CoefficientMatrix &p_out,
+                                      CoefficientMatrix &q_out,
+                                      CoefficientMatrix &s_out)
         {
             const int n = static_cast<int>(P.rows());
             p_out.resize(n, DIM);
@@ -3713,26 +3797,25 @@ namespace SplineTrajectory
 
             solveInternalDerivatives(spatial_points_, internal_vel_, internal_acc_, internal_jerk_);
 
-            coeffs_.resize(n * 8, DIM);
 
             for (int i = 0; i < n; ++i)
             {
                 const auto &tp = time_powers_[i];
 
-                const RowVectorType c0 = spatial_points_.row(i);
-                const RowVectorType c1 = internal_vel_.row(i);
-                const RowVectorType c2 = internal_acc_.row(i) * 0.5;
-                const RowVectorType c3 = internal_jerk_.row(i) / 6.0;
+                const RowVector c0 = spatial_points_.row(i);
+                const RowVector c1 = internal_vel_.row(i);
+                const RowVector c2 = internal_acc_.row(i) * 0.5;
+                const RowVector c3 = internal_jerk_.row(i) / 6.0;
 
-                const RowVectorType &V_curr = internal_vel_.row(i);
-                const RowVectorType &V_next = internal_vel_.row(i + 1);
-                const RowVectorType &A_curr = internal_acc_.row(i);
-                const RowVectorType &A_next = internal_acc_.row(i + 1);
-                const RowVectorType &J_curr = internal_jerk_.row(i);
-                const RowVectorType &J_next = internal_jerk_.row(i + 1);
-                const RowVectorType P_diff = -point_diffs_.row(i);
+                const RowVector &V_curr = internal_vel_.row(i);
+                const RowVector &V_next = internal_vel_.row(i + 1);
+                const RowVector &A_curr = internal_acc_.row(i);
+                const RowVector &A_next = internal_acc_.row(i + 1);
+                const RowVector &J_curr = internal_jerk_.row(i);
+                const RowVector &J_next = internal_jerk_.row(i + 1);
+                const RowVector P_diff = -point_diffs_.row(i);
 
-                const RowVectorType c4 = -(210.0 * P_diff * tp.h4_inv +
+                const RowVector c4 = -(210.0 * P_diff * tp.h4_inv +
                                            120.0 * V_curr * tp.h3_inv +
                                            90.0 * V_next * tp.h3_inv +
                                            30.0 * A_curr * tp.h2_inv -
@@ -3741,7 +3824,7 @@ namespace SplineTrajectory
                                            J_next * tp.h_inv) /
                                          6.0;
 
-                const RowVectorType c5 = (168.0 * P_diff * tp.h5_inv +
+                const RowVector c5 = (168.0 * P_diff * tp.h5_inv +
                                           90.0 * V_curr * tp.h4_inv +
                                           78.0 * V_next * tp.h4_inv +
                                           20.0 * A_curr * tp.h3_inv -
@@ -3750,7 +3833,7 @@ namespace SplineTrajectory
                                           J_next * tp.h2_inv) /
                                          2.0;
 
-                const RowVectorType c6 = -(420.0 * P_diff * tp.h6_inv +
+                const RowVector c6 = -(420.0 * P_diff * tp.h6_inv +
                                            216.0 * V_curr * tp.h5_inv +
                                            204.0 * V_next * tp.h5_inv +
                                            45.0 * A_curr * tp.h4_inv -
@@ -3759,7 +3842,7 @@ namespace SplineTrajectory
                                            3.0 * J_next * tp.h3_inv) /
                                          6.0;
 
-                const RowVectorType c7 = (120.0 * P_diff * tp.h7_inv +
+                const RowVector c7 = (120.0 * P_diff * tp.h7_inv +
                                           60.0 * V_curr * tp.h6_inv +
                                           60.0 * V_next * tp.h6_inv +
                                           12.0 * A_curr * tp.h5_inv -
@@ -3768,21 +3851,17 @@ namespace SplineTrajectory
                                           J_next * tp.h4_inv) /
                                          6.0;
 
-                coeffs_.row(i * 8 + 0) = c0;
-                coeffs_.row(i * 8 + 1) = c1;
-                coeffs_.row(i * 8 + 2) = c2;
-                coeffs_.row(i * 8 + 3) = c3;
-                coeffs_.row(i * 8 + 4) = c4;
-                coeffs_.row(i * 8 + 5) = c5;
-                coeffs_.row(i * 8 + 6) = c6;
-                coeffs_.row(i * 8 + 7) = c7;
+                trajectory_.coefficients_.row(i * 8 + 0) = c0;
+                trajectory_.coefficients_.row(i * 8 + 1) = c1;
+                trajectory_.coefficients_.row(i * 8 + 2) = c2;
+                trajectory_.coefficients_.row(i * 8 + 3) = c3;
+                trajectory_.coefficients_.row(i * 8 + 4) = c4;
+                trajectory_.coefficients_.row(i * 8 + 5) = c5;
+                trajectory_.coefficients_.row(i * 8 + 6) = c6;
+                trajectory_.coefficients_.row(i * 8 + 7) = c7;
             }
         }
 
-        void initializePPoly()
-        {
-            trajectory_.update(cumulative_times_, coeffs_, 8);
-        }
     };
 
     using SplinePoint1d = Eigen::Matrix<double, 1, 1>;
