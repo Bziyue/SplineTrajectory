@@ -263,3 +263,7 @@ outside the parallel loop. Each mutable hull workspace belongs to one active eva
   reallocate spline storage after an invalid candidate has cleared it.
 
 For previous API names, use the [migration guide](api_migration.md).
+
+`prepare()` encodes the initial decision vector once. `initialGuess()` returns an owning copy of
+that prepared vector, so nonlinear inverse maps are not solved again. Reprepare after changing
+a borrowed parameterization or the physical reference; trial evaluations leave the initial vector intact.

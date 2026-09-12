@@ -40,9 +40,10 @@ struct ScalingSpatialMap
 {
     explicit ScalingSpatialMap(double factor) : scale(factor) {}
     double scale;
+    mutable int inverse_calls = 0;
     int dimension(int) const { return 3; }
     Eigen::Vector3d toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const { return scale * x; }
-    Eigen::Vector3d toUnconstrained(const Eigen::Vector3d &point, int) const { return point / scale; }
+    Eigen::Vector3d toUnconstrained(const Eigen::Vector3d &point, int) const { ++inverse_calls; return point / scale; }
     void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &, const Eigen::Vector3d &gradient,
                       int, Eigen::Ref<Eigen::VectorXd> output) const { output = scale * gradient; }
 };
@@ -80,6 +81,18 @@ void testOwnershipAndMovement()
     auto borrowed = SplineTrajectory::makeOptimizer<Spline>(std::cref(maps));
     require(bool(borrowed.prepare(problem)), "explicitly borrowed parameterization");
     const auto borrowed_x = borrowed.initialGuess();
+    auto editable_initial = borrowed.initialGuess();
+    editable_initial.setZero();
+    require(maps.space.inverse_calls == 1, "initial coordinates are encoded only during preparation");
+    require(borrowed.initialGuess().isApprox(borrowed_x, 0.0), "initial guess returns an independent copy");
+    require(bool(borrowed.evaluate(borrowed_x, gradient, objective)), "evaluate the prepared initial coordinates");
+    require(maps.space.inverse_calls == 1, "trial evaluation does not encode coordinates");
+    auto changed = problem;
+    changed.waypoints(1, 0) += 1.0;
+    require(bool(borrowed.prepare(changed)) && maps.space.inverse_calls == 2,
+            "a new problem refreshes its initial coordinate snapshot");
+    require(std::abs(borrowed.initialGuess()(borrowed.layout().waypoints.front().offset) - 2.0 / 7.0) < 1e-14,
+            "repreparation replaces the previous initial coordinates");
     require(std::abs(borrowed_x(borrowed.layout().waypoints.front().offset) - 1.0 / 7.0) < 1e-14,
             "borrowed maps use the supplied object");
     require(bool(assigned.prepare(assigned.problem())), "prepare accepts the optimizer's own immutable problem view");

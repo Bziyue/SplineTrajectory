@@ -368,6 +368,7 @@ namespace SplineTrajectory
             OptimizerOptions options;
             OptimizationMask mask;
             DecisionLayout layout;
+            Eigen::VectorXd initial_variables;
             SplineVector<IntegralBasis> basis;
             int num_segments = 0;
             bool sample_capability = false;
@@ -490,6 +491,34 @@ namespace SplineTrajectory
             return {gradient.inner_points, gradient.durations, gradient.start, gradient.end, buffers_.grad_start_time};
         }
 
+        // Initial coordinates belong to the prepared problem, not the changing trial state.
+        Eigen::VectorXd encodeInitialGuess() const
+        {
+            const auto &reference = prepared_.problem;
+            Eigen::VectorXd x(prepared_.layout.dimension);
+            for (const auto &variable : prepared_.layout.time)
+                x(variable.offset) = timeMap().toTau(reference.durations[variable.segment_index]);
+            for (const auto &variable : prepared_.layout.waypoints)
+            {
+                const auto value = spaceMap().toUnconstrained(reference.waypoints.row(variable.point_index).transpose(), variable.point_index);
+                if (value.size() != variable.dof) throw std::invalid_argument("Spatial map initial dimension mismatch");
+                x.segment(variable.offset, variable.dof) = value;
+            }
+            int offset = prepared_.layout.boundary_offset;
+            forEachBoundary([&](int slot) {
+                x.template segment<DIM>(offset) = boundaryVector(reference.boundary, slot);
+                offset += DIM;
+            });
+            if constexpr (has_auxiliary)
+            {
+                const auto value = auxiliaryMap().initial(reference);
+                if (value.size() != state_.auxiliary_vars.size()) throw std::invalid_argument("Auxiliary map initial dimension mismatch");
+                x.segment(prepared_.layout.auxiliary_offset, value.size()) = value;
+            }
+            if (!x.allFinite()) throw std::invalid_argument("Initial decision coordinates are nonfinite");
+            return x;
+        }
+
         Status prepareImpl(const Problem &problem, OptimizerOptions options, bool need_samples) try
         {
             // Copy before modifying state: problem may be this optimizer's read-only problem view.
@@ -572,8 +601,8 @@ namespace SplineTrajectory
             prepared_.status = Status::success();
             try
             {
-                const Eigen::VectorXd initial = initialGuess();
-                const Status built = buildCandidate(initial);
+                prepared_.initial_variables = encodeInitialGuess();
+                const Status built = buildCandidate(prepared_.initial_variables);
                 if (!built) return failPreparation(built);
             }
             catch (const std::invalid_argument &)
@@ -673,7 +702,8 @@ namespace SplineTrajectory
          * @param problem Physical input; not retained by reference.
          * @param options Fixed quadrature, energy and optional recording settings.
          * @return Failure leaves the optimizer unprepared with no usable polynomial.
-         * @note Allocation occurs here. Externally borrowed maps must remain valid throughout the solve. */
+         * @note Allocation occurs here. Borrowed maps must remain valid throughout the solve;
+         *       reprepare whenever their mapping behavior changes. */
         Status prepare(const Problem &problem, OptimizerOptions options = {})
         { return prepareImpl(problem, options, false); }
 
@@ -714,35 +744,14 @@ namespace SplineTrajectory
             return isPrepared() && buffers_.samples_valid ? buffers_.integral_samples : empty;
         }
 
-        /** @brief Encode the reference state into an owning decision vector.
+        /** @brief Copy the initial coordinates encoded once during preparation.
+         * @return Owning vector, independent of subsequent trial evaluations and caller edits.
          * @throws std::logic_error If preparation has not succeeded.
-         * @throws std::invalid_argument If a map returns an invalid initial coordinate vector. */
+         * @note Allocates the returned vector; does not repeat potentially expensive inverse maps. */
         Eigen::VectorXd initialGuess() const
         {
             if (!isPrepared()) throw std::logic_error("Prepare the optimizer before requesting an initial guess");
-            const auto &reference = prepared_.problem;
-            Eigen::VectorXd x(prepared_.layout.dimension);
-            for (const auto &variable : prepared_.layout.time)
-                x(variable.offset) = timeMap().toTau(reference.durations[variable.segment_index]);
-            for (const auto &variable : prepared_.layout.waypoints)
-            {
-                const auto value = spaceMap().toUnconstrained(reference.waypoints.row(variable.point_index).transpose(), variable.point_index);
-                if (value.size() != variable.dof) throw std::invalid_argument("Spatial map initial dimension mismatch");
-                x.segment(variable.offset, variable.dof) = value;
-            }
-            int offset = prepared_.layout.boundary_offset;
-            forEachBoundary([&](int slot) {
-                x.template segment<DIM>(offset) = boundaryVector(reference.boundary, slot);
-                offset += DIM;
-            });
-            if constexpr (has_auxiliary)
-            {
-                const auto value = auxiliaryMap().initial(reference);
-                if (value.size() != state_.auxiliary_vars.size()) throw std::invalid_argument("Auxiliary map initial dimension mismatch");
-                x.segment(prepared_.layout.auxiliary_offset, value.size()) = value;
-            }
-            if (!x.allFinite()) throw std::invalid_argument("Initial decision coordinates are nonfinite");
-            return x;
+            return prepared_.initial_variables;
         }
 
         /** @brief Rebuild the external solver's accepted vector without evaluating the objective.
