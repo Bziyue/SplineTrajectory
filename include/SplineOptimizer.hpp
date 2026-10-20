@@ -865,7 +865,12 @@ namespace SplineTrajectory
             if (!std::isfinite(cost) || !b.grad_coeffs.allFinite() || !b.grad_times.allFinite() || !std::isfinite(b.grad_start_time))
                 return failEvaluation(error(ErrorCode::NumericalFailure, "Nonfinite coefficient-stage objective or partials"), gradient);
 
+            // Inactive coefficient-stage costs need no spline adjoint. Test components
+            // exactly: a norm can underflow and incorrectly erase nonzero partials.
+            bool needs_adjoint = false;
             if constexpr (needs_integral || detail::HasSample<O>::value || detail::HasCoefficient<O>::value)
+                needs_adjoint = (b.grad_coeffs.array() != 0.0).any();
+            if (needs_adjoint)
                 state_.spline.backward(b.grad_coeffs, b.grad_times, b.grads);
             else
             {
@@ -1153,15 +1158,23 @@ namespace SplineTrajectory
 
                     local_acc_cost += c_val * common_weight;
 
-                    local_acc_gdC.noalias() += b_p.transpose() * gp.transpose() * common_weight;
+                    // Inactive constraints return exact zero partials. Avoid their outer
+                    // products without a norm/tolerance test that could erase small gradients.
+                    // Keep time drift below unconditional so nonfinite states still fail closed.
+                    if ((gp.array() != 0.0).any())
+                        local_acc_gdC.noalias() += b_p.transpose() * gp.transpose() * common_weight;
                     if constexpr (derivative_order >= 1)
-                        local_acc_gdC.noalias() += b_v.transpose() * gv.transpose() * (common_weight * inverse_time);
+                        if ((gv.array() != 0.0).any())
+                            local_acc_gdC.noalias() += b_v.transpose() * gv.transpose() * (common_weight * inverse_time);
                     if constexpr (derivative_order >= 2)
-                        local_acc_gdC.noalias() += b_a.transpose() * ga.transpose() * (common_weight * inverse_time2);
+                        if ((ga.array() != 0.0).any())
+                            local_acc_gdC.noalias() += b_a.transpose() * ga.transpose() * (common_weight * inverse_time2);
                     if constexpr (derivative_order >= 3)
-                        local_acc_gdC.noalias() += b_j.transpose() * gj.transpose() * (common_weight * inverse_time3);
+                        if ((gj.array() != 0.0).any())
+                            local_acc_gdC.noalias() += b_j.transpose() * gj.transpose() * (common_weight * inverse_time3);
                     if constexpr (derivative_order >= 4)
-                        local_acc_gdC.noalias() += b_s.transpose() * gs.transpose() * (common_weight * inverse_time4);
+                        if ((gs.array() != 0.0).any())
+                            local_acc_gdC.noalias() += b_s.transpose() * gs.transpose() * (common_weight * inverse_time4);
 
                     local_acc_gdT += c_val * weight_trap * inv_K;
                     double drift_grad = gp.dot(v);
