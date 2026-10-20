@@ -719,10 +719,17 @@ namespace SplineTrajectory
             else is_initialized_ = true;
         }
 
+        /** @brief Copy validated physical-time polynomial data or clear the published value.
+         * @param breakpoints Finite, strictly increasing absolute times in seconds; copied on success.
+         * @param coefficients Piece-major ascending-power coefficients in the caller's frame; copied.
+         * @param num_coefficients Positive coefficient count per piece, within the static capacity.
+         * @note Requires exclusive access. Invalid shapes, times or coefficients leave an empty,
+         *       invalid polynomial and invalidate borrowed views, using the same state as clear(). */
         inline void initializeInternal(const std::vector<double> &breakpoints,
                                        const CoefficientMatrix &coefficients,
                                        int num_coefficients)
         {
+            // Validate all input before publishing new polynomial data.
             const bool valid = breakpoints.size() >= 2 && num_coefficients > 0 &&
                 breakpoints.size() - 1 <= static_cast<size_t>(std::numeric_limits<int>::max() / num_coefficients) &&
                 (!kHasFixedCapacity || num_coefficients <= kCapacity) &&
@@ -733,12 +740,11 @@ namespace SplineTrajectory
                     [](double a, double b) { return b <= a; }) == breakpoints.end();
             if (!valid)
             {
-                num_segments_ = num_coeffs_ = 0;
-                is_initialized_ = false;
-                breakpoints_.clear();
-                coefficients_.resize(0, DIM);
+                clear();
                 return;
             }
+
+            // Publish an owning copy only after the full input contract is satisfied.
             breakpoints_ = breakpoints;
             coefficients_ = coefficients;
             num_coeffs_ = num_coefficients;
@@ -879,6 +885,21 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Initialize physical gradients with independent duration partials.
+         * @param duration_partials Direct physical-duration partials; borrowed for this call.
+         *        May refer to gradient.durations itself.
+         * @param[out] gradient Receives duration partials and zero position/boundary gradients.
+         * @note Requires matching, already prepared topology and exclusive access to gradient.
+         *       Reuses storage and avoids zeroing durations immediately before overwriting them. */
+        template <typename Gradients>
+        inline void initializeGradients(const Eigen::VectorXd &duration_partials, Gradients &gradient)
+        {
+            gradient.inner_points.setZero();
+            gradient.durations = duration_partials;
+            gradient.start = {};
+            gradient.end = {};
+        }
+
         /** @brief Validate adjoint inputs and initialize reusable physical gradient storage.
          * @param polynomial Published spline in the caller's coordinates and seconds; borrowed for this call.
          * @param coefficient_partials Piece-major partials with respect to ascending physical-time coefficients.
@@ -902,8 +923,7 @@ namespace SplineTrajectory
 
             // Preserve direct duration partials while clearing all accumulated contributions.
             gradient.resetTopology(segments);
-            gradient.setZero();
-            gradient.durations = duration_partials;
+            initializeGradients(duration_partials, gradient);
             adjoint.setZero();
         }
     }
@@ -1406,8 +1426,6 @@ namespace SplineTrajectory
             for (int i = 0; i < num_segments_; ++i)
             {
                 const double T = time_powers_[i].h;
-                if (T <= 0)
-                    continue;
 
                 const double T2 = T * T;
                 const double T3 = T2 * T;
@@ -1549,8 +1567,6 @@ namespace SplineTrajectory
         {
             if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             BoundaryGradients res;
-            if (num_segments_ < 1)
-                return res;
 
             const RowVector c2_first = trajectory_.coefficients_.row(2);
             const RowVector c3_first = trajectory_.coefficients_.row(3);
@@ -2081,8 +2097,6 @@ namespace SplineTrajectory
             for (int i = 0; i < num_segments_; ++i)
             {
                 const double T = time_segments_[i];
-                if (T <= 0)
-                    continue;
 
                 const double T2 = T * T;
                 const double T3 = T2 * T;
@@ -2245,8 +2259,6 @@ namespace SplineTrajectory
         {
             if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             BoundaryGradients res;
-            if (num_segments_ < 1)
-                return res;
 
             const RowVector c3_first = trajectory_.coefficients_.row(3);
             const RowVector c4_first = trajectory_.coefficients_.row(4);
@@ -2911,8 +2923,6 @@ namespace SplineTrajectory
             for (int i = 0; i < num_segments_; ++i)
             {
                 const double T = time_segments_[i];
-                if (T <= 0)
-                    continue;
 
                 const double T2 = T * T;
                 const double T3 = T2 * T;
@@ -3100,8 +3110,6 @@ namespace SplineTrajectory
         {
             if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
             BoundaryGradients res;
-            if (num_segments_ < 1)
-                return res;
 
             const RowVector c4_first = trajectory_.coefficients_.row(4);
             const RowVector c5_first = trajectory_.coefficients_.row(5);

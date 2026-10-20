@@ -873,10 +873,7 @@ namespace SplineTrajectory
             if (needs_adjoint)
                 state_.spline.backward(b.grad_coeffs, b.grad_times, b.grads);
             else
-            {
-                b.grads.setZero();
-                b.grads.durations = b.grad_times;
-            }
+                detail::initializeGradients(b.grad_times, b.grads);
             cost += accumulateEnergy();
             if constexpr (detail::HasParameter<O>::value)
             {
