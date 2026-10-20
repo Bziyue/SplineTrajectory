@@ -849,6 +849,36 @@ namespace SplineTrajectory
                 durations[i] = knots[i + 1] - knots[i];
         }
 
+        /** @brief Compute interior position gradients from the highest-derivative jump at each knot.
+         * @tparam Scale Signed multiplier of the right-minus-left highest power coefficient.
+         * @param polynomial Valid minimum-derivative spline in physical time; borrowed for this call.
+         * @param[out] gradient Interior waypoint gradients in the caller's coordinates; storage is reused.
+         * @throws std::logic_error If the polynomial is invalid; output remains unchanged.
+         * @note Requires the per-order energy multiplier and exclusive access to gradient.
+         *       A single segment has no interior waypoints and produces an empty matrix. */
+        template <int Scale, int DIM, int CoefficientCount>
+        inline void energyWaypointGradient(const PPolyND<DIM, CoefficientCount> &polynomial,
+                                           typename PPolyND<DIM>::CoefficientMatrix &gradient)
+        {
+            if (!polynomial.isValid())
+                throw std::logic_error("Energy gradients require a valid spline");
+            const int segments = polynomial.numSegments();
+            gradient.resize(segments - 1, DIM);
+
+            // Integration by parts leaves only the highest-derivative jump at each interior knot.
+            const auto &coefficients = polynomial.coefficients();
+            for (int knot = 1; knot < segments; ++knot)
+            {
+                const auto left = coefficients.row((knot - 1) * CoefficientCount + CoefficientCount - 1);
+                const auto right = coefficients.row(knot * CoefficientCount + CoefficientCount - 1);
+                // Keep each order's original subtraction direction and positive multiplication.
+                if constexpr (Scale > 0)
+                    gradient.row(knot - 1) = static_cast<double>(Scale) * (right - left);
+                else
+                    gradient.row(knot - 1) = static_cast<double>(-Scale) * (left - right);
+            }
+        }
+
         /** @brief Validate adjoint inputs and initialize reusable physical gradient storage.
          * @param polynomial Published spline in the caller's coordinates and seconds; borrowed for this call.
          * @param coefficient_partials Piece-major partials with respect to ascending physical-time coefficients.
@@ -1149,6 +1179,24 @@ namespace SplineTrajectory
                 const Factor *next = knot + 1 < segments ? &factors[knot] : nullptr;
                 factors[knot - 1].backward(values, knot * DerivativesPerKnot, next);
             }
+        }
+
+        /** @brief Solve an interior-knot system using the cached primal factors.
+         * @tparam DerivativesPerKnot Compile-time block size of the supplied factors.
+         * @param factors The N-1 interior-knot factors from construction; borrowed for this call.
+         * @param segments Positive segment count N associated with factors and values.
+         * @param[in,out] values Knot-major RHS with prepared endpoint rows; receives the interior solution.
+         * @note Requires matching factor and workspace topology and exclusive access to values.
+         *       Endpoint rows remain unchanged; adjoint callers set them to zero before solving. */
+        template <int DerivativesPerKnot, typename Factor, typename Matrix>
+        inline void solveWithFactors(const std::vector<Factor> &factors, int segments, Matrix &values)
+        {
+            // Forward substitution consumes the preceding knot without another RHS buffer.
+            for (int knot = 1; knot < segments; ++knot)
+                factors[knot - 1].forward(values, knot * DerivativesPerKnot);
+
+            // Reuse the same descending sweep as the construction solve.
+            backSubstitute<DerivativesPerKnot>(factors, segments, values);
         }
     } // namespace detail
 
@@ -1482,22 +1530,7 @@ namespace SplineTrajectory
          */
         void energyWaypointGradient(CoefficientMatrix &grad) const
         {
-            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
-            if (num_segments_ < 1)
-            {
-                grad.resize(0, DIM);
-                return;
-            }
-
-            int num_rows = std::max(0, num_segments_ - 1);
-            grad.resize(num_rows, DIM);
-
-            for (int i = 1; i < num_segments_; ++i)
-            {
-                const RowVector c3_L = trajectory_.coefficients_.row((i - 1) * 4 + 3);
-                const RowVector c3_R = trajectory_.coefficients_.row(i * 4 + 3);
-                grad.row(i - 1) = 12.0 * (c3_R - c3_L);
-            }
+            detail::energyWaypointGradient<12>(trajectory_, grad);
         }
 
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
@@ -2193,22 +2226,7 @@ namespace SplineTrajectory
          */
         void energyWaypointGradient(CoefficientMatrix &grad) const
         {
-            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
-            if (num_segments_ < 1)
-            {
-                grad.resize(0, DIM);
-                return;
-            }
-
-            int num_rows = std::max(0, num_segments_ - 1);
-            grad.resize(num_rows, DIM);
-
-            for (int i = 1; i < num_segments_; ++i)
-            {
-                const RowVector c5_L = trajectory_.coefficients_.row((i - 1) * 6 + 5);
-                const RowVector c5_R = trajectory_.coefficients_.row(i * 6 + 5);
-                grad.row(i - 1) = 240.0 * (c5_L - c5_R);
-            }
+            detail::energyWaypointGradient<-240>(trajectory_, grad);
         }
 
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
@@ -2606,9 +2624,7 @@ namespace SplineTrajectory
             adjoint_.template topRows<2>().setZero();
             adjoint_.template bottomRows<2>().setZero();
 
-            for (int knot = 1; knot < num_segments_; ++knot)
-                factors_[knot - 1].forward(adjoint_, knot * kDerivativesPerKnot);
-            backSubstitute(adjoint_);
+            detail::solveWithFactors<kDerivativesPerKnot>(factors_, num_segments_, adjoint_);
         }
 
         /** @brief Add the interpolation constraint's contribution using endpoint identities.
@@ -3065,22 +3081,7 @@ namespace SplineTrajectory
          */
         void energyWaypointGradient(CoefficientMatrix &grad) const
         {
-            if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
-            if (num_segments_ < 1)
-            {
-                grad.resize(0, DIM);
-                return;
-            }
-
-            int num_rows = std::max(0, num_segments_ - 1);
-            grad.resize(num_rows, DIM);
-
-            for (int i = 1; i < num_segments_; ++i)
-            {
-                const RowVector c7_L = trajectory_.coefficients_.row((i - 1) * 8 + 7);
-                const RowVector c7_R = trajectory_.coefficients_.row(i * 8 + 7);
-                grad.row(i - 1) = 10080.0 * (c7_R - c7_L);
-            }
+            detail::energyWaypointGradient<10080>(trajectory_, grad);
         }
 
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
@@ -3541,9 +3542,7 @@ namespace SplineTrajectory
             adjoint_.template topRows<3>().setZero();
             adjoint_.template bottomRows<3>().setZero();
 
-            for (int knot = 1; knot < num_segments_; ++knot)
-                factors_[knot - 1].forward(adjoint_, knot * kDerivativesPerKnot);
-            backSubstitute(adjoint_);
+            detail::solveWithFactors<kDerivativesPerKnot>(factors_, num_segments_, adjoint_);
         }
 
         /** @brief Add the interpolation constraint's contribution using endpoint identities.
