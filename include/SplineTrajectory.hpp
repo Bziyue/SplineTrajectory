@@ -23,7 +23,7 @@
 */
 
 /** @file SplineTrajectory.hpp
- * @brief Owning piecewise polynomials, independent samplers and specialized minimum-derivative splines. */
+ * @brief Owning piecewise polynomials and independent cubic, quintic and septic splines. */
 
 #ifndef SPLINE_TRAJECTORY_HPP
 #define SPLINE_TRAJECTORY_HPP
@@ -41,6 +41,8 @@
 
 namespace SplineTrajectory
 {
+    // Piecewise polynomials and shared input/output types.
+
     template <typename T>
     using SplineVector = std::vector<T, Eigen::aligned_allocator<T>>;
 
@@ -713,7 +715,7 @@ namespace SplineTrajectory
         /** @brief Publish only finite coefficients; no copy of knots or coefficients is made. */
         void finishSpline()
         {
-            if (!coefficients_.allFinite()) clear();
+            if (!coefficients_.array().isFinite().all()) clear();
             else is_initialized_ = true;
         }
 
@@ -787,6 +789,7 @@ namespace SplineTrajectory
     struct SplineGradients
     {
         using CoefficientMatrix = typename PPolyND<DIM>::CoefficientMatrix;
+        using RowVector = typename PPolyND<DIM>::RowVector;
         CoefficientMatrix inner_points;
         Eigen::VectorXd durations;
         BoundaryGradient<DIM> start, end;
@@ -802,6 +805,36 @@ namespace SplineTrajectory
             inner_points.setZero(); durations.setZero();
             start = {}; end = {};
         }
+
+        /** @brief Accumulate a position partial at an endpoint or interior waypoint.
+         * @param knot Waypoint index in [0, N], with N given by the prepared durations size.
+         * @param partial Physical position partials in the caller's coordinates; borrowed for this call.
+         * @note Requires a prepared N-segment topology and exclusive access to this output.
+         *       The row overload preserves vectorized accumulation without allocating. */
+        void addWaypoint(int knot, const RowVector &partial)
+        {
+            if (knot == 0)
+                start.p += partial.transpose();
+            else if (knot == durations.size())
+                end.p += partial.transpose();
+            else
+                inner_points.row(knot - 1) += partial;
+        }
+
+        /** @brief Accumulate one coordinate of a position partial without forming a vector.
+         * @param knot Waypoint index in [0, N], with N given by the prepared durations size.
+         * @param coordinate Spatial coordinate index in [0, DIM).
+         * @param partial Physical position partial in the caller's coordinates.
+         * @note Requires a prepared N-segment topology and exclusive access to this output. */
+        void addWaypoint(int knot, int coordinate, double partial)
+        {
+            if (knot == 0)
+                start.p(coordinate) += partial;
+            else if (knot == durations.size())
+                end.p(coordinate) += partial;
+            else
+                inner_points(knot - 1, coordinate) += partial;
+        }
     };
 
     namespace detail
@@ -815,10 +848,314 @@ namespace SplineTrajectory
             for (std::size_t i = 0; i < durations.size(); ++i)
                 durations[i] = knots[i + 1] - knots[i];
         }
+
+        /** @brief Validate adjoint inputs and initialize reusable physical gradient storage.
+         * @param polynomial Published spline in the caller's coordinates and seconds; borrowed for this call.
+         * @param coefficient_partials Piece-major partials with respect to ascending physical-time coefficients.
+         * @param duration_partials Direct duration partials at fixed coefficients; borrowed for this call.
+         * @param[out] gradient Total gradient storage; matching allocations are reused.
+         * @param[out] adjoint Construction-prepared knot workspace; cleared without resizing.
+         * @throws std::invalid_argument If the polynomial is invalid or partial shapes do not match.
+         * @note Validates before modifying outputs. Requires exclusive access to gradient and adjoint;
+         *       the knot workspace must already match the polynomial topology. */
+        template <int DIM, int CoefficientCount>
+        inline void prepareAdjoint(const PPolyND<DIM, CoefficientCount> &polynomial,
+                                   const typename PPolyND<DIM>::CoefficientMatrix &coefficient_partials,
+                                   const Eigen::VectorXd &duration_partials,
+                                   SplineGradients<DIM> &gradient,
+                                   typename PPolyND<DIM>::CoefficientMatrix &adjoint)
+        {
+            const int segments = polynomial.numSegments();
+            if (!polynomial.isValid() || coefficient_partials.rows() != segments * CoefficientCount ||
+                duration_partials.size() != segments)
+                throw std::invalid_argument("Adjoint requires a valid spline and matching partial shapes");
+
+            // Preserve direct duration partials while clearing all accumulated contributions.
+            gradient.resetTopology(segments);
+            gradient.setZero();
+            gradient.durations = duration_partials;
+            adjoint.setZero();
+        }
     }
 
+    // Compact knot factors shared by quintic and septic splines.
+
+    namespace detail
+    {
+        /** @brief One 2-by-2 diagonal factor and its coupling to the preceding knot.
+         * @note A = L D L^T. Only the strict lower triangle, reciprocal pivots and coupling
+         *       are stored (7 doubles). The unaligned matrix avoids padding between records. */
+        struct BlockLDLT2
+        {
+            using Block = Eigen::Matrix<double, 2, 2, Eigen::RowMajor | Eigen::DontAlign>;
+            double l10 = 0.0;
+            double inverse_d0 = 0.0;
+            double inverse_d1 = 0.0;
+            Block coupling = Block::Zero();
+
+            /** @brief Eliminate the preceding knot and factor the symmetric Schur block.
+             * @param diagonal Symmetric physical diagonal block; only its lower triangle is read.
+             * @param previous Coupling to the preceding knot in physical derivative coordinates.
+             * @param prior Borrowed preceding factor, or nullptr at the first interior knot;
+             *        it must remain valid for this call and is never retained.
+             * @return True for finite positive pivots; false on numerical breakdown, without regularization. */
+            bool factorize(const Block &diagonal, const Block &previous, const BlockLDLT2 *prior)
+            {
+                double s00 = diagonal(0, 0);
+                double s10 = diagonal(1, 0);
+                double s11 = diagonal(1, 1);
+
+                // Transform the off-diagonal block through the preceding unit-lower factor.
+                if (prior != nullptr)
+                {
+                    const double t00 = previous(0, 0);
+                    const double t01 = previous(0, 1) - t00 * prior->l10;
+                    coupling(0, 0) = t00 * prior->inverse_d0;
+                    coupling(0, 1) = t01 * prior->inverse_d1;
+                    const double t10 = previous(1, 0);
+                    const double t11 = previous(1, 1) - t10 * prior->l10;
+                    coupling(1, 0) = t10 * prior->inverse_d0;
+                    coupling(1, 1) = t11 * prior->inverse_d1;
+
+                    // Form only the lower triangle of the Schur complement.
+                    s00 -= coupling(0, 0) * t00 + coupling(0, 1) * t01;
+                    s10 -= coupling(1, 0) * t00 + coupling(1, 1) * t01;
+                    s11 -= coupling(1, 0) * t10 + coupling(1, 1) * t11;
+                }
+
+                // Factor the small Schur block without an explicit matrix inverse.
+                const double d0 = s00;
+                if (!(d0 > 0.0) || !std::isfinite(d0))
+                    return false;
+                inverse_d0 = 1.0 / d0;
+                l10 = s10 * inverse_d0;
+                const double d1 = s11 - l10 * s10;
+                if (!(d1 > 0.0) || !std::isfinite(d1))
+                    return false;
+                inverse_d1 = 1.0 / d1;
+                return true;
+            }
+
+            /** @brief Apply one forward substitution block in place.
+             * @param[in,out] values Knot-major right-hand sides; preceding rows already hold L^-1 b.
+             * @param row First row of this interior knot; the first interior row is 2.
+             * @note The matrix is exclusively borrowed for this call. Endpoint rows are untouched. */
+            template <typename Matrix>
+            void forward(Matrix &values, int row) const
+            {
+                for (int coordinate = 0; coordinate < values.cols(); ++coordinate)
+                {
+                    double y0 = values(row + 0, coordinate);
+                    double y1 = values(row + 1, coordinate);
+                    if (row > 2)
+                    {
+                        y0 -= coupling(0, 0) * values(row - 2, coordinate) + coupling(0, 1) * values(row - 1, coordinate);
+                        y1 -= coupling(1, 0) * values(row - 2, coordinate) + coupling(1, 1) * values(row - 1, coordinate);
+                    }
+                    y1 -= l10 * y0;
+                    values(row + 0, coordinate) = y0;
+                    values(row + 1, coordinate) = y1;
+                }
+            }
+
+            /** @brief Apply one backward substitution block in place.
+             * @param[in,out] values Forward-substituted rows; following rows already hold the solution.
+             * @param row First row of this interior knot.
+             * @param next Borrowed following factor, or nullptr at the last interior knot;
+             *        valid for this call only, never retained. Endpoint rows are untouched. */
+            template <typename Matrix>
+            void backward(Matrix &values, int row, const BlockLDLT2 *next) const
+            {
+                for (int coordinate = 0; coordinate < values.cols(); ++coordinate)
+                {
+                    double x0 = inverse_d0 * values(row + 0, coordinate);
+                    double x1 = inverse_d1 * values(row + 1, coordinate);
+                    if (next != nullptr)
+                    {
+                        x0 -= next->coupling(0, 0) * values(row + 2, coordinate) + next->coupling(1, 0) * values(row + 3, coordinate);
+                        x1 -= next->coupling(0, 1) * values(row + 2, coordinate) + next->coupling(1, 1) * values(row + 3, coordinate);
+                    }
+                    x0 -= l10 * x1;
+                    values(row + 0, coordinate) = x0;
+                    values(row + 1, coordinate) = x1;
+                }
+            }
+        };
+
+        /** @brief One 3-by-3 diagonal factor and its coupling to the preceding knot.
+         * @note A = L D L^T. Only the strict lower triangle, reciprocal pivots and coupling
+         *       are stored (15 doubles). The unaligned matrix avoids padding between records. */
+        struct BlockLDLT3
+        {
+            using Block = Eigen::Matrix<double, 3, 3, Eigen::RowMajor | Eigen::DontAlign>;
+            double l10 = 0.0;
+            double l20 = 0.0;
+            double l21 = 0.0;
+            double inverse_d0 = 0.0;
+            double inverse_d1 = 0.0;
+            double inverse_d2 = 0.0;
+            Block coupling = Block::Zero();
+
+            /** @brief Eliminate the preceding knot and factor the symmetric Schur block.
+             * @param diagonal Symmetric physical diagonal block; only its lower triangle is read.
+             * @param previous Coupling to the preceding knot in physical derivative coordinates.
+             * @param prior Borrowed preceding factor, or nullptr at the first interior knot;
+             *        it must remain valid for this call and is never retained.
+             * @return True for finite positive pivots; false on numerical breakdown, without regularization. */
+            bool factorize(const Block &diagonal, const Block &previous, const BlockLDLT3 *prior)
+            {
+                double s00 = diagonal(0, 0);
+                double s10 = diagonal(1, 0);
+                double s11 = diagonal(1, 1);
+                double s20 = diagonal(2, 0);
+                double s21 = diagonal(2, 1);
+                double s22 = diagonal(2, 2);
+
+                // Transform the off-diagonal block through the preceding unit-lower factor.
+                if (prior != nullptr)
+                {
+                    const double t00 = previous(0, 0);
+                    const double t01 = previous(0, 1) - t00 * prior->l10;
+                    const double t02 = previous(0, 2) - t00 * prior->l20 - t01 * prior->l21;
+                    coupling(0, 0) = t00 * prior->inverse_d0;
+                    coupling(0, 1) = t01 * prior->inverse_d1;
+                    coupling(0, 2) = t02 * prior->inverse_d2;
+                    const double t10 = previous(1, 0);
+                    const double t11 = previous(1, 1) - t10 * prior->l10;
+                    const double t12 = previous(1, 2) - t10 * prior->l20 - t11 * prior->l21;
+                    coupling(1, 0) = t10 * prior->inverse_d0;
+                    coupling(1, 1) = t11 * prior->inverse_d1;
+                    coupling(1, 2) = t12 * prior->inverse_d2;
+                    const double t20 = previous(2, 0);
+                    const double t21 = previous(2, 1) - t20 * prior->l10;
+                    const double t22 = previous(2, 2) - t20 * prior->l20 - t21 * prior->l21;
+                    coupling(2, 0) = t20 * prior->inverse_d0;
+                    coupling(2, 1) = t21 * prior->inverse_d1;
+                    coupling(2, 2) = t22 * prior->inverse_d2;
+
+                    // Form only the lower triangle of the Schur complement.
+                    s00 -= coupling(0, 0) * t00 + coupling(0, 1) * t01 + coupling(0, 2) * t02;
+                    s10 -= coupling(1, 0) * t00 + coupling(1, 1) * t01 + coupling(1, 2) * t02;
+                    s11 -= coupling(1, 0) * t10 + coupling(1, 1) * t11 + coupling(1, 2) * t12;
+                    s20 -= coupling(2, 0) * t00 + coupling(2, 1) * t01 + coupling(2, 2) * t02;
+                    s21 -= coupling(2, 0) * t10 + coupling(2, 1) * t11 + coupling(2, 2) * t12;
+                    s22 -= coupling(2, 0) * t20 + coupling(2, 1) * t21 + coupling(2, 2) * t22;
+                }
+
+                // Factor the small Schur block without an explicit matrix inverse.
+                const double d0 = s00;
+                if (!(d0 > 0.0) || !std::isfinite(d0))
+                    return false;
+                inverse_d0 = 1.0 / d0;
+                l10 = s10 * inverse_d0;
+                l20 = s20 * inverse_d0;
+                const double d1 = s11 - l10 * s10;
+                if (!(d1 > 0.0) || !std::isfinite(d1))
+                    return false;
+                inverse_d1 = 1.0 / d1;
+                // Reuse the eliminated off-diagonal entry in both remaining factors.
+                const double reduced_s21 = s21 - l20 * s10;
+                l21 = reduced_s21 * inverse_d1;
+                const double d2 = s22 - l20 * s20 - l21 * reduced_s21;
+                if (!(d2 > 0.0) || !std::isfinite(d2))
+                    return false;
+                inverse_d2 = 1.0 / d2;
+                return true;
+            }
+
+            /** @brief Apply one forward substitution block in place.
+             * @param[in,out] values Knot-major right-hand sides; preceding rows already hold L^-1 b.
+             * @param row First row of this interior knot; the first interior row is 3.
+             * @note The matrix is exclusively borrowed for this call. Endpoint rows are untouched. */
+            template <typename Matrix>
+            void forward(Matrix &values, int row) const
+            {
+                for (int coordinate = 0; coordinate < values.cols(); ++coordinate)
+                {
+                    double y0 = values(row + 0, coordinate);
+                    double y1 = values(row + 1, coordinate);
+                    double y2 = values(row + 2, coordinate);
+                    if (row > 3)
+                    {
+                        y0 -= coupling(0, 0) * values(row - 3, coordinate)
+                            + coupling(0, 1) * values(row - 2, coordinate)
+                            + coupling(0, 2) * values(row - 1, coordinate);
+                        y1 -= coupling(1, 0) * values(row - 3, coordinate)
+                            + coupling(1, 1) * values(row - 2, coordinate)
+                            + coupling(1, 2) * values(row - 1, coordinate);
+                        y2 -= coupling(2, 0) * values(row - 3, coordinate)
+                            + coupling(2, 1) * values(row - 2, coordinate)
+                            + coupling(2, 2) * values(row - 1, coordinate);
+                    }
+                    y1 -= l10 * y0;
+                    y2 -= l20 * y0 + l21 * y1;
+                    values(row + 0, coordinate) = y0;
+                    values(row + 1, coordinate) = y1;
+                    values(row + 2, coordinate) = y2;
+                }
+            }
+
+            /** @brief Apply one backward substitution block in place.
+             * @param[in,out] values Forward-substituted rows; following rows already hold the solution.
+             * @param row First row of this interior knot.
+             * @param next Borrowed following factor, or nullptr at the last interior knot;
+             *        valid for this call only, never retained. Endpoint rows are untouched. */
+            template <typename Matrix>
+            void backward(Matrix &values, int row, const BlockLDLT3 *next) const
+            {
+                for (int coordinate = 0; coordinate < values.cols(); ++coordinate)
+                {
+                    double x0 = inverse_d0 * values(row + 0, coordinate);
+                    double x1 = inverse_d1 * values(row + 1, coordinate);
+                    double x2 = inverse_d2 * values(row + 2, coordinate);
+                    if (next != nullptr)
+                    {
+                        x0 -= next->coupling(0, 0) * values(row + 3, coordinate)
+                            + next->coupling(1, 0) * values(row + 4, coordinate)
+                            + next->coupling(2, 0) * values(row + 5, coordinate);
+                        x1 -= next->coupling(0, 1) * values(row + 3, coordinate)
+                            + next->coupling(1, 1) * values(row + 4, coordinate)
+                            + next->coupling(2, 1) * values(row + 5, coordinate);
+                        x2 -= next->coupling(0, 2) * values(row + 3, coordinate)
+                            + next->coupling(1, 2) * values(row + 4, coordinate)
+                            + next->coupling(2, 2) * values(row + 5, coordinate);
+                    }
+                    x1 -= l21 * x2;
+                    x0 -= l10 * x1 + l20 * x2;
+                    values(row + 0, coordinate) = x0;
+                    values(row + 1, coordinate) = x1;
+                    values(row + 2, coordinate) = x2;
+                }
+            }
+        };
+
+        static_assert(sizeof(BlockLDLT2) == 7 * sizeof(double),
+                      "The quintic factor must not contain alignment padding");
+        static_assert(sizeof(BlockLDLT3) == 15 * sizeof(double),
+                      "The septic factor must not contain alignment padding");
+
+        /** @brief Complete a block solve using cached factors, leaving clamped endpoints untouched.
+         * @tparam DerivativesPerKnot Compile-time block size of the supplied factors.
+         * @param factors The N-1 interior-knot factors from construction; borrowed for this call.
+         * @param segments Positive segment count N associated with factors and values.
+         * @param[in,out] values Forward-substituted physical derivative rows; receives the solution.
+         * @note Requires matching factor and workspace topology and exclusive access to values.
+         *       Descending knot order makes each following solution available without another buffer. */
+        template <int DerivativesPerKnot, typename Factor, typename Matrix>
+        inline void backSubstitute(const std::vector<Factor> &factors, int segments, Matrix &values)
+        {
+            for (int knot = segments - 1; knot > 0; --knot)
+            {
+                const Factor *next = knot + 1 < segments ? &factors[knot] : nullptr;
+                factors[knot - 1].backward(values, knot * DerivativesPerKnot, next);
+            }
+        }
+    } // namespace detail
+
+    // Cubic splines: minimum acceleration.
+
     /** @brief Minimum-acceleration interpolation with a specialized O(N) scalar tridiagonal solver.
-     * @note Minimize the squared 2-th physical derivative integral with fixed waypoint
+     * @note Minimize the squared second physical derivative integral with fixed waypoint
      *       positions and endpoint derivatives of orders 1 through 1. Coordinates
      *       are caller-defined; durations use seconds. Polynomial coefficients and knots
      *       have one owner. Updates and backward() require exclusive access; const energy
@@ -847,17 +1184,18 @@ namespace SplineTrajectory
     private:
         std::vector<double> time_segments_;
         CoefficientMatrix spatial_points_;
-        BoundaryConditions<DIM> boundary_velocities_;
+        BoundaryConditions<DIM> boundary_;
         int num_segments_;
         double start_time_;
         Polynomial trajectory_;
 
-        CoefficientMatrix internal_derivatives_;
-        CoefficientMatrix point_diffs_;
-        CoefficientMatrix scaled_point_diffs_;
-        Eigen::VectorXd cached_c_prime_;
-        Eigen::VectorXd cached_inv_denoms_;
-        CoefficientMatrix ws_lambda_;
+        // Physical velocities at all knots; only the interior rows are solved.
+        CoefficientMatrix derivatives_;
+        CoefficientMatrix segment_slopes_;
+        // Normalized upper entries and physical inverse pivots are reused by the adjoint.
+        Eigen::VectorXd upper_multipliers_;
+        Eigen::VectorXd inverse_pivots_;
+        CoefficientMatrix adjoint_;
 
         struct TimePowers
         {
@@ -871,97 +1209,126 @@ namespace SplineTrajectory
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+        /** @brief Construct an empty, invalid spline with independent storage. */
         CubicSplineND() : num_segments_(0), start_time_(0.0) {}
 
         /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
+         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         CubicSplineND(const std::vector<double> &t_points,
                       const CoefficientMatrix &spatial_points,
-                      const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : spatial_points_(spatial_points), boundary_velocities_(boundary_velocities)
+                      const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
+            : spatial_points_(spatial_points), boundary_(boundary)
         {
             detail::durationsFromKnots(t_points, time_segments_, start_time_);
             updateSplineInternal();
         }
 
         /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
+         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
+         * @param start_time Absolute time origin in seconds.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         CubicSplineND(const std::vector<double> &time_segments,
                       const CoefficientMatrix &spatial_points,
                       double start_time,
-                      const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
-            : time_segments_(time_segments), spatial_points_(spatial_points), boundary_velocities_(boundary_velocities),
+                      const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
+            : time_segments_(time_segments), spatial_points_(spatial_points), boundary_(boundary),
               start_time_(start_time)
         {
             updateSplineInternal();
         }
 
         /** @brief Replace interpolation data using absolute knots; invalid input clears the polynomial.
+         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views. */
         void update(const std::vector<double> &t_points,
                     const CoefficientMatrix &spatial_points,
-                    const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
+                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
             spatial_points_ = spatial_points;
-            boundary_velocities_ = boundary_velocities;
+            boundary_ = boundary;
             detail::durationsFromKnots(t_points, time_segments_, start_time_);
             updateSplineInternal();
         }
 
         /** @brief Replace interpolation data using positive durations and a common time origin.
+         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
+         * @param start_time Absolute time origin in seconds.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
          *       Invalid shapes, times, boundary data or numeric output clear the polynomial. */
         void update(const std::vector<double> &time_segments,
                     const CoefficientMatrix &spatial_points,
                     double start_time,
-                    const BoundaryConditions<DIM> &boundary_velocities = BoundaryConditions<DIM>())
+                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
             time_segments_ = time_segments;
             spatial_points_ = spatial_points;
-            boundary_velocities_ = boundary_velocities;
+            boundary_ = boundary;
             start_time_ = start_time;
             updateSplineInternal();
         }
 
+        /** @brief Inspect the published polynomial. @return True only for a valid finite trajectory. */
         bool isValid() const { return trajectory_.isValid(); }
+        /** @brief Inspect spatial dimension. @return Compile-time DIM. */
         int dimension() const { return DIM; }
 
+        /** @brief Inspect the absolute start time. @return Seconds, or zero for an invalid spline. */
         double startTime() const
         {
             return trajectory_.startTime();
         }
 
+        /** @brief Inspect the absolute end time. @return Seconds, or zero for an invalid spline. */
         double endTime() const
         {
             return trajectory_.endTime();
         }
 
+        /** @brief Inspect total duration. @return Seconds, or zero for an invalid spline. */
         double duration() const
         {
             return trajectory_.duration();
         }
 
+        /** @brief Inspect input topology. @return Number of stored waypoints. */
         size_t numPoints() const
         {
             return static_cast<size_t>(spatial_points_.rows());
         }
 
+        /** @brief Inspect the polynomial topology. @return Segment count, or zero when invalid. */
         int numSegments() const
         {
             return trajectory_.numSegments();
         }
 
+        /** @brief Borrow physical waypoints. @return Storage valid until update, assignment or move. */
         const CoefficientMatrix &waypoints() const { return spatial_points_; }
+        /** @brief Borrow segment durations in seconds. @return Storage valid until the next mutation. */
         const std::vector<double> &durations() const { return time_segments_; }
+        /** @brief Borrow absolute knots in seconds. @return Storage valid until the next mutation. */
         const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
-        const BoundaryConditions<DIM> &boundary() const { return boundary_velocities_; }
+        /** @brief Borrow physical boundary data. @return Storage valid until the next mutation. */
+        const BoundaryConditions<DIM> &boundary() const { return boundary_; }
 
-        /** @brief Borrow the polynomial until the next update, assignment or move. */
+        /** @brief Borrow the polynomial. @return View valid until the next update, assignment or move. */
         const Polynomial &polynomial() const & { return trajectory_; }
+        /** @brief Prevent polynomial borrowing from a temporary spline. @return No callable rvalue overload. */
         const Polynomial &polynomial() const && = delete;
-        /** @brief Make an independent owning snapshot, allocating its data. */
+        /** @brief Make an independent owning snapshot. @return Polynomial with its own storage and lifetime. */
         Polynomial copyPolynomial() const { return trajectory_; }
 
+        /** @brief Evaluate monomial bases in local physical time, through crackle.
+         * @param t Local time in seconds.
+         * @param[out] b_pos Position basis. @param[out] b_vel Velocity basis.
+         * @param[out] b_acc Acceleration basis. @param[out] b_jerk Jerk basis.
+         * @param[out] b_snap Snap basis. @param[out] b_crackle Crackle basis.
+         * @note Derivatives above this polynomial's degree are zero. No shared state is touched. */
         static inline void computeBasisFunctions(double t,
                                                  Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
                                                  Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
@@ -980,7 +1347,8 @@ namespace SplineTrajectory
             b_crackle.setZero();
         }
 
-        /** @brief Integral of the squared minimum derivative; returns NaN for an invalid spline. */
+        /** @brief Integrate the squared minimum physical derivative.
+         * @return Energy in physical units; NaN when the spline is invalid. */
         double energy() const
         {
             if (!trajectory_.isValid())
@@ -1034,6 +1402,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
         CoefficientMatrix energyCoefficientPartials() const
         {
             CoefficientMatrix gdC;
@@ -1066,6 +1435,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
         Eigen::VectorXd energyDurationPartials() const
         {
             Eigen::VectorXd gdT;
@@ -1076,7 +1446,7 @@ namespace SplineTrajectory
         /**
          * @brief Compute full gradient of energy w.r.t. segment durations.
          *
-         * @return VectorXd Full gradient dE/dT, size num_segments.
+         * @param[out] grad Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
         void energyDurationGradient(Eigen::VectorXd &grad) const
@@ -1097,6 +1467,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
         Eigen::VectorXd energyDurationGradient() const
         {
             Eigen::VectorXd grad;
@@ -1106,7 +1477,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @return CoefficientMatrix Full gradient dE/dP for inner points only.
+         * @param[out] grad Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
         void energyWaypointGradient(CoefficientMatrix &grad) const
@@ -1129,6 +1500,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
         CoefficientMatrix energyWaypointGradient() const
         {
             CoefficientMatrix grad;
@@ -1208,12 +1580,11 @@ namespace SplineTrajectory
          *       - start/end: gradients w.r.t. boundary states (position, velocity)
          */
         Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
+                           const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
 
-            backwardImpl(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.durations, res.start, res.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes, res);
 
             return res;
         }
@@ -1226,152 +1597,69 @@ namespace SplineTrajectory
          * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
         void backward(const CoefficientMatrix &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           Gradients &grads)
+                      const Eigen::VectorXd &partialGradByTimes,
+                      Gradients &grads)
         {
-            backwardImpl(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.durations, grads.start, grads.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes, grads);
         }
 
     private:
-        /** @brief Pull back the coefficient map through the cached continuity solve.
-         * @note With A(T)q = b(T,P,boundary), solve A^T lambda = dL/dq and accumulate
-         *       lambda^T (db/dtheta - dA/dtheta*q) plus direct coefficient-map partials.
-         *       Input duration partials hold local power coefficients fixed. Outputs are
-         *       overwritten; correctly sized output and adjoint storage are reused. */
-        void backwardImpl(const CoefficientMatrix &partialGradByCoeffs,
-                                   const Eigen::VectorXd &partialGradByTimes,
-                                   CoefficientMatrix &innerPointsGrad,
-                                   Eigen::VectorXd &gradByTimes,
-                                   BoundaryGradient &startGrads,
-                                   BoundaryGradient &endGrads)
+        // Construction: validate, prepare caches, solve knot derivatives, publish coefficients.
+        /** @brief Rebuild from physical data; failed construction clears the published polynomial.
+         * @note Requires exclusive access. Storage is reused when the topology is unchanged. */
+        void updateSplineInternal()
         {
-            const int n = num_segments_;
-            const CoefficientMatrix &M = internal_derivatives_;
-
-            if (!trajectory_.isValid() || partialGradByCoeffs.rows() != n * kCoefficientCount ||
-                partialGradByTimes.size() != n)
-                throw std::invalid_argument("Adjoint requires a valid spline and matching partial shapes");
-            gradByTimes = partialGradByTimes;
-            startGrads = BoundaryGradient();
-            endGrads = BoundaryGradient();
-
-            if (n > 1)
-            {
-                innerPointsGrad.resize(n - 1, DIM);
-                innerPointsGrad.setZero();
-            }
-            else
-            {
-                innerPointsGrad.resize(0, DIM);
-            }
-
-            auto add_point_grad = [&](int idx, const RowVector &grad)
-            {
-                if (idx == 0)
-                {
-                    startGrads.p += grad.transpose();
-                }
-                else if (idx == n)
-                {
-                    endGrads.p += grad.transpose();
-                }
-                else
-                {
-                    innerPointsGrad.row(idx - 1) += grad;
-                }
-            };
-
-            ws_lambda_.resize(n + 1, DIM);
-            ws_lambda_.setZero();
-
-            for (int i = 0; i < n; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const double h_i = tp.h;
-                const double h_inv = tp.h_inv;
-                const double h2_inv = tp.h2_inv;
-
-                const RowVector g_c0 = partialGradByCoeffs.row(i * 4 + 0);
-                const RowVector g_c1 = partialGradByCoeffs.row(i * 4 + 1);
-                const RowVector g_c2 = partialGradByCoeffs.row(i * 4 + 2);
-                const RowVector g_c3 = partialGradByCoeffs.row(i * 4 + 3);
-
-                const RowVector grad_p_i = g_c0 - g_c1 * h_inv;
-                const RowVector grad_p_i1 = g_c1 * h_inv;
-                add_point_grad(i, grad_p_i);
-                add_point_grad(i + 1, grad_p_i1);
-
-                ws_lambda_.row(i) -= g_c1 * (h_i / 3.0);
-                ws_lambda_.row(i + 1) -= g_c1 * (h_i / 6.0);
-                ws_lambda_.row(i) += g_c2 * 0.5;
-                ws_lambda_.row(i) -= g_c3 * (h_inv / 6.0);
-                ws_lambda_.row(i + 1) += g_c3 * (h_inv / 6.0);
-
-                const RowVector dP_row = point_diffs_.row(i);
-                const RowVector term_dC1_dh = -dP_row * h2_inv - (2.0 * M.row(i) + M.row(i + 1)) / 6.0;
-                const RowVector term_dC3_dh = -(M.row(i + 1) - M.row(i)) * (h2_inv / 6.0);
-
-                gradByTimes(i) += g_c1.dot(term_dC1_dh) + g_c3.dot(term_dC3_dh);
-            }
-
-            solveWithCachedLU(ws_lambda_);
-
-            for (int k = 0; k < n; ++k)
-            {
-                const auto &tp = time_powers_[k];
-                double h2_inv = tp.h2_inv;
-                const RowVector dP_row = point_diffs_.row(k);
-
-                const RowVector common_term = ws_lambda_.row(k) - ws_lambda_.row(k + 1);
-
-                const RowVector grad_R_P = 6.0 * tp.h_inv * common_term;
-                add_point_grad(k + 1, grad_R_P);
-                add_point_grad(k, -grad_R_P);
-
-                const RowVector grad_R_h = -6.0 * dP_row * h2_inv;
-                gradByTimes(k) += common_term.dot(grad_R_h);
-
-                const RowVector M_k = M.row(k);
-                const RowVector M_k1 = M.row(k + 1);
-
-                const RowVector term_k = 2.0 * M_k + M_k1;
-                const RowVector term_k1 = M_k + 2.0 * M_k1;
-
-                gradByTimes(k) -= ws_lambda_.row(k).dot(term_k);
-                gradByTimes(k) -= ws_lambda_.row(k + 1).dot(term_k1);
-            }
-            startGrads.v = -6.0 * ws_lambda_.row(0).transpose();
-
-            endGrads.v = 6.0 * ws_lambda_.row(n).transpose();
-        }
-
-        /**
-         * @brief Rebuild the interpolating spline and expose the generated polynomial's validity.
-         * @note Requires validated input shapes and exclusive ownership; finite inputs can still produce
-         *       invalid coefficients or time knots, in which case isValid() becomes false.
-         */
-        inline void updateSplineInternal()
-        {
+            // Validate before allocating or modifying the numerical workspaces.
             if (!trajectory_.template beginSpline<kMinDerivativeOrder>(
-                    time_segments_, spatial_points_, boundary_velocities_, start_time_, kCoefficientCount))
-            { num_segments_ = 0; return; }
+                    time_segments_, spatial_points_, boundary_, start_time_, kCoefficientCount))
+            {
+                num_segments_ = 0;
+                return;
+            }
             num_segments_ = static_cast<int>(time_segments_.size());
-            // Prepare adjoint storage with the topology so the first pullback does not allocate.
-            ws_lambda_.resize(num_segments_ + 1, DIM);
+
+            prepareWorkspace();
             precomputeTimePowers();
-            precomputePointDiffs();
-            solveSplineInPlace();
+            precomputeSlopes();
+
+            // Solve the free knot velocities, then publish finite polynomial coefficients.
+            solveInternalDerivatives();
+            writeCoefficients();
             trajectory_.finishSpline();
-            // A finite input can still produce invalid coefficients or collapsed breakpoints.
         }
 
+        /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
+         * @note Requires validated input. Same-topology updates skip all cache resizing;
+         *       the first adjoint reuses storage prepared during construction. */
+        void prepareWorkspace()
+        {
+            if (time_powers_.size() != time_segments_.size())
+                resizeWorkspace();
+
+            // Boundary velocities change independently of the segment count.
+            derivatives_.row(0) = boundary_.start_velocity.transpose();
+            derivatives_.row(num_segments_) = boundary_.end_velocity.transpose();
+        }
+
+        /** @brief Resize primal, adjoint and factor caches after a segment-count change.
+         * @note Duration-cache size records the prepared topology and is committed last.
+         *       Allocation order is preserved; same-topology updates skip this function. */
+        void resizeWorkspace()
+        {
+            adjoint_.resize(num_segments_ + 1, DIM);
+            // Reserve in the original allocation order; publish the size after all caches are ready.
+            time_powers_.reserve(num_segments_);
+            segment_slopes_.resize(num_segments_, DIM);
+            derivatives_.resize(num_segments_ + 1, DIM);
+            upper_multipliers_.resize(num_segments_ - 1);
+            inverse_pivots_.resize(num_segments_ - 1);
+            time_powers_.resize(num_segments_);
+        }
+
+        /** @brief Cache physical duration reciprocals for interpolation and adjoints. */
         void precomputeTimePowers()
         {
-            int n = static_cast<int>(time_segments_.size());
-            time_powers_.resize(n);
-
-            for (int i = 0; i < n; ++i)
+            for (int i = 0; i < num_segments_; ++i)
             {
                 double h = time_segments_[i];
                 double iv = 1.0 / h;
@@ -1385,146 +1673,170 @@ namespace SplineTrajectory
             }
         }
 
-        void precomputePointDiffs()
+        /** @brief Cache segment slopes in physical coordinate units per second. */
+        void precomputeSlopes()
         {
-            point_diffs_.resize(num_segments_, DIM);
+            for (int i = 0; i < num_segments_; ++i)
+                segment_slopes_.row(i) =
+                    (spatial_points_.row(i + 1) - spatial_points_.row(i)) * time_powers_[i].h_inv;
+        }
+
+        /** @brief Solve the symmetric minimum-acceleration system for free interior velocities.
+         * @note Endpoint velocities are clamped. A single segment needs no linear solve.
+         *       Dividing each row by its upper coefficient removes a multiplication from
+         *       the scalar elimination dependency chain; cached pivots retain physical units. */
+        void solveInternalDerivatives()
+        {
+            // Half the energy has Hessian diagonal 4/T_left + 4/T_right and upper 2/T_right.
+            for (int knot = 1; knot < num_segments_; ++knot)
+            {
+                const double duration_ratio = time_powers_[knot].h * time_powers_[knot - 1].h_inv;
+                const double diagonal = 2.0 * (duration_ratio + 1.0);
+                const double previous_upper = knot > 1 ? upper_multipliers_(knot - 2) : 0.0;
+                const double inverse = 1.0 / (diagonal - duration_ratio * previous_upper);
+                upper_multipliers_(knot - 1) = inverse;
+                inverse_pivots_(knot - 1) = (0.5 * time_powers_[knot].h) * inverse;
+
+                for (int coordinate = 0; coordinate < DIM; ++coordinate)
+                {
+                    double rhs = 3.0 * (duration_ratio * segment_slopes_(knot - 1, coordinate) +
+                                          segment_slopes_(knot, coordinate));
+                    // The preceding row is either clamped or already forward-substituted.
+                    rhs -= duration_ratio * derivatives_(knot - 1, coordinate);
+                    if (knot + 1 == num_segments_)
+                        rhs -= derivatives_(num_segments_, coordinate);
+                    derivatives_(knot, coordinate) = inverse * rhs;
+                }
+            }
+            backSubstitute(derivatives_);
+        }
+
+        /** @brief Complete a primal or adjoint solve without changing the clamped endpoints.
+         * @param[in,out] values Forward-substituted knot rows; receives the physical solution. */
+        void backSubstitute(CoefficientMatrix &values) const
+        {
+            // The final boundary contribution was already moved to the RHS.
+            for (int knot = num_segments_ - 2; knot > 0; --knot)
+                values.row(knot) -= upper_multipliers_(knot - 1) * values.row(knot + 1);
+        }
+
+        /** @brief Generate physical cubic coefficients from endpoint positions and velocities. */
+        void writeCoefficients()
+        {
             for (int i = 0; i < num_segments_; ++i)
             {
-                point_diffs_.row(i) = spatial_points_.row(i + 1) - spatial_points_.row(i);
+                const auto &tp = time_powers_[i];
+                trajectory_.coefficients_.row(i * 4) = spatial_points_.row(i);
+                trajectory_.coefficients_.row(i * 4 + 1) = derivatives_.row(i);
+                trajectory_.coefficients_.row(i * 4 + 2) = tp.h_inv *
+                    (3.0 * segment_slopes_.row(i) - 2.0 * derivatives_.row(i) - derivatives_.row(i + 1));
+                trajectory_.coefficients_.row(i * 4 + 3) = tp.h2_inv *
+                    (-2.0 * segment_slopes_.row(i) + derivatives_.row(i) + derivatives_.row(i + 1));
             }
         }
 
-        void solveSplineInPlace()
+        // Adjoint: pull back coefficients, reuse factors, accumulate physical gradients.
+        /** @brief Pull back the Hermite coefficient map through the cached velocity solve.
+         * @note With A(T)q = b(T,P,boundary), solve A^T lambda = dL/dq and accumulate
+         *       lambda^T (db/dtheta - dA/dtheta*q) plus direct coefficient-map partials.
+         *       Input duration partials hold local power coefficients fixed. Outputs are
+         *       overwritten; correctly sized output and adjoint storage are reused.
+         * @param coefficient_partials Physical coefficient partials, in piece-major ascending order.
+         * @param duration_partials Direct duration partials holding coefficients fixed.
+         * @param[out] gradient Overwritten total gradients in the caller's coordinates. */
+        void backwardImpl(const CoefficientMatrix &coefficient_partials,
+                          const Eigen::VectorXd &duration_partials,
+                          Gradients &gradient)
         {
-            const int n = num_segments_;
+            detail::prepareAdjoint(trajectory_, coefficient_partials, duration_partials, gradient, adjoint_);
 
-            scaled_point_diffs_.resize(n, DIM);
-            for (int i = 0; i < n; ++i)
-            {
-                scaled_point_diffs_.row(i) =
-                    point_diffs_.row(i) * time_powers_[i].h_inv;
-            }
+            // Local Hermite map, cached velocity solve, then endpoint corrections.
+            pullbackCoefficients(coefficient_partials, gradient);
+            solveAdjoint(gradient);
+            // A fully clamped segment has no free knot derivatives to correct.
+            if (num_segments_ > 1)
+                accumulateAdjoint(gradient);
+        }
 
-            internal_derivatives_.resize(n + 1, DIM);
-            CoefficientMatrix &M = internal_derivatives_;
-
-            if (n >= 2)
-            {
-                M.block(1, 0, n - 1, DIM) =
-                    6.0 * (scaled_point_diffs_.bottomRows(n - 1) -
-                           scaled_point_diffs_.topRows(n - 1));
-            }
-            M.row(0) =
-                6.0 * (scaled_point_diffs_.row(0) -
-                       boundary_velocities_.start_velocity.transpose());
-            M.row(n) =
-                6.0 * (boundary_velocities_.end_velocity.transpose() -
-                       scaled_point_diffs_.row(n - 1));
-
-            computeLUAndSolve(M);
-
-
-            for (int i = 0; i < n; ++i)
+        /** @brief Pull back the cubic Hermite map at fixed physical knot velocities.
+         * @param coefficient_partials Piece-major physical coefficient partials, borrowed for this call.
+         * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives velocity seeds. */
+        void pullbackCoefficients(const CoefficientMatrix &coefficient_partials, Gradients &gradient)
+        {
+            for (int i = 0; i < num_segments_; ++i)
             {
                 const auto &tp = time_powers_[i];
-                double h_i = tp.h;
-                double h_inv = tp.h_inv;
+                const RowVector grad_c2 = coefficient_partials.row(i * 4 + 2);
+                const RowVector grad_c3 = coefficient_partials.row(i * 4 + 3);
 
-                trajectory_.coefficients_.row(i * 4 + 0) = spatial_points_.row(i);
+                const RowVector point_partial = (3.0 * tp.h2_inv) * grad_c2 - (2.0 * tp.h3_inv) * grad_c3;
+                gradient.addWaypoint(i, coefficient_partials.row(i * 4) - point_partial);
+                gradient.addWaypoint(i + 1, point_partial);
 
-                trajectory_.coefficients_.row(i * 4 + 1) =
-                    scaled_point_diffs_.row(i) -
-                    (h_i / 6.0) *
-                        (2.0 * M.row(i) + M.row(i + 1));
+                const RowVector left_partial = (-2.0 * tp.h_inv) * grad_c2 + tp.h2_inv * grad_c3;
+                const RowVector right_partial = -tp.h_inv * grad_c2 + tp.h2_inv * grad_c3;
+                adjoint_.row(i) += coefficient_partials.row(i * 4 + 1) + left_partial;
+                adjoint_.row(i + 1) += right_partial;
 
-                trajectory_.coefficients_.row(i * 4 + 2) = M.row(i) * 0.5;
-
-                trajectory_.coefficients_.row(i * 4 + 3) =
-                    (M.row(i + 1) - M.row(i)) *
-                    (h_inv / 6.0);
+                // Homogeneity accounts for coefficient powers and the T-scaled endpoint velocities.
+                const double coefficient_scaling =
+                    2.0 * grad_c2.dot(trajectory_.coefficients_.row(i * 4 + 2)) +
+                    3.0 * grad_c3.dot(trajectory_.coefficients_.row(i * 4 + 3));
+                const double velocity_scaling = left_partial.dot(derivatives_.row(i)) +
+                                                right_partial.dot(derivatives_.row(i + 1));
+                gradient.durations(i) += tp.h_inv * (velocity_scaling - coefficient_scaling);
             }
         }
 
-        template <typename MatType>
-        void computeLUAndSolve(MatType &M)
+        /** @brief Preserve clamped velocity seeds and reuse the symmetric primal factorization.
+         * @param[in,out] gradient Receives direct endpoint velocity gradients.
+         * @note Only interior velocities are free; zero endpoint adjoints enforce those constraints. */
+        void solveAdjoint(Gradients &gradient)
         {
-            const int n_seg = num_segments_;
-            const int n_mat = n_seg + 1;
+            gradient.start.v = adjoint_.row(0).transpose();
+            gradient.end.v = adjoint_.row(num_segments_).transpose();
+            adjoint_.row(0).setZero();
+            adjoint_.row(num_segments_).setZero();
 
-            cached_c_prime_.resize(n_mat - 1);
-            cached_inv_denoms_.resize(n_mat);
-
-            double main_0 = 2.0 * time_powers_[0].h;
-            double inv = 1.0 / main_0;
-            cached_inv_denoms_(0) = inv;
-
-            double upper_0 = time_powers_[0].h;
-            cached_c_prime_(0) = upper_0 * inv;
-            M.row(0) *= inv;
-
-            for (int i = 1; i < n_mat - 1; ++i)
+            for (int knot = 1; knot < num_segments_; ++knot)
             {
-                double h_prev = time_powers_[i - 1].h;
-                double h_curr = time_powers_[i].h;
-
-                double main_i = 2.0 * (h_prev + h_curr);
-                double lower_prev = h_prev;
-                double upper_i = h_curr;
-
-                double denom = main_i - lower_prev * cached_c_prime_(i - 1);
-                double inv_d = 1.0 / denom;
-
-                cached_inv_denoms_(i) = inv_d;
-                cached_c_prime_(i) = upper_i * inv_d;
-
-                M.row(i).noalias() -= lower_prev * M.row(i - 1);
-                M.row(i) *= inv_d;
+                adjoint_.row(knot) -= (2.0 * time_powers_[knot - 1].h_inv) * adjoint_.row(knot - 1);
+                adjoint_.row(knot) *= inverse_pivots_(knot - 1);
             }
-
-            if (n_mat >= 2)
-            {
-                int i = n_mat - 1;
-                double h_last = time_powers_[n_seg - 1].h;
-                double main_last = 2.0 * h_last;
-                double lower_prev = h_last;
-
-                double denom = main_last - lower_prev * cached_c_prime_(i - 1);
-                double inv_d = 1.0 / denom;
-                cached_inv_denoms_(i) = inv_d;
-
-                M.row(i).noalias() -= lower_prev * M.row(i - 1);
-                M.row(i) *= inv_d;
-            }
-
-            for (int i = n_mat - 2; i >= 0; --i)
-            {
-                M.row(i).noalias() -= cached_c_prime_(i) * M.row(i + 1);
-            }
+            backSubstitute(adjoint_);
         }
 
-        template <typename MatType>
-        void solveWithCachedLU(MatType &X)
+        /** @brief Add cubic adjoint endpoint forces and the polarized Hamiltonian time correction.
+         * @param[in,out] gradient Total physical point, time and clamped velocity gradients. */
+        void accumulateAdjoint(Gradients &gradient) const
         {
-            const int n = static_cast<int>(cached_inv_denoms_.size());
-
-            X.row(0) *= cached_inv_denoms_(0);
-
-            for (int i = 1; i < n; ++i)
+            for (int i = 0; i < num_segments_; ++i)
             {
-                X.row(i).noalias() -= time_powers_[i - 1].h * X.row(i - 1);
-                X.row(i) *= cached_inv_denoms_(i);
-            }
+                const auto &tp = time_powers_[i];
+                // The adjoint has zero positions and the solved knot velocity adjoints.
+                const RowVector lambda_c2 = -tp.h_inv * (2.0 * adjoint_.row(i) + adjoint_.row(i + 1));
+                const RowVector lambda_c3 = tp.h2_inv * (adjoint_.row(i) + adjoint_.row(i + 1));
+                const RowVector point_partial = -6.0 * lambda_c3;
+                gradient.addWaypoint(i, point_partial);
+                gradient.addWaypoint(i + 1, -point_partial);
 
-            for (int i = n - 2; i >= 0; --i)
-            {
-                X.row(i).noalias() -= cached_c_prime_(i) * X.row(i + 1);
+                gradient.durations(i) +=
+                    4.0 * trajectory_.coefficients_.row(i * 4 + 2).dot(lambda_c2) -
+                    6.0 * adjoint_.row(i).dot(trajectory_.coefficients_.row(i * 4 + 3)) -
+                    6.0 * derivatives_.row(i).dot(lambda_c3);
+
+                if (i == 0)
+                    gradient.start.v += 2.0 * lambda_c2.transpose();
+                if (i + 1 == num_segments_)
+                    gradient.end.v -= (2.0 * lambda_c2 + (6.0 * tp.h) * lambda_c3).transpose();
             }
         }
-
     };
 
+    // Quintic splines: minimum jerk.
+
     /** @brief Minimum-jerk interpolation with a specialized O(N) 2-by-2 block tridiagonal solver.
-     * @note Minimize the squared 3-th physical derivative integral with fixed waypoint
+     * @note Minimize the squared third physical derivative integral with fixed waypoint
      *       positions and endpoint derivatives of orders 1 through 2. Coordinates
      *       are caller-defined; durations use seconds. Polynomial coefficients and knots
      *       have one owner. Updates and backward() require exclusive access; const energy
@@ -1555,7 +1867,6 @@ namespace SplineTrajectory
         double start_time_{0.0};
 
         CoefficientMatrix spatial_points_;
-        CoefficientMatrix point_diffs_;
 
         BoundaryConditions<DIM> boundary_;
 
@@ -1563,13 +1874,13 @@ namespace SplineTrajectory
 
         Polynomial trajectory_;
 
-        using BlockMatrix2x2Storage = Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor>;
-        BlockMatrix2x2Storage D_inv_cache_;
-        BlockMatrix2x2Storage U_blocks_cache_;
-        BlockMatrix2x2Storage L_blocks_cache_;
-        BlockMatrix2x2Storage D_inv_T_mul_L_next_T_cache_;
-        CoefficientMatrix internal_vel_;
-        CoefficientMatrix internal_acc_;
+        // Knot-major rows: each knot's physical derivatives are adjacent in memory.
+        static constexpr int kDerivativesPerKnot = 2;
+        using Factor = detail::BlockLDLT2;
+        using Block = typename Factor::Block;
+        std::vector<Factor> factors_;
+        CoefficientMatrix derivatives_;
+        CoefficientMatrix adjoint_;
 
         struct TimePowers
         {
@@ -1579,43 +1890,18 @@ namespace SplineTrajectory
             double h3_inv;
             double h4_inv;
             double h5_inv;
-            double h6_inv;
         };
-
         std::vector<TimePowers> time_powers_;
-        CoefficientMatrix ws_rhs_mod_;
-        CoefficientMatrix ws_solution_;
-        CoefficientMatrix ws_lambda_;
-        Eigen::Matrix<double, Eigen::Dynamic, 2 * DIM, Eigen::RowMajor> ws_gd_internal_;
-
-    private:
-        /**
-         * @brief Rebuild the interpolating spline and expose the generated polynomial's validity.
-         * @note Requires validated input shapes and exclusive ownership; finite inputs can still produce
-         *       invalid coefficients or time knots, in which case isValid() becomes false.
-         */
-        void updateSplineInternal()
-        {
-            if (!trajectory_.template beginSpline<kMinDerivativeOrder>(
-                    time_segments_, spatial_points_, boundary_, start_time_, kCoefficientCount))
-            { num_segments_ = 0; return; }
-            num_segments_ = static_cast<int>(time_segments_.size());
-            // Prepare adjoint storage with the topology so the first pullback does not allocate.
-            ws_lambda_.resize(std::max(0, num_segments_ - 1) * 2, DIM);
-            ws_gd_internal_.resize(num_segments_ + 1, 2 * DIM);
-            precomputeTimePowers();
-            precomputePointDiffs();
-            solveQuinticInPlace();
-            trajectory_.finishSpline();
-            // A finite input can still produce invalid coefficients or collapsed breakpoints.
-        }
 
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+        /** @brief Construct an empty, invalid spline with independent storage. */
         QuinticSplineND() = default;
 
         /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
+         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         QuinticSplineND(const std::vector<double> &t_points,
                         const CoefficientMatrix &spatial_points,
@@ -1628,6 +1914,9 @@ namespace SplineTrajectory
         }
 
         /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
+         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
+         * @param start_time Absolute time origin in seconds.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         QuinticSplineND(const std::vector<double> &time_segments,
                         const CoefficientMatrix &spatial_points,
@@ -1642,6 +1931,8 @@ namespace SplineTrajectory
         }
 
         /** @brief Replace interpolation data using absolute knots; invalid input clears the polynomial.
+         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views. */
         void update(const std::vector<double> &t_points,
                     const CoefficientMatrix &spatial_points,
@@ -1654,6 +1945,9 @@ namespace SplineTrajectory
         }
 
         /** @brief Replace interpolation data using positive durations and a common time origin.
+         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
+         * @param start_time Absolute time origin in seconds.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
          *       Invalid shapes, times, boundary data or numeric output clear the polynomial. */
         void update(const std::vector<double> &time_segments,
@@ -1668,45 +1962,63 @@ namespace SplineTrajectory
             updateSplineInternal();
         }
 
+        /** @brief Inspect the published polynomial. @return True only for a valid finite trajectory. */
         bool isValid() const { return trajectory_.isValid(); }
+        /** @brief Inspect spatial dimension. @return Compile-time DIM. */
         int dimension() const { return DIM; }
 
+        /** @brief Inspect the absolute start time. @return Seconds, or zero for an invalid spline. */
         double startTime() const
         {
             return trajectory_.startTime();
         }
 
+        /** @brief Inspect the absolute end time. @return Seconds, or zero for an invalid spline. */
         double endTime() const
         {
             return trajectory_.endTime();
         }
 
+        /** @brief Inspect total duration. @return Seconds, or zero for an invalid spline. */
         double duration() const
         {
             return trajectory_.duration();
         }
 
+        /** @brief Inspect input topology. @return Number of stored waypoints. */
         size_t numPoints() const
         {
             return static_cast<size_t>(spatial_points_.rows());
         }
 
+        /** @brief Inspect the polynomial topology. @return Segment count, or zero when invalid. */
         int numSegments() const
         {
             return trajectory_.numSegments();
         }
 
+        /** @brief Borrow physical waypoints. @return Storage valid until update, assignment or move. */
         const CoefficientMatrix &waypoints() const { return spatial_points_; }
+        /** @brief Borrow segment durations in seconds. @return Storage valid until the next mutation. */
         const std::vector<double> &durations() const { return time_segments_; }
+        /** @brief Borrow absolute knots in seconds. @return Storage valid until the next mutation. */
         const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
+        /** @brief Borrow physical boundary data. @return Storage valid until the next mutation. */
         const BoundaryConditions<DIM> &boundary() const { return boundary_; }
 
-        /** @brief Borrow the polynomial until the next update, assignment or move. */
+        /** @brief Borrow the polynomial. @return View valid until the next update, assignment or move. */
         const Polynomial &polynomial() const & { return trajectory_; }
+        /** @brief Prevent polynomial borrowing from a temporary spline. @return No callable rvalue overload. */
         const Polynomial &polynomial() const && = delete;
-        /** @brief Make an independent owning snapshot, allocating its data. */
+        /** @brief Make an independent owning snapshot. @return Polynomial with its own storage and lifetime. */
         Polynomial copyPolynomial() const { return trajectory_; }
 
+        /** @brief Evaluate monomial bases in local physical time, through crackle.
+         * @param t Local time in seconds.
+         * @param[out] b_pos Position basis. @param[out] b_vel Velocity basis.
+         * @param[out] b_acc Acceleration basis. @param[out] b_jerk Jerk basis.
+         * @param[out] b_snap Snap basis. @param[out] b_crackle Crackle basis.
+         * @note Derivatives above this polynomial's degree are zero. No shared state is touched. */
         static inline void computeBasisFunctions(double t,
                                                  Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
                                                  Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
@@ -1725,7 +2037,8 @@ namespace SplineTrajectory
             b_crackle << 0, 0, 0, 0, 0, 120;
         }
 
-        /** @brief Integral of the squared minimum derivative; returns NaN for an invalid spline. */
+        /** @brief Integrate the squared minimum physical derivative.
+         * @return Energy in physical units; NaN when the spline is invalid. */
         double energy() const
         {
             if (!trajectory_.isValid())
@@ -1796,6 +2109,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
         CoefficientMatrix energyCoefficientPartials() const
         {
             CoefficientMatrix gdC;
@@ -1829,6 +2143,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
         Eigen::VectorXd energyDurationPartials() const
         {
             Eigen::VectorXd gdT;
@@ -1839,7 +2154,7 @@ namespace SplineTrajectory
         /**
          * @brief Compute full gradient of energy w.r.t. segment durations.
          *
-         * @return VectorXd Full gradient dE/dT, size num_segments.
+         * @param[out] grad Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
         void energyDurationGradient(Eigen::VectorXd &grad) const
@@ -1863,6 +2178,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
         Eigen::VectorXd energyDurationGradient() const
         {
             Eigen::VectorXd grad;
@@ -1872,7 +2188,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @return CoefficientMatrix Full gradient dE/dP for inner points only.
+         * @param[out] grad Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
         void energyWaypointGradient(CoefficientMatrix &grad) const
@@ -1895,6 +2211,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
         CoefficientMatrix energyWaypointGradient() const
         {
             CoefficientMatrix grad;
@@ -1980,12 +2297,11 @@ namespace SplineTrajectory
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
          */
         Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
+                           const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
 
-            backwardImpl(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.durations, res.start, res.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes, res);
 
             return res;
         }
@@ -1998,549 +2314,374 @@ namespace SplineTrajectory
          * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
         void backward(const CoefficientMatrix &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           Gradients &grads)
+                      const Eigen::VectorXd &partialGradByTimes,
+                      Gradients &grads)
         {
-            backwardImpl(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.durations, grads.start, grads.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes, grads);
         }
 
     private:
-        /** @brief Pull back the coefficient map through the cached continuity solve.
-         * @note With A(T)q = b(T,P,boundary), solve A^T lambda = dL/dq and accumulate
-         *       lambda^T (db/dtheta - dA/dtheta*q) plus direct coefficient-map partials.
-         *       Input duration partials hold local power coefficients fixed. Outputs are
-         *       overwritten; correctly sized output and adjoint storage are reused. */
-        void backwardImpl(const CoefficientMatrix &partialGradByCoeffs,
-                                   const Eigen::VectorXd &partialGradByTimes,
-                                   CoefficientMatrix &innerPointsGrad,
-                                   Eigen::VectorXd &gradByTimes,
-                                   BoundaryGradient &startGrads,
-                                   BoundaryGradient &endGrads)
+        // Construction: validate, prepare caches, solve knot derivatives, publish coefficients.
+        /** @brief Rebuild from physical data; failed construction clears the published polynomial.
+         * @note Requires exclusive access. Storage is reused when the topology is unchanged. */
+        void updateSplineInternal()
         {
-            const int n = num_segments_;
-            const int n_pts = static_cast<int>(spatial_points_.rows());
-
-            if (!trajectory_.isValid() || partialGradByCoeffs.rows() != n * kCoefficientCount ||
-                partialGradByTimes.size() != n)
-                throw std::invalid_argument("Adjoint requires a valid spline and matching partial shapes");
-            gradByTimes = partialGradByTimes;
-            startGrads = BoundaryGradient();
-            endGrads = BoundaryGradient();
-
-            if (n > 1)
+            // Validate before allocating or modifying the numerical workspaces.
+            if (!trajectory_.template beginSpline<kMinDerivativeOrder>(
+                    time_segments_, spatial_points_, boundary_, start_time_, kCoefficientCount))
             {
-                innerPointsGrad.resize(n_pts - 2, DIM);
-                innerPointsGrad.setZero();
+                num_segments_ = 0;
+                return;
+            }
+            num_segments_ = static_cast<int>(time_segments_.size());
+
+            prepareWorkspace();
+            precomputeTimePowers();
+
+            // Assemble and solve knot stationarity, then publish finite coefficients only.
+            if (!solveInternalDerivatives())
+            {
+                trajectory_.clear();
+                return;
+            }
+            writeCoefficients();
+            trajectory_.finishSpline();
+        }
+
+        /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
+         * @note Requires validated input. Same-topology updates skip all cache resizing;
+         *       the first adjoint reuses storage prepared during construction. */
+        void prepareWorkspace()
+        {
+            if (time_powers_.size() != time_segments_.size())
+                resizeWorkspace();
+
+            // Boundary values change independently of the segment count.
+            if (num_segments_ == 1)
+                return;
+            derivatives_.row(0) = boundary_.start_velocity.transpose();
+            derivatives_.row(num_segments_ * 2 + 0) = boundary_.end_velocity.transpose();
+            derivatives_.row(1) = boundary_.start_acceleration.transpose();
+            derivatives_.row(num_segments_ * 2 + 1) = boundary_.end_acceleration.transpose();
+        }
+
+        /** @brief Resize primal, adjoint and factor caches after a segment-count change.
+         * @note Duration-cache size records the prepared topology and is committed last.
+         *       Allocation order is preserved; same-topology updates skip this function. */
+        void resizeWorkspace()
+        {
+            adjoint_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
+            // A single segment is fully specified by its boundary states.
+            if (num_segments_ == 1)
+            {
+                derivatives_.resize(0, DIM);
+                factors_.clear();
             }
             else
             {
-                innerPointsGrad.resize(0, DIM);
+                derivatives_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
+                factors_.resize(num_segments_ - 1);
             }
-
-            auto add_point_grad = [&](int idx, const RowVector &grad)
-            {
-                if (idx == 0)
-                {
-                    startGrads.p += grad.transpose();
-                }
-                else if (idx == n)
-                {
-                    endGrads.p += grad.transpose();
-                }
-                else
-                {
-                    innerPointsGrad.row(idx - 1) += grad;
-                }
-            };
-
-            ws_gd_internal_.resize(n_pts, 2 * DIM);
-            ws_gd_internal_.setZero();
-
-            auto add_grad_d = [&](int idx, const RowVector &d_vel, const RowVector &d_acc)
-            {
-                ws_gd_internal_.row(idx).segment(0, DIM) += d_vel;
-                ws_gd_internal_.row(idx).segment(DIM, DIM) += d_acc;
-            };
-
-            for (int i = 0; i < n; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const int coeff_idx = i * 6;
-
-                const RowVector &gc0 = partialGradByCoeffs.row(coeff_idx + 0);
-                const RowVector &gc1 = partialGradByCoeffs.row(coeff_idx + 1);
-                const RowVector &gc2 = partialGradByCoeffs.row(coeff_idx + 2);
-                const RowVector &gc3 = partialGradByCoeffs.row(coeff_idx + 3);
-                const RowVector &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
-                const RowVector &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
-
-                double k_P3 = 10.0 * tp.h3_inv;
-                double k_P4 = -15.0 * tp.h4_inv;
-                double k_P5 = 6.0 * tp.h5_inv;
-
-                RowVector sum_grad_P = gc3 * k_P3 + gc4 * k_P4 + gc5 * k_P5;
-                add_point_grad(i, gc0 - sum_grad_P);
-                add_point_grad(i + 1, sum_grad_P);
-
-                RowVector grad_v_curr = gc1;
-                grad_v_curr += gc3 * (-6.0 * tp.h2_inv);
-                grad_v_curr += gc4 * (8.0 * tp.h3_inv);
-                grad_v_curr += gc5 * (-3.0 * tp.h4_inv);
-
-                RowVector grad_v_next = gc3 * (-4.0 * tp.h2_inv);
-                grad_v_next += gc4 * (7.0 * tp.h3_inv);
-                grad_v_next += gc5 * (-3.0 * tp.h4_inv);
-
-                RowVector grad_a_curr = gc2 * 0.5;
-                grad_a_curr += gc3 * (-1.5 * tp.h_inv);
-                grad_a_curr += gc4 * (1.5 * tp.h2_inv);
-                grad_a_curr += gc5 * (-0.5 * tp.h3_inv);
-
-                RowVector grad_a_next = gc3 * (0.5 * tp.h_inv);
-                grad_a_next += gc4 * (-1.0 * tp.h2_inv);
-                grad_a_next += gc5 * (0.5 * tp.h3_inv);
-
-                add_grad_d(i, grad_v_curr, grad_a_curr);
-                add_grad_d(i + 1, grad_v_next, grad_a_next);
-
-                const RowVector &V_curr = internal_vel_.row(i);
-                const RowVector &V_next = internal_vel_.row(i + 1);
-                const RowVector &A_curr = internal_acc_.row(i);
-                const RowVector &A_next = internal_acc_.row(i + 1);
-
-                const RowVector P_diff = point_diffs_.row(i);
-
-                RowVector dc3_dh = -30.0 * tp.h4_inv * P_diff +
-                                       12.0 * tp.h3_inv * V_curr + 8.0 * tp.h3_inv * V_next +
-                                       1.5 * tp.h2_inv * A_curr - 0.5 * tp.h2_inv * A_next;
-
-                RowVector dc4_dh = 60.0 * tp.h5_inv * P_diff -
-                                       24.0 * tp.h4_inv * V_curr - 21.0 * tp.h4_inv * V_next -
-                                       3.0 * tp.h3_inv * A_curr + 2.0 * tp.h3_inv * A_next;
-
-                RowVector dc5_dh = -30.0 * tp.h6_inv * P_diff +
-                                       12.0 * tp.h5_inv * V_curr + 12.0 * tp.h5_inv * V_next +
-                                       1.5 * tp.h4_inv * A_curr - 1.5 * tp.h4_inv * A_next;
-
-                gradByTimes(i) += gc3.dot(dc3_dh) + gc4.dot(dc4_dh) + gc5.dot(dc5_dh);
-            }
-
-            Eigen::Matrix<double, 2, DIM> raw_start_grad;
-            raw_start_grad.row(0) = ws_gd_internal_.row(0).segment(0, DIM);
-            raw_start_grad.row(1) = ws_gd_internal_.row(0).segment(DIM, DIM);
-
-            Eigen::Matrix<double, 2, DIM> raw_end_grad;
-            raw_end_grad.row(0) = ws_gd_internal_.row(n).segment(0, DIM);
-            raw_end_grad.row(1) = ws_gd_internal_.row(n).segment(DIM, DIM);
-
-            const int num_blocks = n - 1;
-            if (num_blocks > 0)
-            {
-                ws_lambda_.resize(num_blocks * 2, DIM);
-
-                for (int i = 0; i < num_blocks; ++i)
-                {
-                    ws_lambda_.row(2 * i) = ws_gd_internal_.row(i + 1).segment(0, DIM);
-                    ws_lambda_.row(2 * i + 1) = ws_gd_internal_.row(i + 1).segment(DIM, DIM);
-                }
-
-                multiplyStoredBlock2x2T_2xN(D_inv_cache_, 0,
-                                            ws_lambda_.template middleRows<2>(0),
-                                            ws_lambda_.template middleRows<2>(0));
-
-                for (int i = 0; i < num_blocks - 1; ++i)
-                {
-                    subMultiplyStoredBlock2x2T_2xN(U_blocks_cache_, i,
-                                                   ws_lambda_.template middleRows<2>(2 * i),
-                                                   ws_lambda_.template middleRows<2>(2 * (i + 1)));
-                    multiplyStoredBlock2x2T_2xN(D_inv_cache_, i + 1,
-                                                ws_lambda_.template middleRows<2>(2 * (i + 1)),
-                                                ws_lambda_.template middleRows<2>(2 * (i + 1)));
-                }
-
-                for (int i = num_blocks - 2; i >= 0; --i)
-                {
-                    subMultiplyStoredBlock2x2_2xN(D_inv_T_mul_L_next_T_cache_, i,
-                                                  ws_lambda_.template middleRows<2>(2 * (i + 1)),
-                                                  ws_lambda_.template middleRows<2>(2 * i));
-                }
-
-                for (int i = 0; i < num_blocks; ++i)
-                {
-                    const RowVector lam_snap = ws_lambda_.row(2 * i);
-                    const RowVector lam_jerk = ws_lambda_.row(2 * i + 1);
-
-                    const int m = i + 1;
-                    const auto &tp_L = time_powers_[m - 1];
-                    const auto &tp_R = time_powers_[m];
-
-                    const RowVector dP_L = point_diffs_.row(m - 1);
-                    const RowVector dP_R = point_diffs_.row(m);
-                    const RowVector &V_prev = internal_vel_.row(m - 1);
-                    const RowVector &V_curr = internal_vel_.row(m);
-                    const RowVector &V_next = internal_vel_.row(m + 1);
-
-                    const RowVector &A_prev = internal_acc_.row(m - 1);
-                    const RowVector &A_curr = internal_acc_.row(m);
-                    const RowVector &A_next = internal_acc_.row(m + 1);
-
-                    const double dD00_dhL = 576.0 * tp_L.h4_inv;
-                    const double dD01_dhL = -72.0 * tp_L.h3_inv;
-                    const double dD10_dhL = 72.0 * tp_L.h3_inv;
-                    const double dD11_dhL = -9.0 * tp_L.h2_inv;
-
-                    const double dL00_dhL = 504.0 * tp_L.h4_inv;
-                    const double dL01_dhL = 48.0 * tp_L.h3_inv;
-                    const double dL10_dhL = 48.0 * tp_L.h3_inv;
-                    const double dL11_dhL = 3.0 * tp_L.h2_inv;
-
-                    const double dD00_dhR = 576.0 * tp_R.h4_inv;
-                    const double dD01_dhR = 72.0 * tp_R.h3_inv;
-                    const double dD10_dhR = -72.0 * tp_R.h3_inv;
-                    const double dD11_dhR = -9.0 * tp_R.h2_inv;
-
-                    const double dU00_dhR = 504.0 * tp_R.h4_inv;
-                    const double dU01_dhR = -48.0 * tp_R.h3_inv;
-                    const double dU10_dhR = -48.0 * tp_R.h3_inv;
-                    const double dU11_dhR = 3.0 * tp_R.h2_inv;
-
-                    const RowVector drhs0_dhL = 1440.0 * dP_L * tp_L.h5_inv;
-                    const RowVector drhs1_dhL = 180.0 * dP_L * tp_L.h4_inv;
-
-                    RowVector rhs0_L = drhs0_dhL -
-                                           (dD00_dhL * V_curr + dD01_dhL * A_curr +
-                                            dL00_dhL * V_prev + dL01_dhL * A_prev);
-                    RowVector rhs1_L = drhs1_dhL -
-                                           (dD10_dhL * V_curr + dD11_dhL * A_curr +
-                                            dL10_dhL * V_prev + dL11_dhL * A_prev);
-
-                    gradByTimes(m - 1) += lam_snap.dot(rhs0_L) + lam_jerk.dot(rhs1_L);
-
-                    const RowVector drhs0_dhR = 1440.0 * dP_R * tp_R.h5_inv;
-                    const RowVector drhs1_dhR = -180.0 * dP_R * tp_R.h4_inv;
-
-                    RowVector rhs0_R = drhs0_dhR -
-                                           (dD00_dhR * V_curr + dD01_dhR * A_curr +
-                                            dU00_dhR * V_next + dU01_dhR * A_next);
-                    RowVector rhs1_R = drhs1_dhR -
-                                           (dD10_dhR * V_curr + dD11_dhR * A_curr +
-                                            dU10_dhR * V_next + dU11_dhR * A_next);
-
-                    gradByTimes(m) += lam_snap.dot(rhs0_R) + lam_jerk.dot(rhs1_R);
-
-                    double dr4_dp_next = -360.0 * tp_R.h4_inv;
-                    double dr4_dp_curr = 360.0 * (tp_R.h4_inv - tp_L.h4_inv);
-                    double dr4_dp_prev = 360.0 * tp_L.h4_inv;
-
-                    double dr3_dp_next = 60.0 * tp_R.h3_inv;
-                    double dr3_dp_curr = -60.0 * (tp_R.h3_inv + tp_L.h3_inv);
-                    double dr3_dp_prev = 60.0 * tp_L.h3_inv;
-
-                    RowVector grad_P_next = lam_snap * dr4_dp_next + lam_jerk * dr3_dp_next;
-                    RowVector grad_P_curr = lam_snap * dr4_dp_curr + lam_jerk * dr3_dp_curr;
-                    RowVector grad_P_prev = lam_snap * dr4_dp_prev + lam_jerk * dr3_dp_prev;
-
-                    add_point_grad(i + 2, grad_P_next);
-                    add_point_grad(i + 1, grad_P_curr);
-                    add_point_grad(i, grad_P_prev);
-                }
-
-                Eigen::Matrix<double, 2, DIM> correction_start;
-                multiplyStoredBlock2x2T_2xN(L_blocks_cache_, 0,
-                                            ws_lambda_.template middleRows<2>(0),
-                                            correction_start);
-                raw_start_grad -= correction_start;
-
-                Eigen::Matrix<double, 2, DIM> correction_end;
-                multiplyStoredBlock2x2T_2xN(U_blocks_cache_, num_blocks - 1,
-                                            ws_lambda_.template middleRows<2>(2 * (num_blocks - 1)),
-                                            correction_end);
-                raw_end_grad -= correction_end;
-            }
-
-            startGrads.v = raw_start_grad.row(0).transpose();
-            startGrads.a = raw_start_grad.row(1).transpose();
-
-            endGrads.v = raw_end_grad.row(0).transpose();
-            endGrads.a = raw_end_grad.row(1).transpose();
+            time_powers_.resize(num_segments_);
         }
+
+        /** @brief Cache reciprocal duration powers used by assembly, Hermite maps and adjoints. */
         void precomputeTimePowers()
         {
-            int n = static_cast<int>(time_segments_.size());
-            time_powers_.resize(n);
-
-            for (int i = 0; i < n; ++i)
-            {
-                double h = time_segments_[i];
-                double iv = 1.0 / h;
-                double iv2 = iv * iv;
-                double iv3 = iv2 * iv;
-
-                time_powers_[i].h = h;
-                time_powers_[i].h_inv = iv;
-                time_powers_[i].h2_inv = iv2;
-                time_powers_[i].h3_inv = iv3;
-                time_powers_[i].h4_inv = iv3 * iv;
-                time_powers_[i].h5_inv = iv3 * iv2;
-                time_powers_[i].h6_inv = iv3 * iv3;
-            }
-        }
-
-        void precomputePointDiffs()
-        {
-            point_diffs_.resize(num_segments_, DIM);
             for (int i = 0; i < num_segments_; ++i)
             {
-                point_diffs_.row(i) = spatial_points_.row(i + 1) - spatial_points_.row(i);
+                auto &tp = time_powers_[i];
+                tp.h = time_segments_[i];
+                tp.h_inv = 1.0 / tp.h;
+                tp.h2_inv = tp.h_inv * tp.h_inv;
+                tp.h3_inv = tp.h2_inv * tp.h_inv;
+                tp.h4_inv = tp.h3_inv * tp.h_inv;
+                tp.h5_inv = tp.h4_inv * tp.h_inv;
             }
         }
 
-        static inline void Inverse2x2(const Eigen::Matrix2d &A, Eigen::Matrix2d &A_inv_out)
+        /** @brief Assemble one knot's stationarity equation for half the integrated squared derivative.
+         * @param knot Interior knot index in [1, num_segments_).
+         * @param[out] diagonal Symmetric diagonal block of the physical energy Hessian.
+         * @param[out] previous Coupling to the preceding knot.
+         * @note Writes this knot's RHS to derivatives_; fixed endpoint terms move to that RHS. */
+        void assembleKnotSystem(int knot, Block &diagonal, Block &previous)
         {
-            const double a = A(0, 0), b = A(0, 1), c = A(1, 0), d = A(1, 1);
-            const double det = a * d - b * c;
-            const double inv_det = 1.0 / det;
+            const auto &left = time_powers_[knot - 1];
+            const auto &right = time_powers_[knot];
 
-            A_inv_out(0, 0) = d * inv_det;
-            A_inv_out(0, 1) = -b * inv_det;
-            A_inv_out(1, 0) = -c * inv_det;
-            A_inv_out(1, 1) = a * inv_det;
-        }
+            // These constants are the exact unit-interval Hermite energy Gram matrix.
+            diagonal(0, 0) = 192.0 * left.h3_inv + 192.0 * right.h3_inv;
+            diagonal(1, 0) = -36.0 * left.h2_inv + 36.0 * right.h2_inv;
+            diagonal(1, 1) = 9.0 * left.h_inv + 9.0 * right.h_inv;
+            previous(0, 0) = 168.0 * left.h3_inv;
+            previous(0, 1) = 24.0 * left.h2_inv;
+            previous(1, 0) = -24.0 * left.h2_inv;
+            previous(1, 1) = -3.0 * left.h_inv;
 
-        static inline void setBlock2x2(BlockMatrix2x2Storage &storage, int i, const Eigen::Matrix2d &M)
-        {
-            storage(i, 0) = M(0, 0);
-            storage(i, 1) = M(0, 1);
-            storage(i, 2) = M(1, 0);
-            storage(i, 3) = M(1, 1);
-        }
-
-        inline void MultiplyStoredBlock2x2(const BlockMatrix2x2Storage &A_storage, int idx_a,
-                                           const BlockMatrix2x2Storage &B_storage, int idx_b,
-                                           Eigen::Matrix2d &C_out) const noexcept
-        {
-            const double a00 = A_storage(idx_a, 0), a01 = A_storage(idx_a, 1);
-            const double a10 = A_storage(idx_a, 2), a11 = A_storage(idx_a, 3);
-            const double b00 = B_storage(idx_b, 0), b01 = B_storage(idx_b, 1);
-            const double b10 = B_storage(idx_b, 2), b11 = B_storage(idx_b, 3);
-            C_out(0, 0) = a00 * b00 + a01 * b10;
-            C_out(0, 1) = a00 * b01 + a01 * b11;
-            C_out(1, 0) = a10 * b00 + a11 * b10;
-            C_out(1, 1) = a10 * b01 + a11 * b11;
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void multiplyStoredBlock2x2_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                               const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
+            for (int coordinate = 0; coordinate < DIM; ++coordinate)
             {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) = a00 * b0j + a01 * b1j;
-                C_out(1, j) = a10 * b0j + a11 * b1j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void multiplyStoredBlock2x2T_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                                const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) = a00 * b0j + a10 * b1j;
-                C_out(1, j) = a01 * b0j + a11 * b1j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void subMultiplyStoredBlock2x2T_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                                   const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) -= a00 * b0j + a10 * b1j;
-                C_out(1, j) -= a01 * b0j + a11 * b1j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void subMultiplyStoredBlock2x2_2xN(const BlockMatrix2x2Storage &A_storage, int idx,
-                                                  const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1);
-            const double a10 = A_storage(idx, 2), a11 = A_storage(idx, 3);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                C_out(0, j) -= a00 * b0j + a01 * b1j;
-                C_out(1, j) -= a10 * b0j + a11 * b1j;
-            }
-        }
-
-        void solveInternalDerivatives(const CoefficientMatrix &P, CoefficientMatrix &p_out, CoefficientMatrix &q_out)
-        {
-            const int n = static_cast<int>(P.rows());
-            p_out.resize(n, DIM);
-            q_out.resize(n, DIM);
-
-            p_out.row(0) = boundary_.start_velocity.transpose();
-            q_out.row(0) = boundary_.start_acceleration.transpose();
-            p_out.row(n - 1) = boundary_.end_velocity.transpose();
-            q_out.row(n - 1) = boundary_.end_acceleration.transpose();
-
-            const int num_blocks = n - 2;
-            if (num_blocks <= 0)
-                return;
-
-            Eigen::Matrix<double, 2, DIM> B_left, B_right;
-            B_left.row(0) = boundary_.start_velocity.transpose();
-            B_left.row(1) = boundary_.start_acceleration.transpose();
-            B_right.row(0) = boundary_.end_velocity.transpose();
-            B_right.row(1) = boundary_.end_acceleration.transpose();
-
-            U_blocks_cache_.resize(num_blocks, 4);
-            D_inv_cache_.resize(num_blocks, 4);
-            L_blocks_cache_.resize(num_blocks, 4);
-            D_inv_T_mul_L_next_T_cache_.resize(std::max(0, num_blocks - 1), 4);
-            ws_rhs_mod_.resize(num_blocks * 2, DIM);
-
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                const int k = i + 2;
-                const auto &tp_L = time_powers_[k - 2];
-                const auto &tp_R = time_powers_[k - 1];
-
-                auto rhs_block = ws_rhs_mod_.template middleRows<2>(2 * i);
-                const RowVector dP_L = point_diffs_.row(k - 2);
-                const RowVector dP_R = point_diffs_.row(k - 1);
-                rhs_block.row(0) = -360.0 * (dP_R * tp_R.h4_inv + dP_L * tp_L.h4_inv);
-                rhs_block.row(1) = 60.0 * (dP_R * tp_R.h3_inv - dP_L * tp_L.h3_inv);
-
-                Eigen::Matrix2d D;
-                D << -192.0 * (tp_L.h3_inv + tp_R.h3_inv), 36.0 * (tp_L.h2_inv - tp_R.h2_inv),
-                    -36.0 * (tp_L.h2_inv - tp_R.h2_inv), 9.0 * (tp_L.h_inv + tp_R.h_inv);
-
-                Eigen::Matrix2d L;
-                L << -168.0 * tp_L.h3_inv, -24.0 * tp_L.h2_inv,
-                    -24.0 * tp_L.h2_inv, -3.0 * tp_L.h_inv;
-                setBlock2x2(L_blocks_cache_, i, L);
-
-                Eigen::Matrix2d U;
-                U << -168.0 * tp_R.h3_inv, 24.0 * tp_R.h2_inv,
-                    24.0 * tp_R.h2_inv, -3.0 * tp_R.h_inv;
-                setBlock2x2(U_blocks_cache_, i, U);
-
-                if (i == 0)
+                const double delta_left = spatial_points_(knot, coordinate) - spatial_points_(knot - 1, coordinate);
+                const double delta_right = spatial_points_(knot + 1, coordinate) - spatial_points_(knot, coordinate);
+                double rhs0 = 360.0 * left.h4_inv * delta_left + 360.0 * right.h4_inv * delta_right;
+                double rhs1 = -60.0 * left.h3_inv * delta_left + 60.0 * right.h3_inv * delta_right;
+                if (knot == 1)
                 {
-                    rhs_block.noalias() -= L * B_left;
+                    rhs0 -= previous(0, 0) * derivatives_(0, coordinate) + previous(0, 1) * derivatives_(1, coordinate);
+                    rhs1 -= previous(1, 0) * derivatives_(0, coordinate) + previous(1, 1) * derivatives_(1, coordinate);
                 }
-                else
+                if (knot + 1 == num_segments_)
                 {
-                    Eigen::Matrix2d X;
-                    MultiplyStoredBlock2x2(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
-                    Eigen::Matrix<double, 2, DIM> Y;
-                    multiplyStoredBlock2x2_2xN(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<2>(2 * (i - 1)), Y);
-                    D.noalias() -= L * X;
-                    rhs_block.noalias() -= L * Y;
+                    rhs0 -= 168.0 * right.h3_inv * derivatives_(num_segments_ * 2, coordinate)
+                        - 24.0 * right.h2_inv * derivatives_(num_segments_ * 2 + 1, coordinate);
+                    rhs1 -= 24.0 * right.h2_inv * derivatives_(num_segments_ * 2, coordinate)
+                        - 3.0 * right.h_inv * derivatives_(num_segments_ * 2 + 1, coordinate);
                 }
-
-                if (k == n - 1)
-                {
-                    rhs_block.noalias() -= U * B_right;
-                }
-
-                Eigen::Matrix2d D_inv;
-                Inverse2x2(D, D_inv);
-                setBlock2x2(D_inv_cache_, i, D_inv);
-
-                if (i > 0)
-                {
-                    Eigen::Matrix2d L_mul_D_prev_inv;
-                    MultiplyStoredBlock2x2(L_blocks_cache_, i, D_inv_cache_, i - 1, L_mul_D_prev_inv);
-                    setBlock2x2(D_inv_T_mul_L_next_T_cache_, i - 1, L_mul_D_prev_inv.transpose());
-                }
-            }
-
-            ws_solution_.resize(num_blocks * 2, DIM);
-
-            multiplyStoredBlock2x2_2xN(D_inv_cache_, num_blocks - 1,
-                                       ws_rhs_mod_.template middleRows<2>(2 * (num_blocks - 1)),
-                                       ws_solution_.template middleRows<2>(2 * (num_blocks - 1)));
-
-            for (int i = num_blocks - 2; i >= 0; --i)
-            {
-                auto sol_block = ws_solution_.template middleRows<2>(2 * i);
-                auto sol_next = ws_solution_.template middleRows<2>(2 * (i + 1));
-                auto rhs_i = ws_rhs_mod_.template middleRows<2>(2 * i);
-
-                const double u00 = U_blocks_cache_(i, 0), u01 = U_blocks_cache_(i, 1);
-                const double u10 = U_blocks_cache_(i, 2), u11 = U_blocks_cache_(i, 3);
-                Eigen::Matrix<double, 2, DIM> rhs_temp;
-                for (int j = 0; j < DIM; ++j)
-                {
-                    const double s0 = sol_next(0, j), s1 = sol_next(1, j);
-                    rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1);
-                    rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1);
-                }
-                multiplyStoredBlock2x2_2xN(D_inv_cache_, i, rhs_temp, sol_block);
-            }
-
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                p_out.row(i + 1) = ws_solution_.row(2 * i);
-                q_out.row(i + 1) = ws_solution_.row(2 * i + 1);
+                derivatives_(knot * 2, coordinate) = rhs0;
+                derivatives_(knot * 2 + 1, coordinate) = rhs1;
             }
         }
 
-        void solveQuinticInPlace()
+        /** @brief Factor and solve the block system in linear time.
+         * @return False on a nonpositive/nonfinite pivot; true after solving all free derivatives.
+         * @note Forward substitution is fused with assembly to avoid a separate RHS sweep. */
+        bool solveInternalDerivatives()
         {
-            const int n = num_segments_;
+            for (int knot = 1; knot < num_segments_; ++knot)
+            {
+                Block diagonal, previous;
+                assembleKnotSystem(knot, diagonal, previous);
+                auto &factor = factors_[knot - 1];
+                const Factor *prior = knot > 1 ? &factors_[knot - 2] : nullptr;
+                if (!factor.factorize(diagonal, previous, prior))
+                    return false;
+                factor.forward(derivatives_, knot * kDerivativesPerKnot);
+            }
+            backSubstitute(derivatives_);
+            return true;
+        }
 
-            solveInternalDerivatives(spatial_points_, internal_vel_, internal_acc_);
+        /** @brief Finish a primal or adjoint solve using the stored diagonal/coupling factors.
+         * @param[in,out] values Knot-major forward-substituted RHS; receives the solution.
+         * @note Endpoint rows are preserved; the caller owns and exclusively supplies the matrix. */
+        void backSubstitute(CoefficientMatrix &values) const
+        {
+            detail::backSubstitute<kDerivativesPerKnot>(factors_, num_segments_, values);
+        }
 
-
-            for (int i = 0; i < n; ++i)
+        /** @brief Generate coefficients from endpoint residuals in physical coordinates.
+         * @note Each row contains contiguous spatial coordinates, so the short expressions
+         *       can use Eigen packets without changing the per-order mathematical formula. */
+        void writeCoefficients()
+        {
+            for (int i = 0; i < num_segments_; ++i)
             {
                 const auto &tp = time_powers_[i];
+                const int coefficient_row = i * kCoefficientCount;
+                const int left_row = i * kDerivativesPerKnot;
+                const int right_row = left_row + kDerivativesPerKnot;
+                const RowVector position = spatial_points_.row(i);
+                // Single-segment curves have no free knot derivatives or primal workspace.
+                const RowVector velocity = num_segments_ == 1 ? RowVector(boundary_.start_velocity.transpose()) :
+                    RowVector(derivatives_.row(left_row));
+                const RowVector acceleration = num_segments_ == 1 ? RowVector(boundary_.start_acceleration.transpose()) :
+                    RowVector(derivatives_.row(left_row + 1));
+                const RowVector end_velocity = num_segments_ == 1 ? RowVector(boundary_.end_velocity.transpose()) :
+                    RowVector(derivatives_.row(right_row));
+                const RowVector end_acceleration = num_segments_ == 1 ? RowVector(boundary_.end_acceleration.transpose()) :
+                    RowVector(derivatives_.row(right_row + 1));
+                const RowVector quadratic = 0.5 * acceleration;
 
-                const RowVector c0 = spatial_points_.row(i);
-                const RowVector c1 = internal_vel_.row(i);
-                const RowVector c2 = internal_acc_.row(i) * 0.5;
+                // Match the right endpoint after subtracting the left-end Taylor polynomial.
+                const RowVector displacement = spatial_points_.row(i + 1) - position;
+                const RowVector position_residual = displacement - tp.h * velocity - (tp.h * tp.h) * quadratic;
+                const RowVector velocity_residual = end_velocity - velocity - tp.h * acceleration;
+                const RowVector acceleration_residual = end_acceleration - acceleration;
+                const RowVector cubic =
+                    (10.0 * tp.h3_inv) * position_residual - (4.0 * tp.h2_inv) * velocity_residual +
+                    (0.5 * tp.h_inv) * acceleration_residual;
+                const RowVector quartic =
+                    (-15.0 * tp.h4_inv) * position_residual + (7.0 * tp.h3_inv) * velocity_residual -
+                    tp.h2_inv * acceleration_residual;
+                const RowVector quintic =
+                    (6.0 * tp.h5_inv) * position_residual - (3.0 * tp.h4_inv) * velocity_residual +
+                    (0.5 * tp.h3_inv) * acceleration_residual;
 
-                const RowVector rhs1 = point_diffs_.row(i) - c1 * tp.h - c2 * (tp.h * tp.h);
-                const RowVector rhs2 = internal_vel_.row(i + 1) - c1 - (2.0 * c2) * tp.h;
-                const RowVector rhs3 = internal_acc_.row(i + 1) - (2.0 * c2);
-
-                const RowVector c3 = (10.0 * tp.h3_inv) * rhs1 - (4.0 * tp.h2_inv) * rhs2 + (0.5 * tp.h_inv) * rhs3;
-                const RowVector c4 = (-15.0 * tp.h4_inv) * rhs1 + (7.0 * tp.h3_inv) * rhs2 - (tp.h2_inv) * rhs3;
-                const RowVector c5 = (6.0 * tp.h5_inv) * rhs1 - (3.0 * tp.h4_inv) * rhs2 + (0.5 * tp.h3_inv) * rhs3;
-
-                trajectory_.coefficients_.row(i * 6 + 0) = c0;
-                trajectory_.coefficients_.row(i * 6 + 1) = c1;
-                trajectory_.coefficients_.row(i * 6 + 2) = c2;
-                trajectory_.coefficients_.row(i * 6 + 3) = c3;
-                trajectory_.coefficients_.row(i * 6 + 4) = c4;
-                trajectory_.coefficients_.row(i * 6 + 5) = c5;
+                // Publish together, after all source rows and duration powers have been read.
+                trajectory_.coefficients_.row(coefficient_row) = position;
+                trajectory_.coefficients_.row(coefficient_row + 1) = velocity;
+                trajectory_.coefficients_.row(coefficient_row + 2) = quadratic;
+                trajectory_.coefficients_.row(coefficient_row + 3) = cubic;
+                trajectory_.coefficients_.row(coefficient_row + 4) = quartic;
+                trajectory_.coefficients_.row(coefficient_row + 5) = quintic;
             }
         }
 
+        // Adjoint: pull back coefficients, reuse factors, accumulate physical gradients.
+        /** @brief Pull back one objective through coefficient generation and knot stationarity.
+         * @param coefficient_partials Physical coefficient partials in piece-major ascending order.
+         * @param duration_partials Direct duration partials with coefficients held fixed, in seconds.
+         * @param[out] gradient Overwritten total physical gradients; prepared storage is reused.
+         * @note Requires a valid spline, matching shapes and exclusive access to this object. */
+        void backwardImpl(const CoefficientMatrix &coefficient_partials,
+                          const Eigen::VectorXd &duration_partials,
+                          Gradients &gradient)
+        {
+            detail::prepareAdjoint(trajectory_, coefficient_partials, duration_partials, gradient, adjoint_);
+
+            // Local map, cached linear solve, then endpoint corrections.
+            pullbackCoefficients(coefficient_partials, gradient);
+            solveAdjoint(gradient);
+            // A fully clamped segment has no free knot derivatives to correct.
+            if (num_segments_ > 1)
+                accumulateAdjoint(gradient);
+        }
+
+        /** @brief Differentiate each segment's explicit Hermite map at fixed knot derivatives.
+         * @param coefficient_partials Piece-major physical coefficient partials, valid for this call.
+         * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives derivative seeds.
+         * @note Homogeneity gives dC/dT without materializing derivative matrices. */
+        void pullbackCoefficients(const CoefficientMatrix &coefficient_partials, Gradients &gradient)
+        {
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                const auto &tp = time_powers_[i];
+                const int coefficient_row = i * kCoefficientCount;
+                const int left_row = i * kDerivativesPerKnot;
+                const int right_row = left_row + kDerivativesPerKnot;
+
+                // Reuse solved states; a fully clamped segment reads its inputs directly.
+                const RowVector left_velocity = num_segments_ == 1 ? RowVector(boundary_.start_velocity.transpose()) :
+                    RowVector(derivatives_.row(left_row));
+                const RowVector left_acceleration = num_segments_ == 1 ? RowVector(boundary_.start_acceleration.transpose()) :
+                    RowVector(derivatives_.row(left_row + 1));
+                const RowVector right_velocity = num_segments_ == 1 ? RowVector(boundary_.end_velocity.transpose()) :
+                    RowVector(derivatives_.row(right_row));
+                const RowVector right_acceleration = num_segments_ == 1 ? RowVector(boundary_.end_acceleration.transpose()) :
+                    RowVector(derivatives_.row(right_row + 1));
+
+                // Apply the same Hermite map across coordinates, sharing the time multipliers.
+                const RowVector g3 = coefficient_partials.row(coefficient_row + 3);
+                const RowVector g4 = coefficient_partials.row(coefficient_row + 4);
+                const RowVector g5 = coefficient_partials.row(coefficient_row + 5);
+                const RowVector grad_v_left = (-6.0 * tp.h2_inv) * g3
+                    + (8.0 * tp.h3_inv) * g4 - (3.0 * tp.h4_inv) * g5;
+                const RowVector grad_a_left = (-1.5 * tp.h_inv) * g3
+                    + (1.5 * tp.h2_inv) * g4 - (0.5 * tp.h3_inv) * g5;
+                const RowVector point_partial = (10.0 * tp.h3_inv) * g3
+                    - (15.0 * tp.h4_inv) * g4 + (6.0 * tp.h5_inv) * g5;
+                const RowVector grad_v_right = (-4.0 * tp.h2_inv) * g3
+                    + (7.0 * tp.h3_inv) * g4 - (3.0 * tp.h4_inv) * g5;
+                const RowVector grad_a_right = (0.5 * tp.h_inv) * g3
+                    - tp.h2_inv * g4 + (0.5 * tp.h3_inv) * g5;
+
+                gradient.addWaypoint(i, coefficient_partials.row(coefficient_row) - point_partial);
+                gradient.addWaypoint(i + 1, point_partial);
+                adjoint_.row(left_row) += grad_v_left + coefficient_partials.row(coefficient_row + 1);
+                adjoint_.row(right_row) += grad_v_right;
+                adjoint_.row(left_row + 1) += grad_a_left + 0.5 * coefficient_partials.row(coefficient_row + 2);
+                adjoint_.row(right_row + 1) += grad_a_right;
+
+                // c_k scales as T^-k; endpoint derivative order r scales as T^r.
+                RowVector time_partials = -3.0 * g3.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 3))
+                    - 4.0 * g4.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 4))
+                    - 5.0 * g5.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 5));
+                time_partials += grad_v_left.cwiseProduct(left_velocity)
+                    + grad_v_right.cwiseProduct(right_velocity)
+                    + 2.0 * grad_a_left.cwiseProduct(left_acceleration)
+                    + 2.0 * grad_a_right.cwiseProduct(right_acceleration);
+                gradient.durations(i) += tp.h_inv * time_partials.sum();
+            }
+        }
+
+        /** @brief Preserve clamped boundary seeds and solve for free knot adjoints.
+         * @param[in,out] gradient Receives direct boundary derivative gradients.
+         * @note A is symmetric: the primal factors also solve A^T lambda = seed. */
+        void solveAdjoint(Gradients &gradient)
+        {
+            gradient.start.v = adjoint_.row(0).transpose();
+            gradient.end.v = adjoint_.row(num_segments_ * 2 + 0).transpose();
+            gradient.start.a = adjoint_.row(1).transpose();
+            gradient.end.a = adjoint_.row(num_segments_ * 2 + 1).transpose();
+            adjoint_.template topRows<2>().setZero();
+            adjoint_.template bottomRows<2>().setZero();
+
+            for (int knot = 1; knot < num_segments_; ++knot)
+                factors_[knot - 1].forward(adjoint_, knot * kDerivativesPerKnot);
+            backSubstitute(adjoint_);
+        }
+
+        /** @brief Add the interpolation constraint's contribution using endpoint identities.
+         * @param[in,out] gradient Physical point, time and clamped-boundary gradients.
+         * @note The adjoint polynomial has zero positions and knot derivatives from adjoint_.
+         *       Integration by parts gives point/boundary forces; the polarized Hamiltonian
+         *       gives time corrections without constructing dA/dT or differentiating the solver. */
+        void accumulateAdjoint(Gradients &gradient) const
+        {
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                const auto &tp = time_powers_[i];
+                const int coefficient_row = i * kCoefficientCount;
+                const int left_row = i * kDerivativesPerKnot;
+                const int right_row = left_row + kDerivativesPerKnot;
+
+                // Map knot adjoints to a polynomial with zero endpoint positions.
+                const RowVector adjoint_v_left = adjoint_.row(left_row);
+                const RowVector adjoint_v_right = adjoint_.row(right_row);
+                const RowVector adjoint_a_left = adjoint_.row(left_row + 1);
+                const RowVector adjoint_a_right = adjoint_.row(right_row + 1);
+                const RowVector lambda_c3 = (-6.0 * tp.h2_inv) * adjoint_v_left
+                    - (4.0 * tp.h2_inv) * adjoint_v_right
+                    - (1.5 * tp.h_inv) * adjoint_a_left
+                    + (0.5 * tp.h_inv) * adjoint_a_right;
+                const RowVector lambda_c4 = (8.0 * tp.h3_inv) * adjoint_v_left
+                    + (7.0 * tp.h3_inv) * adjoint_v_right
+                    + (1.5 * tp.h2_inv) * adjoint_a_left
+                    - tp.h2_inv * adjoint_a_right;
+                const RowVector lambda_c5 = (-3.0 * tp.h4_inv) * adjoint_v_left
+                    - (3.0 * tp.h4_inv) * adjoint_v_right
+                    - (0.5 * tp.h3_inv) * adjoint_a_left
+                    + (0.5 * tp.h3_inv) * adjoint_a_right;
+
+                // Endpoint forces use physical derivatives of the adjoint polynomial.
+                const RowVector adjoint_jerk = 6.0 * lambda_c3;
+                const RowVector adjoint_snap = 24.0 * lambda_c4;
+                const RowVector adjoint_crackle = 120.0 * lambda_c5;
+                gradient.addWaypoint(i, adjoint_crackle);
+                gradient.addWaypoint(i + 1, -adjoint_crackle);
+
+                // The polarized Hamiltonian contracts matching physical derivatives.
+                const RowVector velocity = trajectory_.coefficients_.row(coefficient_row + 1);
+                const RowVector acceleration = 2.0 * trajectory_.coefficients_.row(coefficient_row + 2);
+                const RowVector jerk = 6.0 * trajectory_.coefficients_.row(coefficient_row + 3);
+                const RowVector snap = 24.0 * trajectory_.coefficients_.row(coefficient_row + 4);
+                const RowVector crackle = 120.0 * trajectory_.coefficients_.row(coefficient_row + 5);
+                const RowVector time_partials = jerk.cwiseProduct(adjoint_jerk)
+                    + adjoint_v_left.cwiseProduct(crackle) + velocity.cwiseProduct(adjoint_crackle)
+                    - adjoint_a_left.cwiseProduct(snap) - acceleration.cwiseProduct(adjoint_snap);
+                gradient.durations(i) += time_partials.sum();
+
+                // Only clamped endpoints contribute boundary derivative corrections.
+                if (i == 0)
+                {
+                    gradient.start.v -= adjoint_snap.transpose();
+                    gradient.start.a += adjoint_jerk.transpose();
+                }
+                if (i + 1 == num_segments_)
+                {
+                    const RowVector end_v = tp.h * adjoint_crackle + adjoint_snap;
+                    const RowVector end_a = ((60.0 * tp.h) * lambda_c5 + adjoint_snap) * tp.h + adjoint_jerk;
+                    gradient.end.v += end_v.transpose();
+                    gradient.end.a -= end_a.transpose();
+                }
+            }
+        }
     };
 
+    // Septic splines: minimum snap.
+
     /** @brief Minimum-snap interpolation with a specialized O(N) 3-by-3 block tridiagonal solver.
-     * @note Minimize the squared 4-th physical derivative integral with fixed waypoint
+     * @note Minimize the squared fourth physical derivative integral with fixed waypoint
      *       positions and endpoint derivatives of orders 1 through 3. Coordinates
      *       are caller-defined; durations use seconds. Polynomial coefficients and knots
      *       have one owner. Updates and backward() require exclusive access; const energy
@@ -2571,7 +2712,6 @@ namespace SplineTrajectory
         double start_time_{0.0};
 
         CoefficientMatrix spatial_points_;
-        CoefficientMatrix point_diffs_;
 
         BoundaryConditions<DIM> boundary_;
 
@@ -2579,62 +2719,36 @@ namespace SplineTrajectory
 
         Polynomial trajectory_;
 
+        // Knot-major rows: each knot's physical derivatives are adjacent in memory.
+        static constexpr int kDerivativesPerKnot = 3;
+        using Factor = detail::BlockLDLT3;
+        using Block = typename Factor::Block;
+        std::vector<Factor> factors_;
+        CoefficientMatrix derivatives_;
+        CoefficientMatrix adjoint_;
+
         struct TimePowers
         {
             double h;
-            double h_inv;  // h^-1
-            double h2_inv; // h^-2
-            double h3_inv; // h^-3
-            double h4_inv; // h^-4
-            double h5_inv; // h^-5
-            double h6_inv; // h^-6
-            double h7_inv; // h^-7
+            double h_inv;
+            double h2_inv;
+            double h3_inv;
+            double h4_inv;
+            double h5_inv;
+            double h6_inv;
+            double h7_inv;
         };
         std::vector<TimePowers> time_powers_;
-
-        using BlockMatrix3x3Storage = Eigen::Matrix<double, Eigen::Dynamic, 9, Eigen::RowMajor>;
-        BlockMatrix3x3Storage D_inv_cache_;
-        BlockMatrix3x3Storage U_blocks_cache_;
-        BlockMatrix3x3Storage L_blocks_cache_;
-        BlockMatrix3x3Storage D_inv_T_mul_L_next_T_cache_;
-
-        CoefficientMatrix ws_rhs_mod_;
-        CoefficientMatrix ws_solution_;
-        CoefficientMatrix ws_lambda_;
-        Eigen::Matrix<double, Eigen::Dynamic, 3 * DIM, Eigen::RowMajor> ws_gd_internal_;
-
-        CoefficientMatrix internal_vel_;
-        CoefficientMatrix internal_acc_;
-        CoefficientMatrix internal_jerk_;
-
-    private:
-        /**
-         * @brief Rebuild the interpolating spline and expose the generated polynomial's validity.
-         * @note Requires validated input shapes and exclusive ownership; finite inputs can still produce
-         *       invalid coefficients or time knots, in which case isValid() becomes false.
-         */
-        void updateSplineInternal()
-        {
-            if (!trajectory_.template beginSpline<kMinDerivativeOrder>(
-                    time_segments_, spatial_points_, boundary_, start_time_, kCoefficientCount))
-            { num_segments_ = 0; return; }
-            num_segments_ = static_cast<int>(time_segments_.size());
-            // Prepare adjoint storage with the topology so the first pullback does not allocate.
-            ws_lambda_.resize(std::max(0, num_segments_ - 1) * 3, DIM);
-            ws_gd_internal_.resize(num_segments_ + 1, 3 * DIM);
-            precomputeTimePowers();
-            precomputePointDiffs();
-            solveSepticInPlace();
-            trajectory_.finishSpline();
-            // A finite input can still produce invalid coefficients or collapsed breakpoints.
-        }
 
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+        /** @brief Construct an empty, invalid spline with independent storage. */
         SepticSplineND() = default;
 
         /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
+         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         SepticSplineND(const std::vector<double> &t_points,
                        const CoefficientMatrix &spatial_points,
@@ -2647,6 +2761,9 @@ namespace SplineTrajectory
         }
 
         /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
+         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
+         * @param start_time Absolute time origin in seconds.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Inputs are copied; invalid input or numeric output leaves an invalid polynomial. */
         SepticSplineND(const std::vector<double> &time_segments,
                        const CoefficientMatrix &spatial_points,
@@ -2661,6 +2778,8 @@ namespace SplineTrajectory
         }
 
         /** @brief Replace interpolation data using absolute knots; invalid input clears the polynomial.
+         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views. */
         void update(const std::vector<double> &t_points,
                     const CoefficientMatrix &spatial_points,
@@ -2673,6 +2792,9 @@ namespace SplineTrajectory
         }
 
         /** @brief Replace interpolation data using positive durations and a common time origin.
+         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
+         * @param start_time Absolute time origin in seconds.
+         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
          *       Invalid shapes, times, boundary data or numeric output clear the polynomial. */
         void update(const std::vector<double> &time_segments,
@@ -2687,45 +2809,63 @@ namespace SplineTrajectory
             updateSplineInternal();
         }
 
+        /** @brief Inspect the published polynomial. @return True only for a valid finite trajectory. */
         bool isValid() const { return trajectory_.isValid(); }
+        /** @brief Inspect spatial dimension. @return Compile-time DIM. */
         int dimension() const { return DIM; }
 
+        /** @brief Inspect the absolute start time. @return Seconds, or zero for an invalid spline. */
         double startTime() const
         {
             return trajectory_.startTime();
         }
 
+        /** @brief Inspect the absolute end time. @return Seconds, or zero for an invalid spline. */
         double endTime() const
         {
             return trajectory_.endTime();
         }
 
+        /** @brief Inspect total duration. @return Seconds, or zero for an invalid spline. */
         double duration() const
         {
             return trajectory_.duration();
         }
 
+        /** @brief Inspect input topology. @return Number of stored waypoints. */
         size_t numPoints() const
         {
             return static_cast<size_t>(spatial_points_.rows());
         }
 
+        /** @brief Inspect the polynomial topology. @return Segment count, or zero when invalid. */
         int numSegments() const
         {
             return trajectory_.numSegments();
         }
 
+        /** @brief Borrow physical waypoints. @return Storage valid until update, assignment or move. */
         const CoefficientMatrix &waypoints() const { return spatial_points_; }
+        /** @brief Borrow segment durations in seconds. @return Storage valid until the next mutation. */
         const std::vector<double> &durations() const { return time_segments_; }
+        /** @brief Borrow absolute knots in seconds. @return Storage valid until the next mutation. */
         const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
+        /** @brief Borrow physical boundary data. @return Storage valid until the next mutation. */
         const BoundaryConditions<DIM> &boundary() const { return boundary_; }
 
-        /** @brief Borrow the polynomial until the next update, assignment or move. */
+        /** @brief Borrow the polynomial. @return View valid until the next update, assignment or move. */
         const Polynomial &polynomial() const & { return trajectory_; }
+        /** @brief Prevent polynomial borrowing from a temporary spline. @return No callable rvalue overload. */
         const Polynomial &polynomial() const && = delete;
-        /** @brief Make an independent owning snapshot, allocating its data. */
+        /** @brief Make an independent owning snapshot. @return Polynomial with its own storage and lifetime. */
         Polynomial copyPolynomial() const { return trajectory_; }
 
+        /** @brief Evaluate monomial bases in local physical time, through crackle.
+         * @param t Local time in seconds.
+         * @param[out] b_pos Position basis. @param[out] b_vel Velocity basis.
+         * @param[out] b_acc Acceleration basis. @param[out] b_jerk Jerk basis.
+         * @param[out] b_snap Snap basis. @param[out] b_crackle Crackle basis.
+         * @note Derivatives above this polynomial's degree are zero. No shared state is touched. */
         static inline void computeBasisFunctions(double t,
                                                  Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
                                                  Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
@@ -2744,7 +2884,8 @@ namespace SplineTrajectory
             b_crackle << 0, 0, 0, 0, 0, 120, 720 * t1, 2520 * t2;
         }
 
-        /** @brief Integral of the squared minimum derivative; returns NaN for an invalid spline. */
+        /** @brief Integrate the squared minimum physical derivative.
+         * @return Energy in physical units; NaN when the spline is invalid. */
         double energy() const
         {
             if (!trajectory_.isValid())
@@ -2834,6 +2975,7 @@ namespace SplineTrajectory
 
         }
 
+        /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
         CoefficientMatrix energyCoefficientPartials() const
         {
             CoefficientMatrix gdC;
@@ -2868,6 +3010,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
         Eigen::VectorXd energyDurationPartials() const
         {
             Eigen::VectorXd gdT;
@@ -2878,7 +3021,7 @@ namespace SplineTrajectory
         /**
          * @brief Compute full gradient of energy w.r.t. segment durations.
          *
-         * @return VectorXd Full gradient dE/dT, size num_segments.
+         * @param[out] grad Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
          */
         void energyDurationGradient(Eigen::VectorXd &grad) const
@@ -2907,6 +3050,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
         Eigen::VectorXd energyDurationGradient() const
         {
             Eigen::VectorXd grad;
@@ -2916,7 +3060,7 @@ namespace SplineTrajectory
 
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @return CoefficientMatrix Full gradient dE/dP for inner points only.
+         * @param[out] grad Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
          */
         void energyWaypointGradient(CoefficientMatrix &grad) const
@@ -2939,6 +3083,7 @@ namespace SplineTrajectory
             }
         }
 
+        /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
         CoefficientMatrix energyWaypointGradient() const
         {
             CoefficientMatrix grad;
@@ -3031,12 +3176,11 @@ namespace SplineTrajectory
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
          */
         Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
-                                const Eigen::VectorXd &partialGradByTimes)
+                           const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
 
-            backwardImpl(partialGradByCoeffs, partialGradByTimes,
-                                  res.inner_points, res.durations, res.start, res.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes, res);
 
             return res;
         }
@@ -3049,820 +3193,441 @@ namespace SplineTrajectory
          * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused
          */
         void backward(const CoefficientMatrix &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes,
-                           Gradients &grads)
+                      const Eigen::VectorXd &partialGradByTimes,
+                      Gradients &grads)
         {
-            backwardImpl(partialGradByCoeffs, partialGradByTimes,
-                                  grads.inner_points, grads.durations, grads.start, grads.end);
+            backwardImpl(partialGradByCoeffs, partialGradByTimes, grads);
         }
 
     private:
-        /** @brief Pull back the coefficient map through the cached continuity solve.
-         * @note With A(T)q = b(T,P,boundary), solve A^T lambda = dL/dq and accumulate
-         *       lambda^T (db/dtheta - dA/dtheta*q) plus direct coefficient-map partials.
-         *       Input duration partials hold local power coefficients fixed. Outputs are
-         *       overwritten; correctly sized output and adjoint storage are reused. */
-        void backwardImpl(const CoefficientMatrix &partialGradByCoeffs,
-                                   const Eigen::VectorXd &partialGradByTimes,
-                                   CoefficientMatrix &innerPointsGrad,
-                                   Eigen::VectorXd &gradByTimes,
-                                   BoundaryGradient &startGrads,
-                                   BoundaryGradient &endGrads)
+        // Construction: validate, prepare caches, solve knot derivatives, publish coefficients.
+        /** @brief Rebuild from physical data; failed construction clears the published polynomial.
+         * @note Requires exclusive access. Storage is reused when the topology is unchanged. */
+        void updateSplineInternal()
         {
-            const int n = num_segments_;
-            const int n_pts = static_cast<int>(spatial_points_.rows());
-
-            if (!trajectory_.isValid() || partialGradByCoeffs.rows() != n * kCoefficientCount ||
-                partialGradByTimes.size() != n)
-                throw std::invalid_argument("Adjoint requires a valid spline and matching partial shapes");
-            gradByTimes = partialGradByTimes;
-            startGrads = BoundaryGradient();
-            endGrads = BoundaryGradient();
-
-            if (n > 1)
+            // Validate before allocating or modifying the numerical workspaces.
+            if (!trajectory_.template beginSpline<kMinDerivativeOrder>(
+                    time_segments_, spatial_points_, boundary_, start_time_, kCoefficientCount))
             {
-                innerPointsGrad.resize(n_pts - 2, DIM);
-                innerPointsGrad.setZero();
+                num_segments_ = 0;
+                return;
+            }
+            num_segments_ = static_cast<int>(time_segments_.size());
+
+            prepareWorkspace();
+            precomputeTimePowers();
+
+            // Assemble and solve knot stationarity, then publish finite coefficients only.
+            if (!solveInternalDerivatives())
+            {
+                trajectory_.clear();
+                return;
+            }
+            writeCoefficients();
+            trajectory_.finishSpline();
+        }
+
+        /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
+         * @note Requires validated input. Same-topology updates skip all cache resizing;
+         *       the first adjoint reuses storage prepared during construction. */
+        void prepareWorkspace()
+        {
+            if (time_powers_.size() != time_segments_.size())
+                resizeWorkspace();
+
+            // Boundary values change independently of the segment count.
+            if (num_segments_ == 1)
+                return;
+            derivatives_.row(0) = boundary_.start_velocity.transpose();
+            derivatives_.row(num_segments_ * 3 + 0) = boundary_.end_velocity.transpose();
+            derivatives_.row(1) = boundary_.start_acceleration.transpose();
+            derivatives_.row(num_segments_ * 3 + 1) = boundary_.end_acceleration.transpose();
+            derivatives_.row(2) = boundary_.start_jerk.transpose();
+            derivatives_.row(num_segments_ * 3 + 2) = boundary_.end_jerk.transpose();
+        }
+
+        /** @brief Resize primal, adjoint and factor caches after a segment-count change.
+         * @note Duration-cache size records the prepared topology and is committed last.
+         *       Allocation order is preserved; same-topology updates skip this function. */
+        void resizeWorkspace()
+        {
+            adjoint_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
+            // A single segment is fully specified by its boundary states.
+            if (num_segments_ == 1)
+            {
+                derivatives_.resize(0, DIM);
+                factors_.clear();
             }
             else
             {
-                innerPointsGrad.resize(0, DIM);
+                derivatives_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
+                factors_.resize(num_segments_ - 1);
             }
-
-            auto add_point_grad = [&](int idx, const RowVector &grad)
-            {
-                if (idx == 0)
-                {
-                    startGrads.p += grad.transpose();
-                }
-                else if (idx == n)
-                {
-                    endGrads.p += grad.transpose();
-                }
-                else
-                {
-                    innerPointsGrad.row(idx - 1) += grad;
-                }
-            };
-
-            ws_gd_internal_.resize(n_pts, 3 * DIM);
-            ws_gd_internal_.setZero();
-
-            auto add_grad_d = [&](int idx, const RowVector &d_vel, const RowVector &d_acc, const RowVector &d_jerk)
-            {
-                ws_gd_internal_.row(idx).segment(0, DIM) += d_vel;
-                ws_gd_internal_.row(idx).segment(DIM, DIM) += d_acc;
-                ws_gd_internal_.row(idx).segment(2 * DIM, DIM) += d_jerk;
-            };
-
-            for (int i = 0; i < n; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const int coeff_idx = i * 8;
-
-                const RowVector &gc0 = partialGradByCoeffs.row(coeff_idx + 0);
-                const RowVector &gc1 = partialGradByCoeffs.row(coeff_idx + 1);
-                const RowVector &gc2 = partialGradByCoeffs.row(coeff_idx + 2);
-                const RowVector &gc3 = partialGradByCoeffs.row(coeff_idx + 3);
-                const RowVector &gc4 = partialGradByCoeffs.row(coeff_idx + 4);
-                const RowVector &gc5 = partialGradByCoeffs.row(coeff_idx + 5);
-                const RowVector &gc6 = partialGradByCoeffs.row(coeff_idx + 6);
-                const RowVector &gc7 = partialGradByCoeffs.row(coeff_idx + 7);
-
-                double k_P4 = -(210.0 * tp.h4_inv) / 6.0;
-                double k_P5 = (168.0 * tp.h5_inv) / 2.0;
-                double k_P6 = -(420.0 * tp.h6_inv) / 6.0;
-                double k_P7 = (120.0 * tp.h7_inv) / 6.0;
-
-                RowVector sum_grad_P = gc4 * k_P4 + gc5 * k_P5 + gc6 * k_P6 + gc7 * k_P7;
-                add_point_grad(i, gc0 + sum_grad_P);
-                add_point_grad(i + 1, -sum_grad_P);
-
-                add_grad_d(i, gc1, 0.5 * gc2, (1.0 / 6.0) * gc3);
-
-                RowVector grad_v_curr = gc4 * (-20.0 * tp.h3_inv) +
-                                            gc5 * (45.0 * tp.h4_inv) +
-                                            gc6 * (-36.0 * tp.h5_inv) +
-                                            gc7 * (10.0 * tp.h6_inv);
-
-                RowVector grad_v_next = gc4 * (-15.0 * tp.h3_inv) +
-                                            gc5 * (39.0 * tp.h4_inv) +
-                                            gc6 * (-34.0 * tp.h5_inv) +
-                                            gc7 * (10.0 * tp.h6_inv);
-
-                RowVector grad_a_curr = gc4 * (-5.0 * tp.h2_inv) +
-                                            gc5 * (10.0 * tp.h3_inv) +
-                                            gc6 * (-7.5 * tp.h4_inv) +
-                                            gc7 * (2.0 * tp.h5_inv);
-
-                RowVector grad_a_next = gc4 * (2.5 * tp.h2_inv) +
-                                            gc5 * (-7.0 * tp.h3_inv) +
-                                            gc6 * (6.5 * tp.h4_inv) +
-                                            gc7 * (-2.0 * tp.h5_inv);
-
-                RowVector grad_j_curr = gc4 * (-2.0 / 3.0 * tp.h_inv) +
-                                            gc5 * (tp.h2_inv) +
-                                            gc6 * (-2.0 / 3.0 * tp.h3_inv) +
-                                            gc7 * (1.0 / 6.0 * tp.h4_inv);
-
-                RowVector grad_j_next = gc4 * (-1.0 / 6.0 * tp.h_inv) +
-                                            gc5 * (0.5 * tp.h2_inv) +
-                                            gc6 * (-0.5 * tp.h3_inv) +
-                                            gc7 * (1.0 / 6.0 * tp.h4_inv);
-
-                add_grad_d(i, grad_v_curr, grad_a_curr, grad_j_curr);
-                add_grad_d(i + 1, grad_v_next, grad_a_next, grad_j_next);
-
-                {
-                    const RowVector &P_curr = spatial_points_.row(i);
-                    const RowVector &P_next = spatial_points_.row(i + 1);
-                    const RowVector &V_curr = internal_vel_.row(i);
-                    const RowVector &V_next = internal_vel_.row(i + 1);
-                    const RowVector &A_curr = internal_acc_.row(i);
-                    const RowVector &A_next = internal_acc_.row(i + 1);
-                    const RowVector &J_curr = internal_jerk_.row(i);
-                    const RowVector &J_next = internal_jerk_.row(i + 1);
-                    if constexpr (DIM <= 3)
-                    {
-                        double h8_inv = tp.h7_inv * tp.h_inv;
-                        double dot_dc4 = 0.0;
-                        double dot_dc5 = 0.0;
-                        double dot_dc6 = 0.0;
-                        double dot_dc7 = 0.0;
-
-                        for (int j = 0; j < DIM; ++j)
-                        {
-                            const double dPj = P_curr(j) - P_next(j);
-                            const double dc4 = ((840.0 * dPj * tp.h5_inv) +
-                                                (360.0 * V_curr(j) * tp.h4_inv) + (270.0 * V_next(j) * tp.h4_inv) +
-                                                (60.0 * A_curr(j) * tp.h3_inv) - (30.0 * A_next(j) * tp.h3_inv) +
-                                                (4.0 * J_curr(j) * tp.h2_inv) + (J_next(j) * tp.h2_inv)) /
-                                               6.0;
-
-                            const double dc5 = ((-840.0 * dPj * tp.h6_inv) -
-                                                (360.0 * V_curr(j) * tp.h5_inv) - (312.0 * V_next(j) * tp.h5_inv) -
-                                                (60.0 * A_curr(j) * tp.h4_inv) + (42.0 * A_next(j) * tp.h4_inv) -
-                                                (4.0 * J_curr(j) * tp.h3_inv) - (2.0 * J_next(j) * tp.h3_inv)) /
-                                               2.0;
-
-                            const double dc6 = ((2520.0 * dPj * tp.h7_inv) +
-                                                (1080.0 * V_curr(j) * tp.h6_inv) + (1020.0 * V_next(j) * tp.h6_inv) +
-                                                (180.0 * A_curr(j) * tp.h5_inv) - (156.0 * A_next(j) * tp.h5_inv) +
-                                                (12.0 * J_curr(j) * tp.h4_inv) + (9.0 * J_next(j) * tp.h4_inv)) /
-                                               6.0;
-
-                            const double dc7 = ((-840.0 * dPj * h8_inv) -
-                                                (360.0 * V_curr(j) * tp.h7_inv) - (360.0 * V_next(j) * tp.h7_inv) -
-                                                (60.0 * A_curr(j) * tp.h6_inv) + (60.0 * A_next(j) * tp.h6_inv) -
-                                                (4.0 * J_curr(j) * tp.h5_inv) - (4.0 * J_next(j) * tp.h5_inv)) /
-                                               6.0;
-
-                            dot_dc4 += gc4(j) * dc4;
-                            dot_dc5 += gc5(j) * dc5;
-                            dot_dc6 += gc6(j) * dc6;
-                            dot_dc7 += gc7(j) * dc7;
-                        }
-
-                        gradByTimes(i) += dot_dc4 + dot_dc5 + dot_dc6 + dot_dc7;
-                    }
-                    else
-                    {
-                        RowVector dP = P_curr - P_next;
-
-                        RowVector dc4_dh = ((840.0 * dP * tp.h5_inv) +
-                                                (360.0 * V_curr * tp.h4_inv) + (270.0 * V_next * tp.h4_inv) +
-                                                (60.0 * A_curr * tp.h3_inv) - (30.0 * A_next * tp.h3_inv) +
-                                                (4.0 * J_curr * tp.h2_inv) + (J_next * tp.h2_inv)) /
-                                               6.0;
-
-                        RowVector dc5_dh = ((-840.0 * dP * tp.h6_inv) -
-                                                (360.0 * V_curr * tp.h5_inv) - (312.0 * V_next * tp.h5_inv) -
-                                                (60.0 * A_curr * tp.h4_inv) + (42.0 * A_next * tp.h4_inv) -
-                                                (4.0 * J_curr * tp.h3_inv) - (2.0 * J_next * tp.h3_inv)) /
-                                               2.0;
-
-                        RowVector dc6_dh = ((2520.0 * dP * tp.h7_inv) +
-                                                (1080.0 * V_curr * tp.h6_inv) + (1020.0 * V_next * tp.h6_inv) +
-                                                (180.0 * A_curr * tp.h5_inv) - (156.0 * A_next * tp.h5_inv) +
-                                                (12.0 * J_curr * tp.h4_inv) + (9.0 * J_next * tp.h4_inv)) /
-                                               6.0;
-
-                        double h8_inv = tp.h7_inv * tp.h_inv;
-                        RowVector dc7_dh = ((-840.0 * dP * h8_inv) -
-                                                (360.0 * V_curr * tp.h7_inv) - (360.0 * V_next * tp.h7_inv) -
-                                                (60.0 * A_curr * tp.h6_inv) + (60.0 * A_next * tp.h6_inv) -
-                                                (4.0 * J_curr * tp.h5_inv) - (4.0 * J_next * tp.h5_inv)) /
-                                               6.0;
-
-                        gradByTimes(i) += gc4.dot(dc4_dh) + gc5.dot(dc5_dh) + gc6.dot(dc6_dh) + gc7.dot(dc7_dh);
-                    }
-                }
-            }
-
-            Eigen::Matrix<double, 3, DIM> raw_start_grad;
-            raw_start_grad.row(0) = ws_gd_internal_.row(0).segment(0, DIM);
-            raw_start_grad.row(1) = ws_gd_internal_.row(0).segment(DIM, DIM);
-            raw_start_grad.row(2) = ws_gd_internal_.row(0).segment(2 * DIM, DIM);
-
-            Eigen::Matrix<double, 3, DIM> raw_end_grad;
-            raw_end_grad.row(0) = ws_gd_internal_.row(n).segment(0, DIM);
-            raw_end_grad.row(1) = ws_gd_internal_.row(n).segment(DIM, DIM);
-            raw_end_grad.row(2) = ws_gd_internal_.row(n).segment(2 * DIM, DIM);
-
-            const int num_blocks = n - 1;
-            if (num_blocks > 0)
-            {
-                ws_lambda_.resize(num_blocks * 3, DIM);
-
-                for (int i = 0; i < num_blocks; ++i)
-                {
-                    ws_lambda_.row(3 * i) = ws_gd_internal_.row(i + 1).segment(0, DIM);
-                    ws_lambda_.row(3 * i + 1) = ws_gd_internal_.row(i + 1).segment(DIM, DIM);
-                    ws_lambda_.row(3 * i + 2) = ws_gd_internal_.row(i + 1).segment(2 * DIM, DIM);
-                }
-
-                multiplyStoredBlock3x3T_3xN(D_inv_cache_, 0,
-                                            ws_lambda_.template middleRows<3>(0),
-                                            ws_lambda_.template middleRows<3>(0));
-
-                for (int i = 0; i < num_blocks - 1; ++i)
-                {
-                    subMultiplyStoredBlock3x3T_3xN(U_blocks_cache_, i,
-                                                   ws_lambda_.template middleRows<3>(3 * i),
-                                                   ws_lambda_.template middleRows<3>(3 * (i + 1)));
-                    multiplyStoredBlock3x3T_3xN(D_inv_cache_, i + 1,
-                                                ws_lambda_.template middleRows<3>(3 * (i + 1)),
-                                                ws_lambda_.template middleRows<3>(3 * (i + 1)));
-                }
-
-                for (int i = num_blocks - 2; i >= 0; --i)
-                {
-                    subMultiplyStoredBlock3x3_3xN(D_inv_T_mul_L_next_T_cache_, i,
-                                                  ws_lambda_.template middleRows<3>(3 * (i + 1)),
-                                                  ws_lambda_.template middleRows<3>(3 * i));
-                }
-
-                for (int i = 0; i < num_blocks; ++i)
-                {
-                    const int m = i + 1;
-                    const auto &tp_L = time_powers_[m - 1];
-                    const auto &tp_R = time_powers_[m];
-
-                    const RowVector &P_prev = spatial_points_.row(m - 1);
-                    const RowVector &P_curr = spatial_points_.row(m);
-                    const RowVector &P_next = spatial_points_.row(m + 1);
-                    const RowVector &V_prev = internal_vel_.row(m - 1);
-                    const RowVector &V_curr = internal_vel_.row(m);
-                    const RowVector &V_next = internal_vel_.row(m + 1);
-
-                    const RowVector &A_prev = internal_acc_.row(m - 1);
-                    const RowVector &A_curr = internal_acc_.row(m);
-                    const RowVector &A_next = internal_acc_.row(m + 1);
-
-                    const RowVector &J_prev = internal_jerk_.row(m - 1);
-                    const RowVector &J_curr = internal_jerk_.row(m);
-                    const RowVector &J_next = internal_jerk_.row(m + 1);
-
-                    const RowVector lam_3 = ws_lambda_.row(3 * i);
-                    const RowVector lam_4 = ws_lambda_.row(3 * i + 1);
-                    const RowVector lam_5 = ws_lambda_.row(3 * i + 2);
-
-                    const double dD00_dhL = -1440.0 * tp_L.h4_inv;
-                    const double dD01_dhL = 240.0 * tp_L.h3_inv;
-                    const double dD02_dhL = -16.0 * tp_L.h2_inv;
-                    const double dD10_dhL = -21600.0 * tp_L.h5_inv;
-                    const double dD11_dhL = 3600.0 * tp_L.h4_inv;
-                    const double dD12_dhL = -240.0 * tp_L.h3_inv;
-                    const double dD20_dhL = -129600.0 * tp_L.h6_inv;
-                    const double dD21_dhL = 21600.0 * tp_L.h5_inv;
-                    const double dD22_dhL = -1440.0 * tp_L.h4_inv;
-
-                    const double dL00_dhL = -1080.0 * tp_L.h4_inv;
-                    const double dL01_dhL = -120.0 * tp_L.h3_inv;
-                    const double dL02_dhL = -4.0 * tp_L.h2_inv;
-                    const double dL10_dhL = -18720.0 * tp_L.h5_inv;
-                    const double dL11_dhL = -2520.0 * tp_L.h4_inv;
-                    const double dL12_dhL = -120.0 * tp_L.h3_inv;
-                    const double dL20_dhL = -122400.0 * tp_L.h6_inv;
-                    const double dL21_dhL = -18720.0 * tp_L.h5_inv;
-                    const double dL22_dhL = -1080.0 * tp_L.h4_inv;
-
-                    const double dD00_dhR = -1440.0 * tp_R.h4_inv;
-                    const double dD01_dhR = -240.0 * tp_R.h3_inv;
-                    const double dD02_dhR = -16.0 * tp_R.h2_inv;
-                    const double dD10_dhR = 21600.0 * tp_R.h5_inv;
-                    const double dD11_dhR = 3600.0 * tp_R.h4_inv;
-                    const double dD12_dhR = 240.0 * tp_R.h3_inv;
-                    const double dD20_dhR = -129600.0 * tp_R.h6_inv;
-                    const double dD21_dhR = -21600.0 * tp_R.h5_inv;
-                    const double dD22_dhR = -1440.0 * tp_R.h4_inv;
-
-                    const double dU00_dhR = -1080.0 * tp_R.h4_inv;
-                    const double dU01_dhR = 120.0 * tp_R.h3_inv;
-                    const double dU02_dhR = -4.0 * tp_R.h2_inv;
-                    const double dU10_dhR = 18720.0 * tp_R.h5_inv;
-                    const double dU11_dhR = -2520.0 * tp_R.h4_inv;
-                    const double dU12_dhR = 120.0 * tp_R.h3_inv;
-                    const double dU20_dhR = -122400.0 * tp_R.h6_inv;
-                    const double dU21_dhR = 18720.0 * tp_R.h5_inv;
-                    const double dU22_dhR = -1080.0 * tp_R.h4_inv;
-                    if constexpr (DIM <= 3)
-                    {
-                        double grad_hL = 0.0;
-                        double grad_hR = 0.0;
-                        for (int j = 0; j < DIM; ++j)
-                        {
-                            const double p_prev = P_prev(j);
-                            const double p_curr = P_curr(j);
-                            const double p_next = P_next(j);
-                            const double v_prev = V_prev(j);
-                            const double v_curr = V_curr(j);
-                            const double v_next = V_next(j);
-                            const double a_prev = A_prev(j);
-                            const double a_curr = A_curr(j);
-                            const double a_next = A_next(j);
-                            const double j_prev = J_prev(j);
-                            const double j_curr = J_curr(j);
-                            const double j_next = J_next(j);
-
-                            const double rhs0_L = -3360.0 * (p_curr - p_prev) * tp_L.h5_inv -
-                                                  (dD00_dhL * v_curr + dD01_dhL * a_curr + dD02_dhL * j_curr +
-                                                   dL00_dhL * v_prev + dL01_dhL * a_prev + dL02_dhL * j_prev);
-                            const double rhs1_L = -50400.0 * (p_curr - p_prev) * tp_L.h6_inv -
-                                                  (dD10_dhL * v_curr + dD11_dhL * a_curr + dD12_dhL * j_curr +
-                                                   dL10_dhL * v_prev + dL11_dhL * a_prev + dL12_dhL * j_prev);
-                            const double rhs2_L = -302400.0 * (p_curr - p_prev) * tp_L.h7_inv -
-                                                  (dD20_dhL * v_curr + dD21_dhL * a_curr + dD22_dhL * j_curr +
-                                                   dL20_dhL * v_prev + dL21_dhL * a_prev + dL22_dhL * j_prev);
-
-                            const double rhs0_R = -3360.0 * (p_next - p_curr) * tp_R.h5_inv -
-                                                  (dD00_dhR * v_curr + dD01_dhR * a_curr + dD02_dhR * j_curr +
-                                                   dU00_dhR * v_next + dU01_dhR * a_next + dU02_dhR * j_next);
-                            const double rhs1_R = -50400.0 * (p_curr - p_next) * tp_R.h6_inv -
-                                                  (dD10_dhR * v_curr + dD11_dhR * a_curr + dD12_dhR * j_curr +
-                                                   dU10_dhR * v_next + dU11_dhR * a_next + dU12_dhR * j_next);
-                            const double rhs2_R = -302400.0 * (p_next - p_curr) * tp_R.h7_inv -
-                                                  (dD20_dhR * v_curr + dD21_dhR * a_curr + dD22_dhR * j_curr +
-                                                   dU20_dhR * v_next + dU21_dhR * a_next + dU22_dhR * j_next);
-
-                            grad_hL += lam_3(j) * rhs0_L + lam_4(j) * rhs1_L + lam_5(j) * rhs2_L;
-                            grad_hR += lam_3(j) * rhs0_R + lam_4(j) * rhs1_R + lam_5(j) * rhs2_R;
-                        }
-                        gradByTimes(m - 1) += grad_hL;
-                        gradByTimes(m) += grad_hR;
-                    }
-                    else
-                    {
-                        RowVector rhs0_L = -3360.0 * (P_curr - P_prev) * tp_L.h5_inv -
-                                               (dD00_dhL * V_curr + dD01_dhL * A_curr + dD02_dhL * J_curr +
-                                                dL00_dhL * V_prev + dL01_dhL * A_prev + dL02_dhL * J_prev);
-                        RowVector rhs1_L = -50400.0 * (P_curr - P_prev) * tp_L.h6_inv -
-                                               (dD10_dhL * V_curr + dD11_dhL * A_curr + dD12_dhL * J_curr +
-                                                dL10_dhL * V_prev + dL11_dhL * A_prev + dL12_dhL * J_prev);
-                        RowVector rhs2_L = -302400.0 * (P_curr - P_prev) * tp_L.h7_inv -
-                                               (dD20_dhL * V_curr + dD21_dhL * A_curr + dD22_dhL * J_curr +
-                                                dL20_dhL * V_prev + dL21_dhL * A_prev + dL22_dhL * J_prev);
-
-                        RowVector rhs0_R = -3360.0 * (P_next - P_curr) * tp_R.h5_inv -
-                                               (dD00_dhR * V_curr + dD01_dhR * A_curr + dD02_dhR * J_curr +
-                                                dU00_dhR * V_next + dU01_dhR * A_next + dU02_dhR * J_next);
-                        RowVector rhs1_R = -50400.0 * (P_curr - P_next) * tp_R.h6_inv -
-                                               (dD10_dhR * V_curr + dD11_dhR * A_curr + dD12_dhR * J_curr +
-                                                dU10_dhR * V_next + dU11_dhR * A_next + dU12_dhR * J_next);
-                        RowVector rhs2_R = -302400.0 * (P_next - P_curr) * tp_R.h7_inv -
-                                               (dD20_dhR * V_curr + dD21_dhR * A_curr + dD22_dhR * J_curr +
-                                                dU20_dhR * V_next + dU21_dhR * A_next + dU22_dhR * J_next);
-
-                        gradByTimes(m - 1) += lam_3.dot(rhs0_L) + lam_4.dot(rhs1_L) + lam_5.dot(rhs2_L);
-                        gradByTimes(m) += lam_3.dot(rhs0_R) + lam_4.dot(rhs1_R) + lam_5.dot(rhs2_R);
-                    }
-
-                    double dr3_dp_next = 840.0 * tp_R.h4_inv;
-                    double dr4_dp_next = -10080.0 * tp_R.h5_inv;
-                    double dr5_dp_next = 50400.0 * tp_R.h6_inv;
-                    RowVector grad_P_next = lam_3 * dr3_dp_next + lam_4 * dr4_dp_next + lam_5 * dr5_dp_next;
-
-                    double dr3_dp_curr = -840.0 * (tp_R.h4_inv - tp_L.h4_inv);
-                    double dr4_dp_curr = 10080.0 * (tp_R.h5_inv + tp_L.h5_inv);
-                    double dr5_dp_curr = -50400.0 * (tp_R.h6_inv - tp_L.h6_inv);
-                    RowVector grad_P_curr = lam_3 * dr3_dp_curr + lam_4 * dr4_dp_curr + lam_5 * dr5_dp_curr;
-
-                    double dr3_dp_prev = -840.0 * tp_L.h4_inv;
-                    double dr4_dp_prev = -10080.0 * tp_L.h5_inv;
-                    double dr5_dp_prev = -50400.0 * tp_L.h6_inv;
-                    RowVector grad_P_prev = lam_3 * dr3_dp_prev + lam_4 * dr4_dp_prev + lam_5 * dr5_dp_prev;
-
-                    add_point_grad(i + 2, grad_P_next);
-                    add_point_grad(i + 1, grad_P_curr);
-                    add_point_grad(i, grad_P_prev);
-                }
-
-                Eigen::Matrix<double, 3, DIM> correction_start;
-                multiplyStoredBlock3x3T_3xN(L_blocks_cache_, 0,
-                                            ws_lambda_.template middleRows<3>(0),
-                                            correction_start);
-                raw_start_grad -= correction_start;
-
-                Eigen::Matrix<double, 3, DIM> correction_end;
-                multiplyStoredBlock3x3T_3xN(U_blocks_cache_, num_blocks - 1,
-                                            ws_lambda_.template middleRows<3>(3 * (num_blocks - 1)),
-                                            correction_end);
-                raw_end_grad -= correction_end;
-            }
-
-            startGrads.v = raw_start_grad.row(0).transpose();
-            startGrads.a = raw_start_grad.row(1).transpose();
-            startGrads.j = raw_start_grad.row(2).transpose();
-
-            endGrads.v = raw_end_grad.row(0).transpose();
-            endGrads.a = raw_end_grad.row(1).transpose();
-            endGrads.j = raw_end_grad.row(2).transpose();
+            time_powers_.resize(num_segments_);
         }
+
+        /** @brief Cache reciprocal duration powers used by assembly, Hermite maps and adjoints. */
         void precomputeTimePowers()
         {
-            int n = static_cast<int>(time_segments_.size());
-            time_powers_.resize(n);
-
-            for (int i = 0; i < n; ++i)
-            {
-                double h = time_segments_[i];
-                double iv = 1.0 / h;
-                double iv2 = iv * iv;
-                double iv3 = iv2 * iv;
-                double iv4 = iv3 * iv;
-
-                time_powers_[i].h = h;
-                time_powers_[i].h_inv = iv;
-                time_powers_[i].h2_inv = iv2;
-                time_powers_[i].h3_inv = iv3;
-                time_powers_[i].h4_inv = iv4;
-                time_powers_[i].h5_inv = iv4 * iv;
-                time_powers_[i].h6_inv = iv4 * iv2;
-                time_powers_[i].h7_inv = iv4 * iv3;
-            }
-        }
-
-        void precomputePointDiffs()
-        {
-            point_diffs_.resize(num_segments_, DIM);
             for (int i = 0; i < num_segments_; ++i)
             {
-                point_diffs_.row(i) = spatial_points_.row(i + 1) - spatial_points_.row(i);
+                auto &tp = time_powers_[i];
+                tp.h = time_segments_[i];
+                tp.h_inv = 1.0 / tp.h;
+                tp.h2_inv = tp.h_inv * tp.h_inv;
+                tp.h3_inv = tp.h2_inv * tp.h_inv;
+                tp.h4_inv = tp.h3_inv * tp.h_inv;
+                tp.h5_inv = tp.h4_inv * tp.h_inv;
+                tp.h6_inv = tp.h5_inv * tp.h_inv;
+                tp.h7_inv = tp.h6_inv * tp.h_inv;
             }
         }
 
-        static inline void Inverse3x3(const Eigen::Matrix3d &A, Eigen::Matrix3d &A_inv_out)
+        /** @brief Assemble one knot's stationarity equation for half the integrated squared derivative.
+         * @param knot Interior knot index in [1, num_segments_).
+         * @param[out] diagonal Symmetric diagonal block of the physical energy Hessian.
+         * @param[out] previous Coupling to the preceding knot.
+         * @note Writes this knot's RHS to derivatives_; fixed endpoint terms move to that RHS. */
+        void assembleKnotSystem(int knot, Block &diagonal, Block &previous)
         {
+            const auto &left = time_powers_[knot - 1];
+            const auto &right = time_powers_[knot];
 
-            const double a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2),
-                         a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2),
-                         a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
+            // These constants are the exact unit-interval Hermite energy Gram matrix.
+            diagonal(0, 0) = 25920.0 * left.h5_inv + 25920.0 * right.h5_inv;
+            diagonal(1, 0) = -5400.0 * left.h4_inv + 5400.0 * right.h4_inv;
+            diagonal(1, 1) = 1200.0 * left.h3_inv + 1200.0 * right.h3_inv;
+            diagonal(2, 0) = 480.0 * left.h3_inv + 480.0 * right.h3_inv;
+            diagonal(2, 1) = -120.0 * left.h2_inv + 120.0 * right.h2_inv;
+            diagonal(2, 2) = 16.0 * left.h_inv + 16.0 * right.h_inv;
+            previous(0, 0) = 24480.0 * left.h5_inv;
+            previous(0, 1) = 4680.0 * left.h4_inv;
+            previous(0, 2) = 360.0 * left.h3_inv;
+            previous(1, 0) = -4680.0 * left.h4_inv;
+            previous(1, 1) = -840.0 * left.h3_inv;
+            previous(1, 2) = -60.0 * left.h2_inv;
+            previous(2, 0) = 360.0 * left.h3_inv;
+            previous(2, 1) = 60.0 * left.h2_inv;
+            previous(2, 2) = 4.0 * left.h_inv;
 
-            const double c00 = a11 * a22 - a12 * a21;
-            const double c01 = -(a10 * a22 - a12 * a20);
-            const double c02 = a10 * a21 - a11 * a20;
-
-            const double c10 = -(a01 * a22 - a02 * a21);
-            const double c11 = a00 * a22 - a02 * a20;
-            const double c12 = -(a00 * a21 - a01 * a20);
-
-            const double c20 = a01 * a12 - a02 * a11;
-            const double c21 = -(a00 * a12 - a02 * a10);
-            const double c22 = a00 * a11 - a01 * a10;
-
-            const double det = a00 * c00 + a01 * c01 + a02 * c02;
-            const double inv_det = 1.0 / det;
-
-            A_inv_out(0, 0) = c00 * inv_det;
-            A_inv_out(0, 1) = c10 * inv_det;
-            A_inv_out(0, 2) = c20 * inv_det;
-
-            A_inv_out(1, 0) = c01 * inv_det;
-            A_inv_out(1, 1) = c11 * inv_det;
-            A_inv_out(1, 2) = c21 * inv_det;
-
-            A_inv_out(2, 0) = c02 * inv_det;
-            A_inv_out(2, 1) = c12 * inv_det;
-            A_inv_out(2, 2) = c22 * inv_det;
-        }
-
-        static inline void setBlock3x3(BlockMatrix3x3Storage &storage, int i, const Eigen::Matrix3d &M)
-        {
-            storage(i, 0) = M(0, 0);
-            storage(i, 1) = M(0, 1);
-            storage(i, 2) = M(0, 2);
-            storage(i, 3) = M(1, 0);
-            storage(i, 4) = M(1, 1);
-            storage(i, 5) = M(1, 2);
-            storage(i, 6) = M(2, 0);
-            storage(i, 7) = M(2, 1);
-            storage(i, 8) = M(2, 2);
-        }
-
-        inline void MultiplyStoredBlock3x3(const BlockMatrix3x3Storage &A_storage, int idx_a,
-                                           const BlockMatrix3x3Storage &B_storage, int idx_b,
-                                           Eigen::Matrix3d &C_out) const noexcept
-        {
-            const double a00 = A_storage(idx_a, 0), a01 = A_storage(idx_a, 1), a02 = A_storage(idx_a, 2);
-            const double a10 = A_storage(idx_a, 3), a11 = A_storage(idx_a, 4), a12 = A_storage(idx_a, 5);
-            const double a20 = A_storage(idx_a, 6), a21 = A_storage(idx_a, 7), a22 = A_storage(idx_a, 8);
-            const double b00 = B_storage(idx_b, 0), b01 = B_storage(idx_b, 1), b02 = B_storage(idx_b, 2);
-            const double b10 = B_storage(idx_b, 3), b11 = B_storage(idx_b, 4), b12 = B_storage(idx_b, 5);
-            const double b20 = B_storage(idx_b, 6), b21 = B_storage(idx_b, 7), b22 = B_storage(idx_b, 8);
-            C_out(0, 0) = a00 * b00 + a01 * b10 + a02 * b20;
-            C_out(0, 1) = a00 * b01 + a01 * b11 + a02 * b21;
-            C_out(0, 2) = a00 * b02 + a01 * b12 + a02 * b22;
-            C_out(1, 0) = a10 * b00 + a11 * b10 + a12 * b20;
-            C_out(1, 1) = a10 * b01 + a11 * b11 + a12 * b21;
-            C_out(1, 2) = a10 * b02 + a11 * b12 + a12 * b22;
-            C_out(2, 0) = a20 * b00 + a21 * b10 + a22 * b20;
-            C_out(2, 1) = a20 * b01 + a21 * b11 + a22 * b21;
-            C_out(2, 2) = a20 * b02 + a21 * b12 + a22 * b22;
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void multiplyStoredBlock3x3_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
-                                               const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
-            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
-            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
-            for (int j = 0; j < DIM; ++j)
+            for (int coordinate = 0; coordinate < DIM; ++coordinate)
             {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-                C_out(0, j) = a00 * b0j + a01 * b1j + a02 * b2j;
-                C_out(1, j) = a10 * b0j + a11 * b1j + a12 * b2j;
-                C_out(2, j) = a20 * b0j + a21 * b1j + a22 * b2j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void multiplyStoredBlock3x3T_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
-                                                const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
-            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
-            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-                C_out(0, j) = a00 * b0j + a10 * b1j + a20 * b2j;
-                C_out(1, j) = a01 * b0j + a11 * b1j + a21 * b2j;
-                C_out(2, j) = a02 * b0j + a12 * b1j + a22 * b2j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void subMultiplyStoredBlock3x3T_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
-                                                   const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
-            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
-            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-                C_out(0, j) -= a00 * b0j + a10 * b1j + a20 * b2j;
-                C_out(1, j) -= a01 * b0j + a11 * b1j + a21 * b2j;
-                C_out(2, j) -= a02 * b0j + a12 * b1j + a22 * b2j;
-            }
-        }
-
-        template <typename BlockOut, typename BlockIn>
-        inline void subMultiplyStoredBlock3x3_3xN(const BlockMatrix3x3Storage &A_storage, int idx,
-                                                  const BlockIn &B, BlockOut &&C_out) const noexcept
-        {
-            const double a00 = A_storage(idx, 0), a01 = A_storage(idx, 1), a02 = A_storage(idx, 2);
-            const double a10 = A_storage(idx, 3), a11 = A_storage(idx, 4), a12 = A_storage(idx, 5);
-            const double a20 = A_storage(idx, 6), a21 = A_storage(idx, 7), a22 = A_storage(idx, 8);
-            for (int j = 0; j < DIM; ++j)
-            {
-                const double b0j = B(0, j);
-                const double b1j = B(1, j);
-                const double b2j = B(2, j);
-                C_out(0, j) -= a00 * b0j + a01 * b1j + a02 * b2j;
-                C_out(1, j) -= a10 * b0j + a11 * b1j + a12 * b2j;
-                C_out(2, j) -= a20 * b0j + a21 * b1j + a22 * b2j;
-            }
-        }
-
-    private:
-        void solveInternalDerivatives(const CoefficientMatrix &P,
-                                      CoefficientMatrix &p_out,
-                                      CoefficientMatrix &q_out,
-                                      CoefficientMatrix &s_out)
-        {
-            const int n = static_cast<int>(P.rows());
-            p_out.resize(n, DIM);
-            q_out.resize(n, DIM);
-            s_out.resize(n, DIM);
-
-            p_out.row(0) = boundary_.start_velocity.transpose();
-            q_out.row(0) = boundary_.start_acceleration.transpose();
-            s_out.row(0) = boundary_.start_jerk.transpose();
-
-            p_out.row(n - 1) = boundary_.end_velocity.transpose();
-            q_out.row(n - 1) = boundary_.end_acceleration.transpose();
-            s_out.row(n - 1) = boundary_.end_jerk.transpose();
-
-            const int num_blocks = n - 2;
-            if (num_blocks <= 0)
-                return;
-
-            Eigen::Matrix<double, 3, DIM> B_left, B_right;
-            B_left.row(0) = boundary_.start_velocity.transpose();
-            B_left.row(1) = boundary_.start_acceleration.transpose();
-            B_left.row(2) = boundary_.start_jerk.transpose();
-
-            B_right.row(0) = boundary_.end_velocity.transpose();
-            B_right.row(1) = boundary_.end_acceleration.transpose();
-            B_right.row(2) = boundary_.end_jerk.transpose();
-
-            U_blocks_cache_.resize(num_blocks, 9);
-            D_inv_cache_.resize(num_blocks, 9);
-            L_blocks_cache_.resize(num_blocks, 9);
-            D_inv_T_mul_L_next_T_cache_.resize(std::max(0, num_blocks - 1), 9);
-            ws_rhs_mod_.resize(num_blocks * 3, DIM);
-
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                const int k = i + 2;
-                const auto &tp_L = time_powers_[k - 2];
-                const auto &tp_R = time_powers_[k - 1];
-
-                Eigen::Matrix<double, 1, DIM> r3 = 840.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h4_inv +
-                                                            (P.row(k - 1) - P.row(k - 2)) * tp_L.h4_inv);
-                Eigen::Matrix<double, 1, DIM> r4 = 10080.0 * ((P.row(k - 1) - P.row(k)) * tp_R.h5_inv +
-                                                              (P.row(k - 1) - P.row(k - 2)) * tp_L.h5_inv);
-                Eigen::Matrix<double, 1, DIM> r5 = 50400.0 * ((P.row(k) - P.row(k - 1)) * tp_R.h6_inv +
-                                                              (P.row(k - 1) - P.row(k - 2)) * tp_L.h6_inv);
-                Eigen::Matrix<double, 3, DIM> r;
-                r.row(0) = r3;
-                r.row(1) = r4;
-                r.row(2) = r5;
-
-                Eigen::Matrix3d D;
-                D << 480.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_R.h2_inv - tp_L.h2_inv), 16.0 * (tp_L.h_inv + tp_R.h_inv),
-                    5400.0 * (tp_L.h4_inv - tp_R.h4_inv), -1200.0 * (tp_L.h3_inv + tp_R.h3_inv), 120.0 * (tp_L.h2_inv - tp_R.h2_inv),
-                    25920.0 * (tp_L.h5_inv + tp_R.h5_inv), 5400.0 * (tp_R.h4_inv - tp_L.h4_inv), 480.0 * (tp_L.h3_inv + tp_R.h3_inv);
-
-                Eigen::Matrix3d L;
-                L << 360.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv, 4.0 * tp_L.h_inv,
-                    4680.0 * tp_L.h4_inv, 840.0 * tp_L.h3_inv, 60.0 * tp_L.h2_inv,
-                    24480.0 * tp_L.h5_inv, 4680.0 * tp_L.h4_inv, 360.0 * tp_L.h3_inv;
-                setBlock3x3(L_blocks_cache_, i, L);
-
-                Eigen::Matrix3d U;
-                U << 360.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv, 4.0 * tp_R.h_inv,
-                    -4680.0 * tp_R.h4_inv, 840.0 * tp_R.h3_inv, -60.0 * tp_R.h2_inv,
-                    24480.0 * tp_R.h5_inv, -4680.0 * tp_R.h4_inv, 360.0 * tp_R.h3_inv;
-                setBlock3x3(U_blocks_cache_, i, U);
-
-                if (i == 0)
+                const double delta_left = spatial_points_(knot, coordinate) - spatial_points_(knot - 1, coordinate);
+                const double delta_right = spatial_points_(knot + 1, coordinate) - spatial_points_(knot, coordinate);
+                double rhs0 = 50400.0 * left.h6_inv * delta_left + 50400.0 * right.h6_inv * delta_right;
+                double rhs1 = -10080.0 * left.h5_inv * delta_left + 10080.0 * right.h5_inv * delta_right;
+                double rhs2 = 840.0 * left.h4_inv * delta_left + 840.0 * right.h4_inv * delta_right;
+                if (knot == 1)
                 {
-                    r.noalias() -= L * B_left;
+                    rhs0 -= previous(0, 0) * derivatives_(0, coordinate)
+                        + previous(0, 1) * derivatives_(1, coordinate)
+                        + previous(0, 2) * derivatives_(2, coordinate);
+                    rhs1 -= previous(1, 0) * derivatives_(0, coordinate)
+                        + previous(1, 1) * derivatives_(1, coordinate)
+                        + previous(1, 2) * derivatives_(2, coordinate);
+                    rhs2 -= previous(2, 0) * derivatives_(0, coordinate)
+                        + previous(2, 1) * derivatives_(1, coordinate)
+                        + previous(2, 2) * derivatives_(2, coordinate);
                 }
-                else
+                if (knot + 1 == num_segments_)
                 {
-                    Eigen::Matrix3d X;
-                    MultiplyStoredBlock3x3(D_inv_cache_, i - 1, U_blocks_cache_, i - 1, X);
-                    Eigen::Matrix<double, 3, DIM> Y;
-                    multiplyStoredBlock3x3_3xN(D_inv_cache_, i - 1, ws_rhs_mod_.template middleRows<3>(3 * (i - 1)), Y);
-                    D.noalias() -= L * X;
-                    r.noalias() -= L * Y;
+                    rhs0 -= 24480.0 * right.h5_inv * derivatives_(num_segments_ * 3, coordinate)
+                        - 4680.0 * right.h4_inv * derivatives_(num_segments_ * 3 + 1, coordinate)
+                        + 360.0 * right.h3_inv * derivatives_(num_segments_ * 3 + 2, coordinate);
+                    rhs1 -= 4680.0 * right.h4_inv * derivatives_(num_segments_ * 3, coordinate)
+                        - 840.0 * right.h3_inv * derivatives_(num_segments_ * 3 + 1, coordinate)
+                        + 60.0 * right.h2_inv * derivatives_(num_segments_ * 3 + 2, coordinate);
+                    rhs2 -= 360.0 * right.h3_inv * derivatives_(num_segments_ * 3, coordinate)
+                        - 60.0 * right.h2_inv * derivatives_(num_segments_ * 3 + 1, coordinate)
+                        + 4.0 * right.h_inv * derivatives_(num_segments_ * 3 + 2, coordinate);
                 }
-
-                if (i == num_blocks - 1)
-                {
-                    r.noalias() -= U * B_right;
-                }
-
-                Eigen::Matrix3d D_inv;
-                Inverse3x3(D, D_inv);
-                setBlock3x3(D_inv_cache_, i, D_inv);
-
-                if (i > 0)
-                {
-                    Eigen::Matrix3d L_mul_D_prev_inv;
-                    MultiplyStoredBlock3x3(L_blocks_cache_, i, D_inv_cache_, i - 1, L_mul_D_prev_inv);
-                    setBlock3x3(D_inv_T_mul_L_next_T_cache_, i - 1, L_mul_D_prev_inv.transpose());
-                }
-                ws_rhs_mod_.template middleRows<3>(3 * i) = r;
-            }
-
-            ws_solution_.resize(num_blocks * 3, DIM);
-
-            multiplyStoredBlock3x3_3xN(D_inv_cache_, num_blocks - 1,
-                                       ws_rhs_mod_.template middleRows<3>(3 * (num_blocks - 1)),
-                                       ws_solution_.template middleRows<3>(3 * (num_blocks - 1)));
-
-            for (int i = num_blocks - 2; i >= 0; --i)
-            {
-                auto sol_block = ws_solution_.template middleRows<3>(3 * i);
-                auto sol_next = ws_solution_.template middleRows<3>(3 * (i + 1));
-                auto rhs_i = ws_rhs_mod_.template middleRows<3>(3 * i);
-
-                const double u00 = U_blocks_cache_(i, 0), u01 = U_blocks_cache_(i, 1), u02 = U_blocks_cache_(i, 2);
-                const double u10 = U_blocks_cache_(i, 3), u11 = U_blocks_cache_(i, 4), u12 = U_blocks_cache_(i, 5);
-                const double u20 = U_blocks_cache_(i, 6), u21 = U_blocks_cache_(i, 7), u22 = U_blocks_cache_(i, 8);
-                Eigen::Matrix<double, 3, DIM> rhs_temp;
-                for (int j = 0; j < DIM; ++j)
-                {
-                    const double s0 = sol_next(0, j), s1 = sol_next(1, j), s2 = sol_next(2, j);
-                    rhs_temp(0, j) = rhs_i(0, j) - (u00 * s0 + u01 * s1 + u02 * s2);
-                    rhs_temp(1, j) = rhs_i(1, j) - (u10 * s0 + u11 * s1 + u12 * s2);
-                    rhs_temp(2, j) = rhs_i(2, j) - (u20 * s0 + u21 * s1 + u22 * s2);
-                }
-                multiplyStoredBlock3x3_3xN(D_inv_cache_, i, rhs_temp, sol_block);
-            }
-
-            for (int i = 0; i < num_blocks; ++i)
-            {
-                const int row = i + 1;
-                p_out.row(row) = ws_solution_.row(3 * i);
-                q_out.row(row) = ws_solution_.row(3 * i + 1);
-                s_out.row(row) = ws_solution_.row(3 * i + 2);
+                derivatives_(knot * 3, coordinate) = rhs0;
+                derivatives_(knot * 3 + 1, coordinate) = rhs1;
+                derivatives_(knot * 3 + 2, coordinate) = rhs2;
             }
         }
 
-        void solveSepticInPlace()
+        /** @brief Factor and solve the block system in linear time.
+         * @return False on a nonpositive/nonfinite pivot; true after solving all free derivatives.
+         * @note Forward substitution is fused with assembly to avoid a separate RHS sweep. */
+        bool solveInternalDerivatives()
         {
-            const int n = num_segments_;
+            for (int knot = 1; knot < num_segments_; ++knot)
+            {
+                Block diagonal, previous;
+                assembleKnotSystem(knot, diagonal, previous);
+                auto &factor = factors_[knot - 1];
+                const Factor *prior = knot > 1 ? &factors_[knot - 2] : nullptr;
+                if (!factor.factorize(diagonal, previous, prior))
+                    return false;
+                factor.forward(derivatives_, knot * kDerivativesPerKnot);
+            }
+            backSubstitute(derivatives_);
+            return true;
+        }
 
-            solveInternalDerivatives(spatial_points_, internal_vel_, internal_acc_, internal_jerk_);
+        /** @brief Finish a primal or adjoint solve using the stored diagonal/coupling factors.
+         * @param[in,out] values Knot-major forward-substituted RHS; receives the solution.
+         * @note Endpoint rows are preserved; the caller owns and exclusively supplies the matrix. */
+        void backSubstitute(CoefficientMatrix &values) const
+        {
+            detail::backSubstitute<kDerivativesPerKnot>(factors_, num_segments_, values);
+        }
 
-
-            for (int i = 0; i < n; ++i)
+        /** @brief Generate physical-time coefficients from normalized endpoint residuals.
+         * @note Each row contains contiguous spatial coordinates. The four residuals
+         *       remove the left-end Taylor polynomial on the unit interval before the
+         *       coefficients are converted back to physical time. */
+        void writeCoefficients()
+        {
+            for (int i = 0; i < num_segments_; ++i)
             {
                 const auto &tp = time_powers_[i];
+                const int coefficient_row = i * kCoefficientCount;
+                const int left_row = i * kDerivativesPerKnot;
+                const int right_row = left_row + kDerivativesPerKnot;
+                const RowVector position = spatial_points_.row(i);
 
-                const RowVector c0 = spatial_points_.row(i);
-                const RowVector c1 = internal_vel_.row(i);
-                const RowVector c2 = internal_acc_.row(i) * 0.5;
-                const RowVector c3 = internal_jerk_.row(i) / 6.0;
+                // Single-segment curves have no free knot derivatives or primal workspace.
+                const RowVector velocity = num_segments_ == 1 ? RowVector(boundary_.start_velocity.transpose()) :
+                    RowVector(derivatives_.row(left_row));
+                const RowVector acceleration = num_segments_ == 1 ? RowVector(boundary_.start_acceleration.transpose()) :
+                    RowVector(derivatives_.row(left_row + 1));
+                const RowVector jerk = num_segments_ == 1 ? RowVector(boundary_.start_jerk.transpose()) :
+                    RowVector(derivatives_.row(left_row + 2));
+                const RowVector end_velocity = num_segments_ == 1 ? RowVector(boundary_.end_velocity.transpose()) :
+                    RowVector(derivatives_.row(right_row));
+                const RowVector end_acceleration = num_segments_ == 1 ? RowVector(boundary_.end_acceleration.transpose()) :
+                    RowVector(derivatives_.row(right_row + 1));
+                const RowVector end_jerk = num_segments_ == 1 ? RowVector(boundary_.end_jerk.transpose()) :
+                    RowVector(derivatives_.row(right_row + 2));
+                const RowVector quadratic = 0.5 * acceleration;
+                const RowVector cubic = (1.0 / 6.0) * jerk;
+                const double duration2 = tp.h * tp.h;
+                const double duration3 = duration2 * tp.h;
 
-                const RowVector &V_curr = internal_vel_.row(i);
-                const RowVector &V_next = internal_vel_.row(i + 1);
-                const RowVector &A_curr = internal_acc_.row(i);
-                const RowVector &A_next = internal_acc_.row(i + 1);
-                const RowVector &J_curr = internal_jerk_.row(i);
-                const RowVector &J_next = internal_jerk_.row(i + 1);
-                const RowVector P_diff = -point_diffs_.row(i);
+                // Scale endpoint residuals to the unit interval; shared powers stay outside the map.
+                const RowVector displacement = spatial_points_.row(i + 1) - position;
+                const RowVector scaled_acceleration = duration2 * acceleration;
+                const RowVector scaled_jerk = duration3 * jerk;
+                const RowVector position_residual = displacement - tp.h * velocity -
+                    0.5 * scaled_acceleration - (1.0 / 6.0) * scaled_jerk;
+                const RowVector velocity_residual = tp.h * (end_velocity - velocity) -
+                    scaled_acceleration - 0.5 * scaled_jerk;
+                const RowVector acceleration_residual = duration2 * (end_acceleration - acceleration) - scaled_jerk;
+                const RowVector jerk_residual = duration3 * (end_jerk - jerk);
 
-                const RowVector c4 = -(210.0 * P_diff * tp.h4_inv +
-                                           120.0 * V_curr * tp.h3_inv +
-                                           90.0 * V_next * tp.h3_inv +
-                                           30.0 * A_curr * tp.h2_inv -
-                                           15.0 * A_next * tp.h2_inv +
-                                           4.0 * J_curr * tp.h_inv +
-                                           J_next * tp.h_inv) /
-                                         6.0;
+                // Four explicit Hermite rows determine the high coefficients in physical time.
+                const RowVector quartic = (35.0 * position_residual - 15.0 * velocity_residual +
+                    2.5 * acceleration_residual - (1.0 / 6.0) * jerk_residual) * tp.h4_inv;
+                const RowVector quintic = (-84.0 * position_residual + 39.0 * velocity_residual -
+                    7.0 * acceleration_residual + 0.5 * jerk_residual) * tp.h5_inv;
+                const RowVector sextic = (70.0 * position_residual - 34.0 * velocity_residual +
+                    6.5 * acceleration_residual - 0.5 * jerk_residual) * tp.h6_inv;
+                const RowVector septic = (-20.0 * position_residual + 10.0 * velocity_residual -
+                    2.0 * acceleration_residual + (1.0 / 6.0) * jerk_residual) * tp.h7_inv;
 
-                const RowVector c5 = (168.0 * P_diff * tp.h5_inv +
-                                          90.0 * V_curr * tp.h4_inv +
-                                          78.0 * V_next * tp.h4_inv +
-                                          20.0 * A_curr * tp.h3_inv -
-                                          14.0 * A_next * tp.h3_inv +
-                                          2.0 * J_curr * tp.h2_inv +
-                                          J_next * tp.h2_inv) /
-                                         2.0;
-
-                const RowVector c6 = -(420.0 * P_diff * tp.h6_inv +
-                                           216.0 * V_curr * tp.h5_inv +
-                                           204.0 * V_next * tp.h5_inv +
-                                           45.0 * A_curr * tp.h4_inv -
-                                           39.0 * A_next * tp.h4_inv +
-                                           4.0 * J_curr * tp.h3_inv +
-                                           3.0 * J_next * tp.h3_inv) /
-                                         6.0;
-
-                const RowVector c7 = (120.0 * P_diff * tp.h7_inv +
-                                          60.0 * V_curr * tp.h6_inv +
-                                          60.0 * V_next * tp.h6_inv +
-                                          12.0 * A_curr * tp.h5_inv -
-                                          12.0 * A_next * tp.h5_inv +
-                                          J_curr * tp.h4_inv +
-                                          J_next * tp.h4_inv) /
-                                         6.0;
-
-                trajectory_.coefficients_.row(i * 8 + 0) = c0;
-                trajectory_.coefficients_.row(i * 8 + 1) = c1;
-                trajectory_.coefficients_.row(i * 8 + 2) = c2;
-                trajectory_.coefficients_.row(i * 8 + 3) = c3;
-                trajectory_.coefficients_.row(i * 8 + 4) = c4;
-                trajectory_.coefficients_.row(i * 8 + 5) = c5;
-                trajectory_.coefficients_.row(i * 8 + 6) = c6;
-                trajectory_.coefficients_.row(i * 8 + 7) = c7;
+                // Publish together, after all source rows and duration powers have been read.
+                trajectory_.coefficients_.row(coefficient_row) = position;
+                trajectory_.coefficients_.row(coefficient_row + 1) = velocity;
+                trajectory_.coefficients_.row(coefficient_row + 2) = quadratic;
+                trajectory_.coefficients_.row(coefficient_row + 3) = cubic;
+                trajectory_.coefficients_.row(coefficient_row + 4) = quartic;
+                trajectory_.coefficients_.row(coefficient_row + 5) = quintic;
+                trajectory_.coefficients_.row(coefficient_row + 6) = sextic;
+                trajectory_.coefficients_.row(coefficient_row + 7) = septic;
             }
         }
 
+        // Adjoint: pull back coefficients, reuse factors, accumulate physical gradients.
+        /** @brief Pull back one objective through coefficient generation and knot stationarity.
+         * @param coefficient_partials Physical coefficient partials in piece-major ascending order.
+         * @param duration_partials Direct duration partials with coefficients held fixed, in seconds.
+         * @param[out] gradient Overwritten total physical gradients; prepared storage is reused.
+         * @note Requires a valid spline, matching shapes and exclusive access to this object. */
+        void backwardImpl(const CoefficientMatrix &coefficient_partials,
+                          const Eigen::VectorXd &duration_partials,
+                          Gradients &gradient)
+        {
+            detail::prepareAdjoint(trajectory_, coefficient_partials, duration_partials, gradient, adjoint_);
+
+            // Local map, cached linear solve, then endpoint corrections.
+            pullbackCoefficients(coefficient_partials, gradient);
+            solveAdjoint(gradient);
+            // A fully clamped segment has no free knot derivatives to correct.
+            if (num_segments_ > 1)
+                accumulateAdjoint(gradient);
+        }
+
+        /** @brief Differentiate each segment's explicit Hermite map at fixed knot derivatives.
+         * @param coefficient_partials Piece-major physical coefficient partials, valid for this call.
+         * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives derivative seeds.
+         * @note Homogeneity gives dC/dT without materializing derivative matrices. */
+        void pullbackCoefficients(const CoefficientMatrix &coefficient_partials, Gradients &gradient)
+        {
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                const auto &tp = time_powers_[i];
+                const int coefficient_row = i * kCoefficientCount;
+                const int left_row = i * kDerivativesPerKnot;
+                const int right_row = left_row + kDerivativesPerKnot;
+
+                // Borrow contiguous derivative rows; a fully clamped segment reads its boundary inputs.
+                const Eigen::Map<const RowVector> left_velocity(num_segments_ == 1 ? boundary_.start_velocity.data() :
+                    derivatives_.row(left_row).data());
+                const Eigen::Map<const RowVector> left_acceleration(num_segments_ == 1 ? boundary_.start_acceleration.data() :
+                    derivatives_.row(left_row + 1).data());
+                const Eigen::Map<const RowVector> left_jerk(num_segments_ == 1 ? boundary_.start_jerk.data() :
+                    derivatives_.row(left_row + 2).data());
+                const Eigen::Map<const RowVector> right_velocity(num_segments_ == 1 ? boundary_.end_velocity.data() :
+                    derivatives_.row(right_row).data());
+                const Eigen::Map<const RowVector> right_acceleration(num_segments_ == 1 ? boundary_.end_acceleration.data() :
+                    derivatives_.row(right_row + 1).data());
+                const Eigen::Map<const RowVector> right_jerk(num_segments_ == 1 ? boundary_.end_jerk.data() :
+                    derivatives_.row(right_row + 2).data());
+
+                // Apply the same Hermite map across coordinates, sharing the time multipliers.
+                const RowVector g4 = coefficient_partials.row(coefficient_row + 4);
+                const RowVector g5 = coefficient_partials.row(coefficient_row + 5);
+                const RowVector g6 = coefficient_partials.row(coefficient_row + 6);
+                const RowVector g7 = coefficient_partials.row(coefficient_row + 7);
+                const RowVector grad_v_left = (-20.0 * tp.h3_inv) * g4
+                    + (45.0 * tp.h4_inv) * g5 - (36.0 * tp.h5_inv) * g6 + (10.0 * tp.h6_inv) * g7;
+                const RowVector grad_a_left = (-5.0 * tp.h2_inv) * g4
+                    + (10.0 * tp.h3_inv) * g5 - (7.5 * tp.h4_inv) * g6 + (2.0 * tp.h5_inv) * g7;
+                const RowVector grad_j_left = (-(2.0 / 3.0) * tp.h_inv) * g4 + tp.h2_inv * g5
+                    - ((2.0 / 3.0) * tp.h3_inv) * g6 + ((1.0 / 6.0) * tp.h4_inv) * g7;
+                const RowVector point_partial = (35.0 * tp.h4_inv) * g4
+                    - (84.0 * tp.h5_inv) * g5 + (70.0 * tp.h6_inv) * g6 - (20.0 * tp.h7_inv) * g7;
+                const RowVector grad_v_right = (-15.0 * tp.h3_inv) * g4
+                    + (39.0 * tp.h4_inv) * g5 - (34.0 * tp.h5_inv) * g6 + (10.0 * tp.h6_inv) * g7;
+                const RowVector grad_a_right = (2.5 * tp.h2_inv) * g4
+                    - (7.0 * tp.h3_inv) * g5 + (6.5 * tp.h4_inv) * g6 - (2.0 * tp.h5_inv) * g7;
+                const RowVector grad_j_right = (-(1.0 / 6.0) * tp.h_inv) * g4
+                    + (0.5 * tp.h2_inv) * g5 - (0.5 * tp.h3_inv) * g6 + ((1.0 / 6.0) * tp.h4_inv) * g7;
+
+                gradient.addWaypoint(i, coefficient_partials.row(coefficient_row) - point_partial);
+                gradient.addWaypoint(i + 1, point_partial);
+                adjoint_.row(left_row) += grad_v_left + coefficient_partials.row(coefficient_row + 1);
+                adjoint_.row(right_row) += grad_v_right;
+                adjoint_.row(left_row + 1) += grad_a_left + 0.5 * coefficient_partials.row(coefficient_row + 2);
+                adjoint_.row(right_row + 1) += grad_a_right;
+                adjoint_.row(left_row + 2) += grad_j_left + (1.0 / 6.0) * coefficient_partials.row(coefficient_row + 3);
+                adjoint_.row(right_row + 2) += grad_j_right;
+
+                // c_k scales as T^-k; endpoint derivative order r scales as T^r.
+                RowVector time_partials = -4.0 * g4.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 4))
+                    - 5.0 * g5.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 5))
+                    - 6.0 * g6.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 6))
+                    - 7.0 * g7.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 7));
+                time_partials += grad_v_left.cwiseProduct(left_velocity) + grad_v_right.cwiseProduct(right_velocity)
+                    + 2.0 * grad_a_left.cwiseProduct(left_acceleration) + 2.0 * grad_a_right.cwiseProduct(right_acceleration)
+                    + 3.0 * grad_j_left.cwiseProduct(left_jerk) + 3.0 * grad_j_right.cwiseProduct(right_jerk);
+                gradient.durations(i) += tp.h_inv * time_partials.sum();
+            }
+        }
+
+        /** @brief Preserve clamped boundary seeds and solve for free knot adjoints.
+         * @param[in,out] gradient Receives direct boundary derivative gradients.
+         * @note A is symmetric: the primal factors also solve A^T lambda = seed. */
+        void solveAdjoint(Gradients &gradient)
+        {
+            gradient.start.v = adjoint_.row(0).transpose();
+            gradient.end.v = adjoint_.row(num_segments_ * 3 + 0).transpose();
+            gradient.start.a = adjoint_.row(1).transpose();
+            gradient.end.a = adjoint_.row(num_segments_ * 3 + 1).transpose();
+            gradient.start.j = adjoint_.row(2).transpose();
+            gradient.end.j = adjoint_.row(num_segments_ * 3 + 2).transpose();
+            adjoint_.template topRows<3>().setZero();
+            adjoint_.template bottomRows<3>().setZero();
+
+            for (int knot = 1; knot < num_segments_; ++knot)
+                factors_[knot - 1].forward(adjoint_, knot * kDerivativesPerKnot);
+            backSubstitute(adjoint_);
+        }
+
+        /** @brief Add the interpolation constraint's contribution using endpoint identities.
+         * @param[in,out] gradient Physical point, time and clamped-boundary gradients.
+         * @note The adjoint polynomial has zero positions and knot derivatives from adjoint_.
+         *       Integration by parts gives point/boundary forces; the polarized Hamiltonian
+         *       gives time corrections without constructing dA/dT or differentiating the solver. */
+        void accumulateAdjoint(Gradients &gradient) const
+        {
+            for (int i = 0; i < num_segments_; ++i)
+            {
+                const auto &tp = time_powers_[i];
+                const int coefficient_row = i * kCoefficientCount;
+                const int left_row = i * kDerivativesPerKnot;
+                const int right_row = left_row + kDerivativesPerKnot;
+
+                // Map knot adjoints to a polynomial with zero endpoint positions.
+                const RowVector adjoint_v_left = adjoint_.row(left_row);
+                const RowVector adjoint_v_right = adjoint_.row(right_row);
+                const RowVector adjoint_a_left = adjoint_.row(left_row + 1);
+                const RowVector adjoint_a_right = adjoint_.row(right_row + 1);
+                const RowVector adjoint_j_left = adjoint_.row(left_row + 2);
+                const RowVector adjoint_j_right = adjoint_.row(right_row + 2);
+                const RowVector lambda_c4 = (-20.0 * tp.h3_inv) * adjoint_v_left
+                    - (15.0 * tp.h3_inv) * adjoint_v_right
+                    - (5.0 * tp.h2_inv) * adjoint_a_left + (2.5 * tp.h2_inv) * adjoint_a_right
+                    - ((2.0 / 3.0) * tp.h_inv) * adjoint_j_left - ((1.0 / 6.0) * tp.h_inv) * adjoint_j_right;
+                const RowVector lambda_c5 = (45.0 * tp.h4_inv) * adjoint_v_left
+                    + (39.0 * tp.h4_inv) * adjoint_v_right
+                    + (10.0 * tp.h3_inv) * adjoint_a_left - (7.0 * tp.h3_inv) * adjoint_a_right
+                    + tp.h2_inv * adjoint_j_left + (0.5 * tp.h2_inv) * adjoint_j_right;
+                const RowVector lambda_c6 = (-36.0 * tp.h5_inv) * adjoint_v_left
+                    - (34.0 * tp.h5_inv) * adjoint_v_right
+                    - (7.5 * tp.h4_inv) * adjoint_a_left + (6.5 * tp.h4_inv) * adjoint_a_right
+                    - ((2.0 / 3.0) * tp.h3_inv) * adjoint_j_left - (0.5 * tp.h3_inv) * adjoint_j_right;
+                const RowVector lambda_c7 = (10.0 * tp.h6_inv) * adjoint_v_left
+                    + (10.0 * tp.h6_inv) * adjoint_v_right
+                    + (2.0 * tp.h5_inv) * adjoint_a_left - (2.0 * tp.h5_inv) * adjoint_a_right
+                    + ((1.0 / 6.0) * tp.h4_inv) * adjoint_j_left + ((1.0 / 6.0) * tp.h4_inv) * adjoint_j_right;
+
+                // Endpoint forces use physical derivatives of the adjoint polynomial.
+                const RowVector adjoint_snap = 24.0 * lambda_c4;
+                const RowVector adjoint_crackle = 120.0 * lambda_c5;
+                const RowVector adjoint_pop = 720.0 * lambda_c6;
+                const RowVector adjoint_seventh = 5040.0 * lambda_c7;
+                gradient.addWaypoint(i, -adjoint_seventh);
+                gradient.addWaypoint(i + 1, adjoint_seventh);
+
+                // The polarized Hamiltonian contracts matching physical derivatives.
+                const RowVector velocity = trajectory_.coefficients_.row(coefficient_row + 1);
+                const RowVector acceleration = 2.0 * trajectory_.coefficients_.row(coefficient_row + 2);
+                const RowVector jerk = 6.0 * trajectory_.coefficients_.row(coefficient_row + 3);
+                const RowVector snap = 24.0 * trajectory_.coefficients_.row(coefficient_row + 4);
+                const RowVector crackle = 120.0 * trajectory_.coefficients_.row(coefficient_row + 5);
+                const RowVector pop = 720.0 * trajectory_.coefficients_.row(coefficient_row + 6);
+                const RowVector seventh = 5040.0 * trajectory_.coefficients_.row(coefficient_row + 7);
+                const RowVector time_partials = snap.cwiseProduct(adjoint_snap)
+                    - adjoint_v_left.cwiseProduct(seventh) - velocity.cwiseProduct(adjoint_seventh)
+                    + adjoint_a_left.cwiseProduct(pop) + acceleration.cwiseProduct(adjoint_pop)
+                    - adjoint_j_left.cwiseProduct(crackle) - jerk.cwiseProduct(adjoint_crackle);
+                gradient.durations(i) += time_partials.sum();
+
+                // Only clamped endpoints contribute boundary derivative corrections.
+                if (i == 0)
+                {
+                    gradient.start.v += adjoint_pop.transpose();
+                    gradient.start.a -= adjoint_crackle.transpose();
+                    gradient.start.j += adjoint_snap.transpose();
+                }
+                if (i + 1 == num_segments_)
+                {
+                    const RowVector end_v = tp.h * adjoint_seventh + adjoint_pop;
+                    const RowVector end_a = ((2520.0 * tp.h) * lambda_c7 + adjoint_pop) * tp.h + adjoint_crackle;
+                    const RowVector end_j = (((840.0 * tp.h) * lambda_c7 + 360.0 * lambda_c6) * tp.h
+                        + adjoint_crackle) * tp.h + adjoint_snap;
+                    gradient.end.v -= end_v.transpose();
+                    gradient.end.a += end_a.transpose();
+                    gradient.end.j -= end_j.transpose();
+                }
+            }
+        }
     };
+
+    // Public dimension aliases and compile-time order selection.
 
     using SplinePoint1d = Eigen::Matrix<double, 1, 1>;
     using SplinePoint2d = Eigen::Matrix<double, 2, 1>;
