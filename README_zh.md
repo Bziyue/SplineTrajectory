@@ -6,6 +6,8 @@
 
 [English](README.md) | **中文**
 
+[**HTML API 文档 · 中文 / English**](docs/api/index.html?lang=zh) — 本地打开即可查阅分类接口与维度表、双语搜索和交互曲线。
+
 ## ✨ 概览
 
 - 任意维度的三次、五次和七次最小控制量样条。

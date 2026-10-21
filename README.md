@@ -7,6 +7,8 @@ interface, and differentiable convex-hull conversions.
 
 **English** | [中文](README_zh.md)
 
+[**HTML API reference · English / 中文**](docs/api/index.html) — open locally for task-based API tables, bilingual search and interactive plots.
+
 ## ✨ Overview
 
 - Cubic, quintic and septic minimum-control-effort splines in arbitrary dimensions.

@@ -1,0 +1,844 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="SplineTrajectory 中英双语 API 文档：样条构造、求值采样、解析梯度、优化器与凸包。Bilingual offline API reference.">
+  <title>SplineTrajectory · API 文档</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+
+<a class="skip-link" href="#main"><span data-lang="en" lang="en">Skip to content</span><span data-lang="zh" lang="zh-CN">跳转到正文</span></a>
+<header class="topbar"><button id="menu-toggle" type="button" aria-controls="doc-nav" aria-expanded="false" aria-label="目录 / Navigation">☰</button><a class="brand" href="#overview"><span class="brand-icon" aria-hidden="true">∿</span><strong>SplineTrajectory</strong><span class="brand-type">API</span></a>
+<div class="search"><label class="sr-only" for="search-input"><span data-lang="en" lang="en">Search functions or concepts</span><span data-lang="zh" lang="zh-CN">搜索函数或概念</span></label><span class="search-icon" aria-hidden="true">⌕</span><input id="search-input" type="search" autocomplete="off" placeholder="搜索接口 / Search APIs" aria-controls="search-results" aria-expanded="false"><kbd aria-hidden="true">/</kbd><div id="search-panel" class="search-panel" hidden><p id="search-count" role="status"></p><ul id="search-results"></ul></div></div>
+<div class="language" aria-label="Language / 语言"><button type="button" data-language="zh" aria-pressed="true">中文</button><button type="button" data-language="en" aria-pressed="false">EN</button></div></header>
+<div class="layout"><aside class="sidebar" id="doc-nav"><nav aria-label="API navigation / API 目录">
+<div class="nav-group"><a class="nav-module" href="#overview"><span class="nav-number">01</span><span data-lang="en" lang="en">Overview</span><span data-lang="zh" lang="zh-CN">概览</span></a>
+<a class="nav-child" href="#selection"><span data-lang="en" lang="en">Spline selection</span><span data-lang="zh" lang="zh-CN">样条选型</span></a>
+<a class="nav-child" href="#contracts"><span data-lang="en" lang="en">Types & contracts</span><span data-lang="zh" lang="zh-CN">类型与契约</span></a>
+</div>
+<div class="nav-group"><a class="nav-module" href="#splines"><span class="nav-number">02</span><span data-lang="en" lang="en">Spline solver</span><span data-lang="zh" lang="zh-CN">样条构造与梯度</span></a>
+<a class="nav-child" href="#construction"><span data-lang="en" lang="en">Construction & update</span><span data-lang="zh" lang="zh-CN">构造与更新</span></a>
+<a class="nav-child" href="#spline-access"><span data-lang="en" lang="en">Data access</span><span data-lang="zh" lang="zh-CN">拓扑与数据</span></a>
+<a class="nav-child" href="#energy"><span data-lang="en" lang="en">Energy gradients</span><span data-lang="zh" lang="zh-CN">能量与解析梯度</span></a>
+<a class="nav-child" href="#adjoint"><span data-lang="en" lang="en">Custom-cost adjoint</span><span data-lang="zh" lang="zh-CN">自定义代价伴随</span></a>
+</div>
+<div class="nav-group"><a class="nav-module" href="#polynomial"><span class="nav-number">03</span><span data-lang="en" lang="en">Evaluation & transforms</span><span data-lang="zh" lang="zh-CN">求值与变换</span></a>
+<a class="nav-child" href="#sampling"><span data-lang="en" lang="en">Scalar & batch queries</span><span data-lang="zh" lang="zh-CN">单点与批量求值</span></a>
+<a class="nav-child" href="#sampler"><span data-lang="en" lang="en">Sampler & local time</span><span data-lang="zh" lang="zh-CN">Sampler 与局部时间</span></a>
+<a class="nav-child" href="#transforms"><span data-lang="en" lang="en">Polynomial transforms</span><span data-lang="zh" lang="zh-CN">多项式变换</span></a>
+<a class="nav-child" href="#curve-demo"><span data-lang="en" lang="en">Curve explorer</span><span data-lang="zh" lang="zh-CN">曲线对照</span></a>
+</div>
+<div class="nav-group"><a class="nav-module" href="#optimizer"><span class="nav-number">04</span><span data-lang="en" lang="en">Optimizer</span><span data-lang="zh" lang="zh-CN">轨迹优化器</span></a>
+<a class="nav-child" href="#optimizer-workflow"><span data-lang="en" lang="en">Solve workflow</span><span data-lang="zh" lang="zh-CN">求解流程</span></a>
+<a class="nav-child" href="#problem"><span data-lang="en" lang="en">Problem & masks</span><span data-lang="zh" lang="zh-CN">问题与掩码</span></a>
+<a class="nav-child" href="#objectives"><span data-lang="en" lang="en">Objective stages</span><span data-lang="zh" lang="zh-CN">代价阶段</span></a>
+<a class="nav-child" href="#maps"><span data-lang="en" lang="en">Parameterization</span><span data-lang="zh" lang="zh-CN">参数映射</span></a>
+<a class="nav-child" href="#diagnostics"><span data-lang="en" lang="en">Parallelism & checks</span><span data-lang="zh" lang="zh-CN">并行与校验</span></a>
+</div>
+<div class="nav-group"><a class="nav-module" href="#hulls"><span class="nav-number">05</span><span data-lang="en" lang="en">Convex hulls</span><span data-lang="zh" lang="zh-CN">凸包转换</span></a>
+<a class="nav-child" href="#hull-build"><span data-lang="en" lang="en">Factories & reuse</span><span data-lang="zh" lang="zh-CN">生成与复用</span></a>
+<a class="nav-child" href="#hull-access"><span data-lang="en" lang="en">Controls & pieces</span><span data-lang="zh" lang="zh-CN">控制点与子段</span></a>
+<a class="nav-child" href="#hull-adjoint"><span data-lang="en" lang="en">Hull gradients</span><span data-lang="zh" lang="zh-CN">凸包梯度</span></a>
+<a class="nav-child" href="#hull-demo"><span data-lang="en" lang="en">Subdivision explorer</span><span data-lang="zh" lang="zh-CN">细分示意</span></a>
+</div>
+</nav><div class="sidebar-footer">C++17 · Eigen<br><span data-lang="en" lang="en">Offline reference</span><span data-lang="zh" lang="zh-CN">离线 API 参考</span></div></aside><main id="main">
+<section id="overview" class="module intro"><div class="page-heading"><h1><span data-lang="en" lang="en">API reference</span><span data-lang="zh" lang="zh-CN">API 文档</span></h1><span class="version-tag">3 headers</span></div>
+<p><span data-lang="en" lang="en">Construction, evaluation and differentiation for minimum-control-effort trajectories. Interfaces are grouped by task; the three independent spline solvers share one reference below.</span><span data-lang="zh" lang="zh-CN">最小控制量轨迹的构造、求值与梯度计算。按使用任务组织接口，三套独立样条实现的公共接口统一说明。</span></p>
+<div class="data-flow" aria-label="Data flow / 数据流"><div><span data-lang="en" lang="en">Durations · waypoints · boundaries</span><span data-lang="zh" lang="zh-CN">时长 · 插值点 · 边界</span><small><code>T, P, bc</code></small></div><b>→</b><a href="#construction">Spline<small><span data-lang="en" lang="en">Build / update</span><span data-lang="zh" lang="zh-CN">构造 / 更新</span></small></a><b>→</b><a href="#sampling">PPolyND<small><span data-lang="en" lang="en">Evaluate / sample</span><span data-lang="zh" lang="zh-CN">求值 / 采样</span></small></a><b>↔</b><a href="#adjoint"><span data-lang="en" lang="en">Costs & gradients</span><span data-lang="zh" lang="zh-CN">代价与梯度</span><small>Optimizer · Hull</small></a></div>
+<article class="subsection">
+<h3 id="selection"><span data-lang="en" lang="en">Spline selection</span><span data-lang="zh" lang="zh-CN">样条选型</span><a class="anchor" href="#selection" aria-label="Permalink / 固定链接">#</a></h3>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Type</span><span data-lang="zh" lang="zh-CN">类型</span></th><th><span data-lang="en" lang="en">Degree / K</span><span data-lang="zh" lang="zh-CN">次数 / K</span></th><th><span data-lang="en" lang="en">Objective</span><span data-lang="zh" lang="zh-CN">最小化目标</span></th><th><span data-lang="en" lang="en">Clamped endpoints</span><span data-lang="zh" lang="zh-CN">夹持端点导数</span></th></tr></thead><tbody>
+<tr id="cubic" data-search-entry>
+<td><code>CubicSplineND&lt;DIM&gt;</code></td>
+<td>3 / 4</td>
+<td>∫ ‖p″(t)‖² dt</td>
+<td><span data-lang="en" lang="en">Velocity <code>v</code></span><span data-lang="zh" lang="zh-CN">速度 <code>v</code></span></td>
+</tr>
+<tr id="quintic" data-search-entry>
+<td><code>QuinticSplineND&lt;DIM&gt;</code></td>
+<td>5 / 6</td>
+<td>∫ ‖p‴(t)‖² dt</td>
+<td><span data-lang="en" lang="en"><code>v, a</code></span><span data-lang="zh" lang="zh-CN"><code>v, a</code></span></td>
+</tr>
+<tr id="septic" data-search-entry>
+<td><code>SepticSplineND&lt;DIM&gt;</code></td>
+<td>7 / 8</td>
+<td>∫ ‖p⁽⁴⁾(t)‖² dt</td>
+<td><span data-lang="en" lang="en"><code>v, a, j</code></span><span data-lang="zh" lang="zh-CN"><code>v, a, j</code></span></td>
+</tr>
+<tr id="spline-alias" data-search-entry>
+<td><code>MinDerivativeSplineND&lt;DIM, S&gt;</code></td>
+<td><span data-lang="en" lang="en"><code>S = 2, 3, 4</code></span><span data-lang="zh" lang="zh-CN"><code>S = 2, 3, 4</code></span></td>
+<td><span data-lang="en" lang="en">Selects cubic / quintic / septic</span><span data-lang="zh" lang="zh-CN">分别选择三次 / 五次 / 七次</span></td>
+<td><span data-lang="en" lang="en">Same as the selected class</span><span data-lang="zh" lang="zh-CN">与选定类一致</span></td>
+</tr>
+</tbody></table></div>
+<p class="notation"><span data-lang="en" lang="en"><code>N</code> = segments, <code>D</code> / <code>DIM</code> = spatial dimension, <code>K</code> = coefficients per segment, <code>M</code> = query count, <code>R</code> = highest requested derivative. <code>Spline</code> means the selected solver. <code>Vector</code>, <code>CoefficientMatrix</code>, <code>Polynomial</code> and <code>Gradients</code> are its public aliases. All library names are in <code>SplineTrajectory</code>.</span><span data-lang="zh" lang="zh-CN"><code>N</code> 为段数，<code>D</code> / <code>DIM</code> 为空间维度，<code>K</code> 为每段系数数，<code>M</code> 为查询数，<code>R</code> 为最高查询导数阶数。<code>Spline</code> 代表选定样条类；<code>Vector</code>、<code>CoefficientMatrix</code>、<code>Polynomial</code>、<code>Gradients</code> 是其公开类型别名。库类型均位于 <code>SplineTrajectory</code> 命名空间。</span></p>
+</article>
+<article class="subsection">
+<h3 id="contracts"><span data-lang="en" lang="en">Common types, data & errors</span><span data-lang="zh" lang="zh-CN">通用类型、数据与错误</span><a class="anchor" href="#contracts" aria-label="Permalink / 固定链接">#</a></h3>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Type / data</span><span data-lang="zh" lang="zh-CN">类型 / 数据</span></th><th><span data-lang="en" lang="en">Contract</span><span data-lang="zh" lang="zh-CN">契约</span></th></tr></thead><tbody>
+<tr id="status" data-search-entry>
+<td><code>Status</code></td>
+<td><span data-lang="en" lang="en"><code>code</code>, static <code>message</code>, optional <code>index</code> (−1 if absent). <code>ok()</code> / <code>bool</code> tests success; <code>Status::success()</code> creates OK.</span><span data-lang="zh" lang="zh-CN">包含 <code>code</code>、静态文本 <code>message</code>、可选 <code>index</code>（无位置时为 −1）。<code>ok()</code> / <code>bool</code> 判断成功，<code>Status::success()</code> 创建成功状态。</span></td>
+</tr>
+<tr id="status-or" data-search-entry>
+<td><code>StatusOr&lt;T&gt;</code></td>
+<td><span data-lang="en" lang="en">Owns a value or a failure; check success before <code>value()</code>. <code>std::move(result).value()</code> moves the result out.</span><span data-lang="zh" lang="zh-CN">拥有值或错误；<code>value()</code> 前检查成功状态。<code>std::move(result).value()</code> 可移出结果。</span></td>
+</tr>
+<tr id="error-code" data-search-entry>
+<td><code>ErrorCode</code></td>
+<td><code>Ok</code>, <code>InvalidInput</code>, <code>DimensionMismatch</code>, <code>InvalidState</code>, <code>OutOfRange</code>, <code>ResourceLimit</code>, <code>NumericalFailure</code>, <code>NotPrepared</code>, <code>SamplingNotPrepared</code>, <code>GradientMismatch</code></td>
+</tr>
+<tr id="deriv" data-search-entry>
+<td><code>Deriv</code></td>
+<td><code>Pos=0</code>, <code>Vel=1</code>, <code>Acc=2</code>, <code>Jerk=3</code>, <code>Snap=4</code>, <code>Crackle=5</code>, <code>Pop=6</code></td>
+</tr>
+<tr id="coefficient-layout" data-search-entry>
+<td><span data-lang="en" lang="en">Coordinates & storage</span><span data-lang="zh" lang="zh-CN">坐标与存储</span></td>
+<td><span data-lang="en" lang="en">Times are physical seconds; coordinates and spatial units are caller-defined. Waypoints: <code>(N+1) × D</code>. Coefficients: <code>(N·K) × D</code>, piece-major and ascending local-time powers.</span><span data-lang="zh" lang="zh-CN">时间为物理秒数；坐标系和空间单位由调用方定义。插值点为 <code>(N+1) × D</code>；系数为 <code>(N·K) × D</code>，先分段、段内按局部时间升幂排列。</span></td>
+</tr>
+<tr id="input-contract" data-search-entry>
+<td><span data-lang="en" lang="en">Input preconditions</span><span data-lang="zh" lang="zh-CN">输入前置条件</span></td>
+<td><span data-lang="en" lang="en">Low-level spline/polynomial/hull operations trust finite inputs, valid shapes/indices, positive durations and representable arithmetic. They do not rescan them. Queries and gradients require a valid initialized object.</span><span data-lang="zh" lang="zh-CN">低层样条、多项式、凸包接口信任有限输入、合法形状/索引、正时长和可表示运算范围，不重复扫描。查询和梯度要求对象已有效初始化。</span></td>
+</tr>
+<tr id="failure-contract" data-search-entry>
+<td><span data-lang="en" lang="en">Recoverable failures</span><span data-lang="zh" lang="zh-CN">可恢复失败</span></td>
+<td><span data-lang="en" lang="en">Spline construction reports knot/factorization failures. Optimizer preparation/evaluation validates its boundary inputs and final cost/gradient; callbacks can explicitly reject. Failed <code>evaluate()</code> returns infinity and clears the output gradient.</span><span data-lang="zh" lang="zh-CN">样条构造报告时间节点或分解失败。优化器在准备/求值边界验证输入与最终代价/梯度，并传播回调拒绝；失败的 <code>evaluate()</code> 返回无穷代价并清零输出梯度。</span></td>
+</tr>
+<tr id="lifetime" data-search-entry>
+<td><span data-lang="en" lang="en">Lifetime & concurrency</span><span data-lang="zh" lang="zh-CN">生命周期与并发</span></td>
+<td><span data-lang="en" lang="en">Borrowed segments/samplers require an alive, unchanged polynomial. Reacquire after update, assignment or move. Const queries may run concurrently; spline <code>backward()</code>, optimizer and hull workspaces require exclusive access. Allocation failures and user exceptions are not converted to Status.</span><span data-lang="zh" lang="zh-CN">借用分段/采样器要求源多项式存活且不变；更新、赋值或移动后重新取得。const 查询可并发；样条 <code>backward()</code>、优化器和凸包工作区需独占访问。分配失败和用户异常不转换为 Status。</span></td>
+</tr>
+</tbody></table></div>
+</article>
+</section>
+<section id="splines" class="module">
+<h2 id="splines-title"><span data-lang="en" lang="en">Spline construction & gradients</span><span data-lang="zh" lang="zh-CN">样条构造与梯度</span><a class="anchor" href="#splines-title" aria-label="Permalink / 固定链接">#</a></h2>
+<p class="header-ref"><code>#include "SplineTrajectory.hpp"</code></p>
+<p><span data-lang="en" lang="en">The following signatures apply to <code>CubicSplineND</code>, <code>QuinticSplineND</code> and <code>SepticSplineND</code>. Constructors create empty objects; use <code>create()</code> or a successful <code>update()</code> before numerical queries.</span><span data-lang="zh" lang="zh-CN">以下签名适用于 <code>CubicSplineND</code>、<code>QuinticSplineND</code> 与 <code>SepticSplineND</code>。默认构造得到空对象；数值查询前使用 <code>create()</code> 或成功的 <code>update()</code>。</span></p>
+<article class="subsection">
+<h3 id="construction"><span data-lang="en" lang="en">Construction & in-place update</span><span data-lang="zh" lang="zh-CN">构造与原位更新</span><a class="anchor" href="#construction" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; durations,
+    const CoefficientMatrix&amp; points, double start_time,
+    const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
+static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; knots,
+    const CoefficientMatrix&amp; points, const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
+Status update(const std::vector&lt;double&gt;&amp; durations,
+    const CoefficientMatrix&amp; points, double start_time,
+    const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
+Status update(const std::vector&lt;double&gt;&amp; knots,
+    const CoefficientMatrix&amp; points, const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API / argument</span><span data-lang="zh" lang="zh-CN">接口 / 参数</span></th><th><span data-lang="en" lang="en">Shape / return</span><span data-lang="zh" lang="zh-CN">形状 / 返回</span></th><th><span data-lang="en" lang="en">Use & constraints</span><span data-lang="zh" lang="zh-CN">用途与约束</span></th></tr></thead><tbody>
+<tr id="create" data-search-entry>
+<td><code>create(durations, points, start_time, bc)</code></td>
+<td><code>StatusOr&lt;Spline&gt;</code></td>
+<td><span data-lang="en" lang="en">N positive durations, <code>(N+1) × D</code> points, finite origin. Copies inputs into the new spline.</span><span data-lang="zh" lang="zh-CN">N 个正时长、<code>(N+1) × D</code> 插值点、有限起点时间。输入复制到新样条。</span></td>
+</tr>
+<tr id="create-knots" data-search-entry>
+<td><code>create(knots, points, bc)</code></td>
+<td><code>StatusOr&lt;Spline&gt;</code></td>
+<td><span data-lang="en" lang="en">N+1 strictly increasing absolute times and waypoint rows. Do not pass durations to this overload.</span><span data-lang="zh" lang="zh-CN">N+1 个严格递增的绝对时间与插值点行。此重载不能传入段时长。</span></td>
+</tr>
+<tr id="update" data-search-entry>
+<td><code>update(...)</code></td>
+<td><code>Status</code></td>
+<td><span data-lang="en" lang="en">Reuses fixed-topology storage; recomputes coefficients/factors. Failure invalidates the polynomial. Any update invalidates borrowed views.</span><span data-lang="zh" lang="zh-CN">复用固定拓扑存储，重新计算系数/分解。失败使多项式失效；任何更新均使借用视图失效。</span></td>
+</tr>
+<tr id="boundary-conditions" data-search-entry>
+<td><code>BoundaryConditions&lt;DIM&gt;</code></td>
+<td><span data-lang="en" lang="en">6 × <code>Vector</code> fields</span><span data-lang="zh" lang="zh-CN">6 个 <code>Vector</code> 字段</span></td>
+<td><span data-lang="en" lang="en"><code>start_velocity/acceleration/jerk</code>, <code>end_velocity/acceleration/jerk</code>; zero by default. Only derivatives supported by the chosen spline participate. Endpoint positions are the first/last waypoints.</span><span data-lang="zh" lang="zh-CN"><code>start_velocity/acceleration/jerk</code> 与 <code>end_velocity/acceleration/jerk</code>，默认零。仅选定样条支持的导数参与构造；端点位置来自首尾插值点。</span></td>
+</tr>
+</tbody></table></div>
+<details class="example" open><summary><span data-lang="en" lang="en">Runnable construction example</span><span data-lang="zh" lang="zh-CN">可运行的构造示例</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="construction"><code>#include &quot;SplineTrajectory.hpp&quot;
+#include &lt;iostream&gt;
+
+int main() {
+    using Spline = SplineTrajectory::QuinticSplineND&lt;3&gt;;
+    Spline::CoefficientMatrix points(3, 3);
+    points &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
+    SplineTrajectory::BoundaryConditions&lt;3&gt; bc;
+    bc.start_velocity &lt;&lt; 0.2, 0, 0;
+
+    auto result = Spline::create({1.2, 1.5}, points, 0.0, bc);
+    if (!result) { std::cerr &lt;&lt; result.status().message; return 1; }
+    auto spline = std::move(result).value();
+    auto status = spline.update({1.3, 1.4}, points, 0.0, bc);
+    if (!status) { std::cerr &lt;&lt; status.message; return 1; }
+    std::cout &lt;&lt; spline.polynomial().evaluate(0.5).transpose() &lt;&lt; &#x27;\n&#x27;;
+}
+</code></pre></details>
+</article>
+<article class="subsection">
+<h3 id="spline-access"><span data-lang="en" lang="en">Topology, ownership & data access</span><span data-lang="zh" lang="zh-CN">拓扑、所有权与数据访问</span><a class="anchor" href="#spline-access" aria-label="Permalink / 固定链接">#</a></h3>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Method</span><span data-lang="zh" lang="zh-CN">方法</span></th><th><span data-lang="en" lang="en">Return / shape</span><span data-lang="zh" lang="zh-CN">返回 / 形状</span></th><th><span data-lang="en" lang="en">Meaning</span><span data-lang="zh" lang="zh-CN">说明</span></th></tr></thead><tbody>
+<tr id="spline-isvalid" data-search-entry>
+<td><code>isValid()</code></td>
+<td><code>bool</code></td>
+<td><span data-lang="en" lang="en">Latest construction published a polynomial; not a numerical rescan.</span><span data-lang="zh" lang="zh-CN">最近构造已发布有效多项式；不是一次数值复查。</span></td>
+</tr>
+<tr id="spline-topology" data-search-entry>
+<td><code>dimension()</code>, <code>numSegments()</code>, <code>numPoints()</code></td>
+<td><code>int</code>, <code>int</code>, <code>size_t</code></td>
+<td><span data-lang="en" lang="en">Spatial dimension D, segments N, waypoints N+1.</span><span data-lang="zh" lang="zh-CN">空间维度 D、段数 N、插值点数 N+1。</span></td>
+</tr>
+<tr id="spline-time" data-search-entry>
+<td><code>startTime()</code>, <code>endTime()</code>, <code>duration()</code></td>
+<td><code>double</code></td>
+<td><span data-lang="en" lang="en">Seconds on the caller’s time axis.</span><span data-lang="zh" lang="zh-CN">调用方时间轴上的秒数。</span></td>
+</tr>
+<tr id="spline-inputs" data-search-entry>
+<td><code>waypoints()</code>, <code>durations()</code>, <code>breakpoints()</code>, <code>boundary()</code></td>
+<td><span data-lang="en" lang="en">Const references</span><span data-lang="zh" lang="zh-CN">const 引用</span></td>
+<td><span data-lang="en" lang="en">Borrow <code>(N+1)×D</code>, N durations, N+1 knots and boundary data. Valid until the next mutation.</span><span data-lang="zh" lang="zh-CN">借用 <code>(N+1)×D</code> 点、N 个时长、N+1 个时间节点及边界数据；有效期到下次变更。</span></td>
+</tr>
+<tr id="polynomial-borrow" data-search-entry>
+<td><code>polynomial()</code></td>
+<td><code>const Polynomial&amp;</code></td>
+<td><span data-lang="en" lang="en">No copy; source lifetime/update rules apply. Borrowing from a temporary is deleted.</span><span data-lang="zh" lang="zh-CN">无复制，遵循源生命周期与更新规则。禁止从临时对象借用。</span></td>
+</tr>
+<tr id="polynomial-copy" data-search-entry>
+<td><code>copyPolynomial()</code></td>
+<td><code>Polynomial</code></td>
+<td><span data-lang="en" lang="en">Independent owning snapshot; copies storage and may allocate.</span><span data-lang="zh" lang="zh-CN">独立拥有数据的快照，复制存储并可能分配。</span></td>
+</tr>
+<tr id="spline-traits" data-search-entry>
+<td><code>kDimension</code>, <code>kDegree</code>, <code>kCoefficientCount</code>, <code>kMinDerivativeOrder</code></td>
+<td><code>static constexpr int</code></td>
+<td><span data-lang="en" lang="en">D, degree, K and minimized derivative order S.</span><span data-lang="zh" lang="zh-CN">D、多项式次数、K 和最小化导数阶 S。</span></td>
+</tr>
+</tbody></table></div>
+</article>
+<article class="subsection">
+<h3 id="energy"><span data-lang="en" lang="en">Energy and analytical gradients</span><span data-lang="zh" lang="zh-CN">能量与解析梯度</span><a class="anchor" href="#energy" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>double energy() const;
+Gradients energyGradient() const;
+void energyGradient(Gradients&amp; output) const;
+void energyGradientAdd(Gradients&amp; output, double weight = 1.0) const;
+CoefficientMatrix energyCoefficientPartials() const;
+Eigen::VectorXd energyDurationPartials() const;
+Eigen::VectorXd energyDurationGradient() const;
+CoefficientMatrix energyWaypointGradient() const;
+BoundaryGradients energyBoundaryGradient() const;</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Method</span><span data-lang="zh" lang="zh-CN">方法</span></th><th><span data-lang="en" lang="en">Output</span><span data-lang="zh" lang="zh-CN">输出</span></th><th><span data-lang="en" lang="en">Derivative meaning</span><span data-lang="zh" lang="zh-CN">导数含义</span></th></tr></thead><tbody>
+<tr id="energy-value" data-search-entry>
+<td><code>energy()</code></td>
+<td><code>double</code></td>
+<td><span data-lang="en" lang="en">Unweighted ∫ ‖p<sup>(S)</sup>(t)‖² dt.</span><span data-lang="zh" lang="zh-CN">未加权 ∫ ‖p<sup>(S)</sup>(t)‖² dt。</span></td>
+</tr>
+<tr id="energyGradient" data-search-entry>
+<td><code>energyGradient()</code> / <code>(output)</code></td>
+<td><code>Gradients</code> / <code>void</code></td>
+<td><span data-lang="en" lang="en">Complete energy gradient. Owning form prepares buffers; reference form overwrites.</span><span data-lang="zh" lang="zh-CN">完整能量梯度。返回值版本准备缓冲；引用版本覆盖输出。</span></td>
+</tr>
+<tr id="energyGradientAdd" data-search-entry>
+<td><code>energyGradientAdd(output, weight)</code></td>
+<td><code>void</code></td>
+<td><span data-lang="en" lang="en">Adds weighted gradients to initialized output without clearing it.</span><span data-lang="zh" lang="zh-CN">将加权梯度累加到已初始化输出，不清零。</span></td>
+</tr>
+<tr id="energyCoefficientPartials" data-search-entry>
+<td><code>energyCoefficientPartials()</code></td>
+<td><code>(N·K) × D</code></td>
+<td><span data-lang="en" lang="en">∂E/∂C at fixed durations.</span><span data-lang="zh" lang="zh-CN">固定时长下的 ∂E/∂C。</span></td>
+</tr>
+<tr id="energyDurationPartials" data-search-entry>
+<td><code>energyDurationPartials()</code></td>
+<td><code>N</code></td>
+<td><span data-lang="en" lang="en">Direct ∂E/∂T at <strong>fixed coefficients</strong>.</span><span data-lang="zh" lang="zh-CN"><strong>固定系数</strong>时的直接偏导 ∂E/∂T。</span></td>
+</tr>
+<tr id="energyDurationGradient" data-search-entry>
+<td><code>energyDurationGradient()</code></td>
+<td><code>N</code></td>
+<td><span data-lang="en" lang="en">Total dE/dT, including coefficient dependence on interpolation durations.</span><span data-lang="zh" lang="zh-CN">完整 dE/dT，包括插值系数随时长的变化。</span></td>
+</tr>
+<tr id="energyWaypointGradient" data-search-entry>
+<td><code>energyWaypointGradient()</code></td>
+<td><code>(N−1) × D</code></td>
+<td><span data-lang="en" lang="en">Total gradient for interior waypoints only.</span><span data-lang="zh" lang="zh-CN">仅内部插值点的完整梯度。</span></td>
+</tr>
+<tr id="energyBoundaryGradient" data-search-entry>
+<td><code>energyBoundaryGradient()</code></td>
+<td><code>BoundaryGradientPair&lt;DIM&gt;</code></td>
+<td><span data-lang="en" lang="en">Start/end p/v/a/j; unsupported higher fields remain zero.</span><span data-lang="zh" lang="zh-CN">起终点 p/v/a/j；未支持的高阶字段为零。</span></td>
+</tr>
+</tbody></table></div>
+<p class="note"><span data-lang="en" lang="en">Each partial/gradient getter also has a <code>void method(Output&amp; output) const</code> overload with the corresponding output type. Pre-size its dynamic storage; no resizing occurs. Full gradient storage is prepared with <code>output.resetTopology(N)</code>. Use <code>setZero()</code> before additive accumulation.</span><span data-lang="zh" lang="zh-CN">各偏导/梯度取值方法也提供 <code>void method(Output&amp; output) const</code> 引用重载，输出类型与返回值版本一致。动态缓冲须预分配，调用中不调整大小。完整梯度用 <code>output.resetTopology(N)</code> 准备；累加前用 <code>setZero()</code> 清零。</span></p>
+</article>
+<article class="subsection">
+<h3 id="adjoint"><span data-lang="en" lang="en">Custom-cost adjoint</span><span data-lang="zh" lang="zh-CN">自定义代价的伴随反传</span><a class="anchor" href="#adjoint" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>Gradients backward(const CoefficientMatrix&amp; gdC, const Eigen::VectorXd&amp; gdT);
+void backward(const CoefficientMatrix&amp; gdC, const Eigen::VectorXd&amp; gdT,
+              Gradients&amp; output);</code></pre>
+<div class="equation">dL/dT = ∂L/∂T |<sub>C</sub> + (∂C/∂T)ᵀ · ∂L/∂C</div>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Input / field</span><span data-lang="zh" lang="zh-CN">输入 / 字段</span></th><th><span data-lang="en" lang="en">Type / shape</span><span data-lang="zh" lang="zh-CN">类型 / 形状</span></th><th><span data-lang="en" lang="en">Meaning</span><span data-lang="zh" lang="zh-CN">含义</span></th></tr></thead><tbody>
+<tr id="backward" data-search-entry>
+<td><code>gdC</code></td>
+<td><code>CoefficientMatrix</code> · <code>(N·K) × D</code></td>
+<td><span data-lang="en" lang="en">Partials of the loss with respect to ascending local-time coefficients.</span><span data-lang="zh" lang="zh-CN">代价对局部时间升幂系数的偏导。</span></td>
+</tr>
+<tr id="backward-time" data-search-entry>
+<td><code>gdT</code></td>
+<td><code>Eigen::VectorXd</code> · <code>N</code></td>
+<td><span data-lang="en" lang="en">Independent duration partials holding C fixed; zeros if no explicit duration term.</span><span data-lang="zh" lang="zh-CN">固定 C 的独立时长偏导；没有显式时长项时传零。</span></td>
+</tr>
+<tr id="gradient-inner" data-search-entry>
+<td><code>output.inner_points</code></td>
+<td><code>CoefficientMatrix</code> · <code>(N−1) × D</code></td>
+<td><span data-lang="en" lang="en">Total gradient for interior waypoint positions.</span><span data-lang="zh" lang="zh-CN">内部插值点位置的完整梯度。</span></td>
+</tr>
+<tr id="gradient-duration" data-search-entry>
+<td><code>output.durations</code></td>
+<td><code>Eigen::VectorXd</code> · <code>N</code></td>
+<td><span data-lang="en" lang="en">Total physical-duration gradient, including gdT.</span><span data-lang="zh" lang="zh-CN">包含 gdT 的完整物理时长梯度。</span></td>
+</tr>
+<tr id="gradient-boundary" data-search-entry>
+<td><code>output.start</code>, <code>output.end</code></td>
+<td><code>BoundaryGradient&lt;DIM&gt;</code></td>
+<td><span data-lang="en" lang="en">Each has D-vectors <code>p, v, a, j</code>, including endpoint positions.</span><span data-lang="zh" lang="zh-CN">各含 D 维向量 <code>p, v, a, j</code>，包括端点位置。</span></td>
+</tr>
+</tbody></table></div>
+<p><span data-lang="en" lang="en"><code>backward()</code> reuses construction factors and requires exclusive access to the spline. The reference form overwrites pre-sized output. For energy alone, prefer the direct <code>energyGradient()</code>; <code>backward(energyCoefficientPartials(), energyDurationPartials())</code> expresses the same chain rule.</span><span data-lang="zh" lang="zh-CN"><code>backward()</code> 复用构造分解，需独占样条。引用版本覆盖预分配输出。仅能量项优先使用直接的 <code>energyGradient()</code>；<code>backward(energyCoefficientPartials(), energyDurationPartials())</code> 表达相同链式法则。</span></p>
+<pre class="signature"><code>Spline::Gradients g;
+g.resetTopology(spline.numSegments());
+spline.backward(gdC, gdT, g);   // overwrite / 覆盖
+spline.energyGradientAdd(g, 0.5); // add energy / 累加能量</code></pre>
+</article>
+</section>
+<section id="polynomial" class="module">
+<h2 id="polynomial-title"><span data-lang="en" lang="en">Evaluation & polynomial transforms</span><span data-lang="zh" lang="zh-CN">求值与多项式变换</span><a class="anchor" href="#polynomial-title" aria-label="Permalink / 固定链接">#</a></h2>
+<p class="header-ref"><code>#include "SplineTrajectory.hpp"</code></p>
+<p><span data-lang="en" lang="en"><code>PPolyND&lt;DIM, MaxCoefficients&gt;</code> owns piecewise-polynomial data. Capacity is not degree; the actual coefficient count may be smaller. The spline’s <code>Polynomial</code> alias uses K as its static capacity.</span><span data-lang="zh" lang="zh-CN"><code>PPolyND&lt;DIM, MaxCoefficients&gt;</code> 拥有分段多项式数据。容量不是次数，实际系数数可以更小。样条的 <code>Polynomial</code> 别名使用 K 作为静态容量。</span></p>
+<article class="subsection">
+<h3 id="sampling"><span data-lang="en" lang="en">Scalar, batch & multi-derivative queries</span><span data-lang="zh" lang="zh-CN">单点、批量与多阶求值</span><a class="anchor" href="#sampling" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>// PPolyND: const queries; r is a nonnegative physical derivative order.
+Vector evaluate(double t, Deriv type = Deriv::Pos) const;
+Vector evaluate(double t, int r) const;
+template&lt;int R&gt; Derivatives&lt;R&gt; evaluateDerivatives(double t) const;
+CoefficientMatrix evaluate(const std::vector&lt;double&gt;&amp; times,
+                           Deriv type = Deriv::Pos) const;
+void evaluateInto(const std::vector&lt;double&gt;&amp; times,
+                  Eigen::Ref&lt;CoefficientMatrix&gt; output, int r = 0) const;
+template&lt;int R&gt; DerivativeBatch&lt;R&gt;
+    evaluateDerivatives(const std::vector&lt;double&gt;&amp; times) const;
+template&lt;int R&gt; void evaluateDerivativesInto(
+    const std::vector&lt;double&gt;&amp; times, DerivativeBatch&lt;R&gt;&amp; output) const;</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Task</span><span data-lang="zh" lang="zh-CN">任务</span></th><th><span data-lang="en" lang="en">PPolyND call</span><span data-lang="zh" lang="zh-CN">PPolyND 调用</span></th><th><span data-lang="en" lang="en">Sampler<R> call</span><span data-lang="zh" lang="zh-CN">Sampler<R> 调用</span></th><th><span data-lang="en" lang="en">Output / allocation</span><span data-lang="zh" lang="zh-CN">输出 / 分配</span></th></tr></thead><tbody>
+<tr id="evaluate" data-search-entry>
+<td><span data-lang="en" lang="en">Scalar, one order</span><span data-lang="zh" lang="zh-CN">单点单阶</span></td>
+<td><code>evaluate(t, r)</code></td>
+<td><code>evaluate(t, r)</code></td>
+<td><span data-lang="en" lang="en"><code>Vector</code>; no allocation. Default r = 0.</span><span data-lang="zh" lang="zh-CN"><code>Vector</code>；不分配，默认 0 阶。</span></td>
+</tr>
+<tr id="evaluateDerivatives" data-search-entry>
+<td><span data-lang="en" lang="en">Scalar, orders 0…R</span><span data-lang="zh" lang="zh-CN">单点 0…R 阶</span></td>
+<td><code>evaluateDerivatives&lt;R&gt;(t)</code></td>
+<td><code>evaluateDerivatives(t)</code></td>
+<td><span data-lang="en" lang="en"><code>std::array&lt;Vector, R+1&gt;</code>; no allocation.</span><span data-lang="zh" lang="zh-CN"><code>std::array&lt;Vector, R+1&gt;</code>；不分配。</span></td>
+</tr>
+<tr id="evaluate-batch" data-search-entry>
+<td><span data-lang="en" lang="en">Batch, one order</span><span data-lang="zh" lang="zh-CN">批量单阶</span></td>
+<td><code>evaluate(times, r)</code></td>
+<td><code>evaluate(times, r)</code></td>
+<td><span data-lang="en" lang="en">Owning <code>M × D</code> matrix; allocates.</span><span data-lang="zh" lang="zh-CN">拥有的 <code>M × D</code> 矩阵；分配内存。</span></td>
+</tr>
+<tr id="evaluateInto" data-search-entry>
+<td><span data-lang="en" lang="en">Batch, reuse output</span><span data-lang="zh" lang="zh-CN">批量复用输出</span></td>
+<td><code>evaluateInto(times, out, r)</code></td>
+<td><code>evaluateInto(times, out, r)</code></td>
+<td><span data-lang="en" lang="en"><code>void</code>; out is pre-sized <code>M × D</code>.</span><span data-lang="zh" lang="zh-CN"><code>void</code>；out 预分配为 <code>M × D</code>。</span></td>
+</tr>
+<tr id="evaluateDerivatives-batch" data-search-entry>
+<td><span data-lang="en" lang="en">Batch, orders 0…R</span><span data-lang="zh" lang="zh-CN">批量 0…R 阶</span></td>
+<td><code>evaluateDerivatives&lt;R&gt;(times)</code></td>
+<td><code>evaluateDerivatives(times)</code></td>
+<td><span data-lang="en" lang="en">R+1 owning <code>M × D</code> matrices.</span><span data-lang="zh" lang="zh-CN">R+1 个拥有的 <code>M × D</code> 矩阵。</span></td>
+</tr>
+<tr id="evaluateDerivativesInto" data-search-entry>
+<td><span data-lang="en" lang="en">Batch, reuse all orders</span><span data-lang="zh" lang="zh-CN">批量复用多阶输出</span></td>
+<td><code>evaluateDerivativesInto&lt;R&gt;(times, out)</code></td>
+<td><code>evaluateDerivativesInto(times, out)</code></td>
+<td><span data-lang="en" lang="en"><code>void</code>; pre-size every matrix in out.</span><span data-lang="zh" lang="zh-CN"><code>void</code>；out 的每张矩阵均须预分配。</span></td>
+</tr>
+</tbody></table></div>
+<p><span data-lang="en" lang="en">Single-order batch overloads accept either <code>int</code> or <code>Deriv</code>; <code>evaluate(times)</code> defaults to position. Multi-order results use the derivative order as the index: <code>[0]</code> position, <code>[1]</code> velocity, <code>[2]</code> acceleration. Into outputs must not alias source storage.</span><span data-lang="zh" lang="zh-CN">单阶批量重载接受 <code>int</code> 或 <code>Deriv</code>，<code>evaluate(times)</code> 默认求位置。多阶结果按导数阶数索引：<code>[0]</code> 位置、<code>[1]</code> 速度、<code>[2]</code> 加速度。Into 输出不得与源存储重叠。</span></p>
+<details class="example"><summary><span data-lang="en" lang="en">Runnable sampling example</span><span data-lang="zh" lang="zh-CN">可运行的采样示例</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="sampling"><code>#include &quot;SplineTrajectory.hpp&quot;
+#include &lt;iostream&gt;
+
+int main() {
+    using Spline = SplineTrajectory::QuinticSplineND&lt;3&gt;;
+    Spline::CoefficientMatrix points(3, 3);
+    points &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
+    auto result = Spline::create({1.2, 1.5}, points, 0.0);
+    if (!result) return 1;
+    auto spline = std::move(result).value();
+    const auto &amp;poly = spline.polynomial();
+    const std::vector&lt;double&gt; times{0.0, 0.5, 1.2, 2.7};
+
+    auto pva = poly.evaluateDerivatives&lt;2&gt;(0.5);
+    Spline::CoefficientMatrix velocity(times.size(), 3);
+    poly.evaluateInto(times, velocity, SplineTrajectory::Deriv::Vel);
+    auto sampler = poly.makeSampler&lt;2&gt;();
+    auto position = sampler.evaluate(0.5);
+    auto batch = sampler.evaluateDerivatives(times);
+    std::cout &lt;&lt; position.transpose() &lt;&lt; &#x27;\n&#x27; &lt;&lt; batch[1] &lt;&lt; &#x27;\n&#x27;;
+    return pva[1].isApprox(velocity.row(1).transpose()) ? 0 : 1;
+}
+</code></pre></details>
+</article>
+<article class="subsection">
+<h3 id="sampler"><span data-lang="en" lang="en">Sampler, segment lookup & local time</span><span data-lang="zh" lang="zh-CN">Sampler、分段定位与局部时间</span><a class="anchor" href="#sampler" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>template&lt;int R&gt; Sampler&lt;R&gt; makeSampler() const &amp;;
+Segment at(int index) const &amp;;
+Segment operator[](int index) const &amp;;
+// Segment:
+Vector evaluateLocal(double local_t, Deriv type = Deriv::Pos) const;
+Vector evaluateLocal(double local_t, int r) const;</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API / behavior</span><span data-lang="zh" lang="zh-CN">接口 / 行为</span></th><th><span data-lang="en" lang="en">Time / state</span><span data-lang="zh" lang="zh-CN">时间 / 状态</span></th><th><span data-lang="en" lang="en">When to use</span><span data-lang="zh" lang="zh-CN">用途与约束</span></th></tr></thead><tbody>
+<tr id="query-state" data-search-entry>
+<td><code>poly.evaluate…</code></td>
+<td><span data-lang="en" lang="en">Trajectory time; source has no cursor</span><span data-lang="zh" lang="zh-CN">轨迹时间；源不持有游标</span></td>
+<td><span data-lang="en" lang="en">Scalar queries locate independently. Batches reuse a local cursor: current piece, next piece, then lookup. No order pre-scan.</span><span data-lang="zh" lang="zh-CN">单点独立定位；批量复用局部游标，依次检查当前段、下一段，否则重新查找。不预扫描顺序。</span></td>
+</tr>
+<tr id="makeSampler" data-search-entry>
+<td><code>poly.makeSampler&lt;R&gt;()</code></td>
+<td><span data-lang="en" lang="en">Trajectory time; caller-owned cursor/cache</span><span data-lang="zh" lang="zh-CN">轨迹时间；调用方持有游标/缓存</span></td>
+<td><span data-lang="en" lang="en">Reuses derivative coefficients across calls. Orders must be in <code>[0,R]</code>. Source must stay alive and unchanged. Dynamic capacity may allocate at sampler construction.</span><span data-lang="zh" lang="zh-CN">跨调用复用导数系数。阶数须在 <code>[0,R]</code>。源须存活且不变；动态容量采样器在构造时可能分配。</span></td>
+</tr>
+<tr id="evaluateLocal" data-search-entry>
+<td><code>poly.at(i).evaluateLocal(local_t, r)</code></td>
+<td><span data-lang="en" lang="en">Seconds relative to piece i</span><span data-lang="zh" lang="zh-CN">相对第 i 段起点的秒数</span></td>
+<td><span data-lang="en" lang="en">No piece search. Requires a valid index. <code>Segment</code> also exposes <code>index/startTime/endTime/duration/coefficients</code>.</span><span data-lang="zh" lang="zh-CN">不查找分段，要求索引有效。<code>Segment</code> 还提供 <code>index/startTime/endTime/duration/coefficients</code>。</span></td>
+</tr>
+<tr id="knot-rule" data-search-entry>
+<td><span data-lang="en" lang="en">Knots & extrapolation</span><span data-lang="zh" lang="zh-CN">节点与外推</span></td>
+<td><span data-lang="en" lang="en">Right-sided interior knots</span><span data-lang="zh" lang="zh-CN">内节点取右段</span></td>
+<td><span data-lang="en" lang="en">The final knot selects the last piece. Outside the domain, extrapolate the endpoint polynomial. Supported derivatives above the actual degree are zero.</span><span data-lang="zh" lang="zh-CN">最后节点取末段。域外延拓端点多项式；合法请求高于实际次数时返回零。</span></td>
+</tr>
+</tbody></table></div>
+<p><span data-lang="en" lang="en">Use a separate sampler per concurrent traversal. Sorted, reverse and arbitrary time order are all supported; a sampler is a performance choice, not a different numerical API.</span><span data-lang="zh" lang="zh-CN">每个并发遍历使用独立采样器。顺序、倒序和任意时间顺序均支持；Sampler 是性能选择，不是不同的数值接口。</span></p>
+</article>
+<article class="subsection">
+<h3 id="transforms"><span data-lang="en" lang="en">Polynomial construction, geometry & transforms</span><span data-lang="zh" lang="zh-CN">多项式构造、几何与变换</span><a class="anchor" href="#transforms" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>static PPolyND create(const std::vector&lt;double&gt;&amp; knots,
+                      const CoefficientMatrix&amp; coefficients, int coefficient_count);
+void update(const std::vector&lt;double&gt;&amp; knots,
+            const CoefficientMatrix&amp; coefficients, int coefficient_count);
+StatusOr&lt;PPolyND&gt; derivative(int order = 1) const;
+StatusOr&lt;PPolyND&gt; extractInterval(double start, double end) const;
+StatusOr&lt;PPolyND&gt; appendRebased(const PPolyND&amp; suffix) const;
+StatusOr&lt;double&gt; length(double dt = 0.01) const;
+StatusOr&lt;double&gt; length(double start, double end, double dt = 0.01) const;
+StatusOr&lt;std::vector&lt;double&gt;&gt; generateTimeSequence(double dt) const;
+StatusOr&lt;std::vector&lt;double&gt;&gt; generateTimeSequence(double start, double end, double dt) const;
+static PPolyND zero(const std::vector&lt;double&gt;&amp; knots, int coefficient_count = 1);
+static PPolyND constant(const std::vector&lt;double&gt;&amp; knots, const Vector&amp; value);</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Method</span><span data-lang="zh" lang="zh-CN">方法</span></th><th><span data-lang="en" lang="en">Return</span><span data-lang="zh" lang="zh-CN">返回</span></th><th><span data-lang="en" lang="en">Behavior / precondition</span><span data-lang="zh" lang="zh-CN">行为 / 前置条件</span></th></tr></thead><tbody>
+<tr id="ppoly-create" data-search-entry>
+<td><code>create / update</code></td>
+<td><code>PPolyND / void</code></td>
+<td><span data-lang="en" lang="en">Copies N+1 increasing knots and <code>(N·K)×D</code> coefficients. Inputs, capacity and ranges are caller-validated.</span><span data-lang="zh" lang="zh-CN">复制 N+1 个递增节点和 <code>(N·K)×D</code> 系数。输入、容量与数值范围由调用方验证。</span></td>
+</tr>
+<tr id="derivative" data-search-entry>
+<td><code>derivative(order)</code></td>
+<td><code>StatusOr&lt;PPolyND&gt;</code></td>
+<td><span data-lang="en" lang="en">Owning derivative polynomial; nonnegative order, zero above degree.</span><span data-lang="zh" lang="zh-CN">独立导数多项式；阶数非负，高于次数时生成零多项式。</span></td>
+</tr>
+<tr id="extractInterval" data-search-entry>
+<td><code>extractInterval(start, end)</code></td>
+<td><code>StatusOr&lt;PPolyND&gt;</code></td>
+<td><span data-lang="en" lang="en">Nonempty interval within the source domain; result starts at time zero. Exact coefficient translation at the clipped first piece.</span><span data-lang="zh" lang="zh-CN">源域内非空区间；结果起点时间为零，对首个裁剪段做系数平移。</span></td>
+</tr>
+<tr id="appendRebased" data-search-entry>
+<td><code>appendRebased(suffix)</code></td>
+<td><code>StatusOr&lt;PPolyND&gt;</code></td>
+<td><span data-lang="en" lang="en">Concatenates zero-origin polynomials of equal coefficient count. No fitting or continuity enforcement.</span><span data-lang="zh" lang="zh-CN">拼接系数数相同的零起点多项式。不拟合，也不保证接缝连续。</span></td>
+</tr>
+<tr id="length" data-search-entry>
+<td><code>length(...)</code></td>
+<td><code>StatusOr&lt;double&gt;</code></td>
+<td><span data-lang="en" lang="en">Approximate arc length via left-endpoint speed samples, dt > 0; allocates sample times.</span><span data-lang="zh" lang="zh-CN">用左端点速度采样近似弧长，dt > 0；分配时间序列。</span></td>
+</tr>
+<tr id="generateTimeSequence" data-search-entry>
+<td><code>generateTimeSequence(...)</code></td>
+<td><code>StatusOr&lt;std::vector&lt;double&gt;&gt;</code></td>
+<td><span data-lang="en" lang="en">Positive finite dt and start ≤ end; includes both endpoints. Returns errors for unrepresentable count/progression.</span><span data-lang="zh" lang="zh-CN">dt 正且有限，start ≤ end；包括两端点。不可表示的样本数或时间递增返回错误。</span></td>
+</tr>
+<tr id="zero-constant" data-search-entry>
+<td><code>zero / constant</code></td>
+<td><code>PPolyND</code></td>
+<td><span data-lang="en" lang="en">Owning constant/zero polynomial on caller-validated knots.</span><span data-lang="zh" lang="zh-CN">在调用方已验证的时间节点上创建独立零/常量多项式。</span></td>
+</tr>
+<tr id="ppoly-access" data-search-entry>
+<td><code>isValid / dimension / degree / coefficientCount / numSegments</code></td>
+<td><span data-lang="en" lang="en">Scalar values</span><span data-lang="zh" lang="zh-CN">标量值</span></td>
+<td><span data-lang="en" lang="en">Inspect initialization and actual polynomial topology. <code>clear()</code> invalidates data and views.</span><span data-lang="zh" lang="zh-CN">查看初始化与实际多项式拓扑。<code>clear()</code> 使数据与视图失效。</span></td>
+</tr>
+<tr id="ppoly-storage" data-search-entry>
+<td><code>coefficients / breakpoints / startTime / endTime / duration</code></td>
+<td><span data-lang="en" lang="en">Const references / seconds</span><span data-lang="zh" lang="zh-CN">const 引用 / 秒数</span></td>
+<td><span data-lang="en" lang="en">Read storage and physical time axis. <code>begin/end</code> iterate borrowed Segment proxies.</span><span data-lang="zh" lang="zh-CN">读取存储与物理时间轴。<code>begin/end</code> 遍历借用的 Segment 代理。</span></td>
+</tr>
+</tbody></table></div>
+</article>
+<article class="subsection">
+<h3 id="curve-demo"><span data-lang="en" lang="en">Curve and derivative comparison</span><span data-lang="zh" lang="zh-CN">曲线与导数对照</span><a class="anchor" href="#curve-demo" aria-label="Permalink / 固定链接">#</a></h3>
+<div class="visual"><div class="visual-controls"><label for="derivative-order"><span data-lang="en" lang="en">Derivative</span><span data-lang="zh" lang="zh-CN">导数阶数</span></label><select id="derivative-order"><option value="0">p · 0</option><option value="1">v · 1</option><option value="2">a · 2</option><option value="3">jerk · 3</option><option value="4">snap · 4</option></select><div class="curve-legend"><span class="cubic">Cubic · 3</span><span class="quintic">Quintic · 5</span><span class="septic">Septic · 7</span></div></div>
+<svg id="curve-plot" viewBox="0 0 800 300" role="img" aria-labelledby="curve-title"><title id="curve-title">Spline comparison / 样条对照</title></svg>
+<div class="scrubber"><label for="query-time"><span data-lang="en" lang="en">Query t</span><span data-lang="zh" lang="zh-CN">查询 t</span></label><input id="query-time" type="range" min="0" max="350" value="80"><output id="time-readout"></output></div><div id="curve-readout" class="curve-readout" aria-live="polite"></div>
+<p class="caption"><span data-lang="en" lang="en">Four 1D waypoints at t = 0, 1, 2.4, 3.5 s, with positions 0, 1, −0.35, 0.6. Each spline uses zero supported endpoint derivatives. Shading marks the selected piece; local time = t − piece start. The chart breaks at derivative discontinuities.</span><span data-lang="zh" lang="zh-CN">一维插值点时间为 0、1、2.4、3.5 秒，位置为 0、1、−0.35、0.6。各样条支持的端点导数均设为零。阴影标记当前段；局部时间 = t − 段起点。图线在导数不连续处断开。</span></p>
+<p class="caption"><span data-lang="en" lang="en">Fixed example coefficients were calculated by the C++ library. The browser evaluates these coefficients; it does not run the spline solver. Spatial units are caller-defined.</span><span data-lang="zh" lang="zh-CN">固定示例系数由 C++ 库计算。浏览器仅对这些系数求值，不执行样条求解。空间单位由调用方定义。</span></p>
+</div>
+</article>
+</section>
+<section id="optimizer" class="module">
+<h2 id="optimizer-title"><span data-lang="en" lang="en">Trajectory optimizer</span><span data-lang="zh" lang="zh-CN">轨迹优化器</span><a class="anchor" href="#optimizer-title" aria-label="Permalink / 固定链接">#</a></h2>
+<p class="header-ref"><code>#include "SplineOptimizer.hpp"</code></p>
+<article class="subsection">
+<h3 id="optimizer-workflow"><span data-lang="en" lang="en">Preparation & external solver workflow</span><span data-lang="zh" lang="zh-CN">准备与外部求解流程</span><a class="anchor" href="#optimizer-workflow" aria-label="Permalink / 固定链接">#</a></h3>
+<p><span data-lang="en" lang="en"><code>SplineOptimizer&lt;Spline, Parameterization&gt;</code> supplies a cost and gradient; it does not run an iterative solver. A prepared optimizer owns its reference input, layout and working storage. It is noncopyable, movable and exclusive to one synchronous evaluation at a time.</span><span data-lang="zh" lang="zh-CN"><code>SplineOptimizer&lt;Spline, Parameterization&gt;</code> 提供代价与梯度，不执行迭代求解。准备后的优化器拥有参考输入、布局与工作存储；不可复制，可移动，同一时刻仅进行一次同步求值。</span></p>
+<ol class="steps"><li><code>prepare()</code><span><span data-lang="en" lang="en">Validate and allocate</span><span data-lang="zh" lang="zh-CN">验证并准备存储</span></span></li><li><code>initialGuess()</code><span><span data-lang="en" lang="en">Copy initial coordinates</span><span data-lang="zh" lang="zh-CN">复制初始坐标</span></span></li><li><code>evaluate()</code><span><span data-lang="en" lang="en">External trial loop</span><span data-lang="zh" lang="zh-CN">外部候选迭代</span></span></li><li><code>updateAccepted()</code><span><span data-lang="en" lang="en">Restore accepted x</span><span data-lang="zh" lang="zh-CN">恢复接受解 x</span></span></li></ol>
+<pre class="signature"><code>Status prepare(const Problem&amp; problem, OptimizerOptions options = {});
+template&lt;class Objective&gt;
+Status prepare(const Problem&amp; problem, OptimizerOptions options, const Objective&amp; objective);
+Eigen::VectorXd initialGuess() const;
+template&lt;class Objective, class Executor = SerialExecutor&gt;
+EvaluationResult evaluate(const Eigen::VectorXd&amp; x, Eigen::VectorXd&amp; gradient,
+                          Objective&amp; objective, const Executor&amp; executor = {});
+Status updateAccepted(const Eigen::VectorXd&amp; x);</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Method</span><span data-lang="zh" lang="zh-CN">方法</span></th><th><span data-lang="en" lang="en">Input / output</span><span data-lang="zh" lang="zh-CN">输入 / 输出</span></th><th><span data-lang="en" lang="en">Contract</span><span data-lang="zh" lang="zh-CN">契约</span></th></tr></thead><tbody>
+<tr id="prepare" data-search-entry>
+<td><code>prepare(...)</code></td>
+<td><code>Status</code></td>
+<td><span data-lang="en" lang="en">Copies reference data and allocates buffers. Failure leaves it unprepared. Pass the objective overload if a sample stage is used; no objective reference is retained.</span><span data-lang="zh" lang="zh-CN">复制参考数据并准备缓冲。失败后未准备。有 sample 阶段时使用传 objective 的重载；不保留目标引用。</span></td>
+</tr>
+<tr id="initialGuess" data-search-entry>
+<td><code>initialGuess()</code></td>
+<td><code>Eigen::VectorXd</code></td>
+<td><span data-lang="en" lang="en">Ordinary owning return, asserted successful-prepare precondition. Rejected trials do not invalidate the initial guess.</span><span data-lang="zh" lang="zh-CN">普通拥有返回值；断言要求 prepare 成功。候选拒绝不使初值失效。</span></td>
+</tr>
+<tr id="optimizer-evaluate" data-search-entry>
+<td><code>evaluate(x, g, objective, executor)</code></td>
+<td><code>EvaluationResult {cost, status}</code></td>
+<td><span data-lang="en" lang="en">x and g both have dimension() entries; g is pre-sized. Objective is an lvalue. Fixed-topology library evaluation does not allocate; user callbacks control their own allocations.</span><span data-lang="zh" lang="zh-CN">x、g 均为 dimension() 维，g 须预分配；objective 为左值。固定拓扑的库内部求值不分配，用户回调自行负责分配。</span></td>
+</tr>
+<tr id="updateAccepted" data-search-entry>
+<td><code>updateAccepted(x)</code></td>
+<td><code>Status</code></td>
+<td><span data-lang="en" lang="en">The accepted vector may differ from the last trial. Rebuild before consuming the result; no objective evaluation.</span><span data-lang="zh" lang="zh-CN">接受向量可能不同于最后试探向量。消费结果前重建，不计算目标代价。</span></td>
+</tr>
+<tr id="optimizer-views" data-search-entry>
+<td><code>problem / layout / activeMask / parameters / polynomial</code></td>
+<td><span data-lang="en" lang="en">Borrowed views</span><span data-lang="zh" lang="zh-CN">借用视图</span></td>
+<td><span data-lang="en" lang="en">Problem/layout/mask survive trial evaluations; parameters/polynomial do not. Repreparation or movement invalidates all views. <code>copyPolynomial()</code> owns a snapshot.</span><span data-lang="zh" lang="zh-CN">problem/layout/mask 可跨试探求值；parameters/polynomial 不可。重新准备或移动使全部视图失效。<code>copyPolynomial()</code> 返回独立快照。</span></td>
+</tr>
+<tr id="optimizer-state" data-search-entry>
+<td><code>isPrepared / dimension / energy / recordedSamples</code></td>
+<td><span data-lang="en" lang="en"><code>bool / int / StatusOr&lt;double&gt; / const SampleBuffer&amp;</code></span><span data-lang="zh" lang="zh-CN"><code>bool / int / StatusOr&lt;double&gt; / const SampleBuffer&amp;</code></span></td>
+<td><span data-lang="en" lang="en">Energy is unweighted and may reject an invalid current candidate. Records are available only from the latest successful recording evaluation.</span><span data-lang="zh" lang="zh-CN">能量未加权，当前候选无效时返回错误。记录仅来自最近一次成功的记录求值。</span></td>
+</tr>
+</tbody></table></div>
+<details class="example"><summary><span data-lang="en" lang="en">Runnable optimizer evaluation (no solver dependency)</span><span data-lang="zh" lang="zh-CN">可运行的优化器求值示例（不依赖求解器）</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="optimizer"><code>#include &quot;SplineOptimizer.hpp&quot;
+#include &lt;iostream&gt;
+
+int main() {
+    using Spline = SplineTrajectory::QuinticSplineND&lt;3&gt;;
+    SplineTrajectory::SplineProblem&lt;Spline&gt; problem;
+    problem.durations = {1.2, 1.5};
+    problem.waypoints.resize(3, 3);
+    problem.waypoints &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
+    SplineTrajectory::OptimizerOptions options;
+    options.energy_weight = 1.0;
+    SplineTrajectory::NoObjective objective;
+    SplineTrajectory::SplineOptimizer&lt;Spline&gt; optimizer;
+    auto status = optimizer.prepare(problem, options, objective);
+    if (!status) return 1;
+
+    auto x = optimizer.initialGuess();
+    Eigen::VectorXd gradient(x.size());
+    auto result = optimizer.evaluate(x, gradient, objective);
+    if (!result) { std::cerr &lt;&lt; result.status.message; return 1; }
+    // An external solver repeats evaluate() and chooses an accepted x.
+    if (!optimizer.updateAccepted(x)) return 1;
+    auto trajectory = optimizer.copyPolynomial();
+    std::cout &lt;&lt; result.cost &lt;&lt; &#x27;\n&#x27; &lt;&lt; trajectory.evaluate(0.5).transpose() &lt;&lt; &#x27;\n&#x27;;
+}
+</code></pre></details>
+</article>
+<article class="subsection">
+<h3 id="problem"><span data-lang="en" lang="en">Problem, masks & layout</span><span data-lang="zh" lang="zh-CN">问题、掩码与布局</span><a class="anchor" href="#problem" aria-label="Permalink / 固定链接">#</a></h3>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Type / field</span><span data-lang="zh" lang="zh-CN">类型 / 字段</span></th><th><span data-lang="en" lang="en">Shape / default</span><span data-lang="zh" lang="zh-CN">形状 / 默认值</span></th><th><span data-lang="en" lang="en">Meaning</span><span data-lang="zh" lang="zh-CN">含义</span></th></tr></thead><tbody>
+<tr id="SplineProblem" data-search-entry>
+<td><code>SplineProblem&lt;Spline&gt;</code></td>
+<td><code>durations: N</code>, <code>waypoints: (N+1)×D</code></td>
+<td><span data-lang="en" lang="en">Also holds <code>boundary</code>, <code>start_time = 0</code>, optional <code>mask</code>. Preparation validates active supported physical inputs.</span><span data-lang="zh" lang="zh-CN">还包含 <code>boundary</code>、<code>start_time = 0</code>、可选 <code>mask</code>。准备阶段验证相关物理输入。</span></td>
+</tr>
+<tr id="OptimizerOptions" data-search-entry>
+<td><code>OptimizerOptions</code></td>
+<td><code>energy_weight=0</code>, <code>integration_steps=64</code>, <code>record_samples=false</code></td>
+<td><span data-lang="en" lang="en">Energy weight is finite/nonnegative; integration steps are positive per segment. Change options by preparing again.</span><span data-lang="zh" lang="zh-CN">能量权重有限非负；积分步数为每段正数。改变选项后重新准备。</span></td>
+</tr>
+<tr id="OptimizationMask" data-search-entry>
+<td><code>OptimizationMask::time / waypoints</code></td>
+<td><code>N / N+1</code></td>
+<td><span data-lang="en" lang="en">Empty selects all durations / interior waypoints. Explicit nonzero entries activate coordinates, including endpoints.</span><span data-lang="zh" lang="zh-CN">空掩码分别激活全部时长 / 内部点。显式非零项激活对应变量，可包含端点。</span></td>
+</tr>
+<tr id="boundary-mask" data-search-entry>
+<td><code>mask.start / mask.end</code></td>
+<td><code>BoundaryDerivativeMask {v,a,j}</code></td>
+<td><span data-lang="en" lang="en">All false by default; requesting unsupported derivatives fails preparation.</span><span data-lang="zh" lang="zh-CN">默认全 false；请求不支持的导数会导致准备失败。</span></td>
+</tr>
+<tr id="DecisionLayout" data-search-entry>
+<td><code>DecisionLayout</code></td>
+<td><code>time, waypoints, boundary_offset, auxiliary_offset, dimension</code></td>
+<td><span data-lang="en" lang="en">Order: active times → waypoints → start derivatives → end derivatives → auxiliary variables. Point records include global index, offset and mapped dof.</span><span data-lang="zh" lang="zh-CN">顺序：活跃时长 → 插值点 → 起点导数 → 终点导数 → 辅助变量。点记录包含全局索引、偏移与映射自由度。</span></td>
+</tr>
+</tbody></table></div>
+</article>
+<article class="subsection">
+<h3 id="objectives"><span data-lang="en" lang="en">Named objective stages</span><span data-lang="zh" lang="zh-CN">命名代价阶段</span><a class="anchor" href="#objectives" aria-label="Permalink / 固定链接">#</a></h3>
+<p><span data-lang="en" lang="en">Declare only the needed named members on an ordinary objective object. Each stage is a callable returning <code>EvaluationResult</code>. Use <code>NoObjective</code> explicitly for energy-only evaluation. Output gradients are <strong>additive</strong>: do not resize or clear earlier contributions.</span><span data-lang="zh" lang="zh-CN">在普通目标对象上只声明所需的命名成员。每个阶段是返回 <code>EvaluationResult</code> 的可调用对象。仅能量求值显式使用 <code>NoObjective</code>。输出梯度均为<strong>累加</strong>，不要调整大小或清空前序贡献。</span></p>
+<div class="pipeline"><code>duration → integral → sample → coefficient</code><span>↓</span><code><span data-lang="en" lang="en">spline adjoint + energy</span><span data-lang="zh" lang="zh-CN">样条伴随 + 能量</span></code><span>↓</span><code>parameter → auxiliary backward → time/space backward → decision</code></div>
+<p><span data-lang="en" lang="en">Below, <code>S</code> is the spline, <code>D = S::kDimension</code>, <code>Opt = SplineOptimizer&lt;S&gt;</code>. Views are borrowed only during each synchronous callback. Explicit failures propagate; successful callbacks promise valid shapes and numerical values.</span><span data-lang="zh" lang="zh-CN">下表 <code>S</code> 为样条，<code>D = S::kDimension</code>，<code>Opt = SplineOptimizer&lt;S&gt;</code>。视图仅在同步回调期间借用。显式失败继续传播；回调成功则承诺输出形状与数值有效。</span></p>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Member / callable parameters</span><span data-lang="zh" lang="zh-CN">成员 / 回调参数</span></th><th><span data-lang="en" lang="en">Output gradient shape</span><span data-lang="zh" lang="zh-CN">输出梯度形状</span></th><th><span data-lang="en" lang="en">Responsibility</span><span data-lang="zh" lang="zh-CN">职责</span></th></tr></thead><tbody>
+<tr id="cost-duration" data-search-entry>
+<td><code>duration(const std::vector&lt;double&gt;&amp; T, Eigen::Ref&lt;Eigen::VectorXd&gt; gT)</code></td>
+<td><code>N</code></td>
+<td><span data-lang="en" lang="en">Physical duration cost before adjoint.</span><span data-lang="zh" lang="zh-CN">伴随前的物理时长代价。</span></td>
+</tr>
+<tr id="cost-integral" data-search-entry>
+<td><code>integral(const IntegralPointInfo&amp;, const SampleState&lt;D&gt;&amp;, SampleGradient&lt;D&gt;&amp;)</code></td>
+<td><code>p/v/a/j/s: D×1</code>, <code>time: double</code></td>
+<td><span data-lang="en" lang="en">Unweighted integrand; declare <code>kDerivativeOrder=0…4</code> (default 4). Optimizer applies trapezoid weights and time chain.</span><span data-lang="zh" lang="zh-CN">未加权被积函数；声明 <code>kDerivativeOrder=0…4</code>（默认 4）。优化器处理梯形权重与时间链。</span></td>
+</tr>
+<tr id="cost-sample" data-search-entry>
+<td><code>sample(const Opt::SampleBuffer&amp;, Eigen::Ref&lt;Opt::SampleGradMatrix&gt; gp, Eigen::Ref&lt;Eigen::VectorXd&gt; gt)</code></td>
+<td><code>gp: D×M</code>, <code>gt: M</code></td>
+<td><span data-lang="en" lang="en">Cross-sample costs; explicit global-time partial at fixed position. Unlike query matrices, positions use columns here.</span><span data-lang="zh" lang="zh-CN">跨采样点代价；gt 是固定位置下显式全局时间偏导。与查询矩阵不同，此处每列对应一个点。</span></td>
+</tr>
+<tr id="cost-coefficient" data-search-entry>
+<td><code>coefficient(const ParameterView&lt;S&gt;&amp;, CoefficientGradient&lt;S&gt;&amp;)</code></td>
+<td><code>coefficients: (N·K)×D</code>, <code>durations: N</code>, <code>start_time: double</code></td>
+<td><span data-lang="en" lang="en">Coefficient and independent time partials before the spline adjoint; suitable for hull costs.</span><span data-lang="zh" lang="zh-CN">样条伴随前的系数与独立时间偏导，适合凸包代价。</span></td>
+</tr>
+<tr id="cost-parameter" data-search-entry>
+<td><code>parameter(const ParameterView&lt;S&gt;&amp;, ParameterGradient&lt;S&gt;&amp;)</code></td>
+<td><code>inner_points, durations, start, end, start_time</code></td>
+<td><span data-lang="en" lang="en">Total physical gradients after adjoint. <code>addWaypoint(index, Vector)</code> includes endpoints.</span><span data-lang="zh" lang="zh-CN">伴随后完整物理梯度。<code>addWaypoint(index, Vector)</code> 可覆盖端点。</span></td>
+</tr>
+<tr id="cost-decision" data-search-entry>
+<td><code>decision(const DecisionView&amp;, Eigen::Ref&lt;Eigen::VectorXd&gt; gx)</code></td>
+<td><code>dimension()</code></td>
+<td><span data-lang="en" lang="en">Direct decision-domain cost; add to already mapped gradients.</span><span data-lang="zh" lang="zh-CN">决策域直接代价；累加到已映射梯度。</span></td>
+</tr>
+</tbody></table></div>
+<p class="note"><span data-lang="en" lang="en"><code>SampleGradient::time</code> differentiates explicit global time <strong>at fixed state</strong>. Do not include state drift or quadrature weights yourself. The optimizer computes one extra derivative for time drift and propagates explicit time dependence to earlier segment durations and the common start time.</span><span data-lang="zh" lang="zh-CN"><code>SampleGradient::time</code> 表示<strong>固定状态</strong>下的显式全局时间偏导。不要自行包含状态漂移或积分权重。优化器额外计算一阶导数处理时间漂移，并将显式时间依赖传播到前面各段时长与公共起点时间。</span></p>
+<p><span data-lang="en" lang="en"><code>IntegralPointInfo</code> provides segment/step indices, counts, alpha, duration, step size, local/global time, plus endpoint predicates. Shared endpoints are sampled twice with half weights. Optional <code>integral.beginEvaluation()</code> runs once before the loop. Sample recording does not itself add a cost.</span><span data-lang="zh" lang="zh-CN"><code>IntegralPointInfo</code> 提供段/步索引及数量、alpha、时长、步长、局部/全局时间与端点判断。共享端点重复采样且各带半权重。可选 <code>integral.beginEvaluation()</code> 在循环前调用一次。记录采样本身不增加代价。</span></p>
+</article>
+<article class="subsection">
+<h3 id="maps"><span data-lang="en" lang="en">Time, spatial & auxiliary parameterization</span><span data-lang="zh" lang="zh-CN">时间、空间与辅助变量映射</span><a class="anchor" href="#maps" aria-label="Permalink / 固定链接">#</a></h3>
+<p><span data-lang="en" lang="en">A parameterization exposes <code>time</code>, <code>space</code>, <code>auxiliary</code>. The default combines <code>QuadInvTimeMap</code>, <code>IdentitySpatialMap&lt;D&gt;</code> and <code>NoAuxiliaryMap</code>. <code>makeOptimizer&lt;Spline&gt;(maps)</code> deduces and owns the maps; <code>std::ref/std::cref</code> explicitly borrow objects that must outlive the optimizer.</span><span data-lang="zh" lang="zh-CN">参数化提供 <code>time</code>、<code>space</code>、<code>auxiliary</code>。默认组合为 <code>QuadInvTimeMap</code>、<code>IdentitySpatialMap&lt;D&gt;</code>、<code>NoAuxiliaryMap</code>。<code>makeOptimizer&lt;Spline&gt;(maps)</code> 推导并拥有映射；<code>std::ref/std::cref</code> 显式借用，要求对象比优化器存活更久。</span></p>
+<pre class="signature"><code>// Time map:
+double toTime(double tau) const;
+double toTau(double duration) const;
+double backward(double tau, double duration, double grad_duration) const;
+// Spatial map (Vector is the physical D-vector):
+int dimension(int global_index) const;
+Vector toPhysical(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; x, int global_index) const;
+Eigen::VectorXd toUnconstrained(const Vector&amp; p, int global_index) const;
+void backwardInto(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; x, const Vector&amp; gp,
+                  int global_index, Eigen::Ref&lt;Eigen::VectorXd&gt; output) const;
+// Auxiliary map:
+int dimension() const;
+StatusOr&lt;Eigen::VectorXd&gt; initial(const SplineProblem&lt;S&gt;&amp; reference) const;
+Status apply(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; z, MutableParameters&lt;S&gt;&amp; state) const;
+EvaluationResult backward(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; z,
+    const ParameterView&lt;S&gt;&amp; state, ParameterGradient&lt;S&gt;&amp; g,
+    Eigen::Ref&lt;Eigen::VectorXd&gt; gz) const;</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Map / entry</span><span data-lang="zh" lang="zh-CN">映射 / 入口</span></th><th><span data-lang="en" lang="en">Behavior</span><span data-lang="zh" lang="zh-CN">行为与约束</span></th></tr></thead><tbody>
+<tr id="time-map" data-search-entry>
+<td><code>QuadInvTimeMap / IdentityTimeMap</code></td>
+<td><span data-lang="en" lang="en">Positive duration map / direct physical seconds. <code>toTau()</code> encodes initial coordinates. <code>backward()</code> receives duration <strong>before auxiliary mapping</strong>, cached during forward decoding.</span><span data-lang="zh" lang="zh-CN">正时长映射 / 直接物理秒数。<code>toTau()</code> 编码初始坐标。<code>backward()</code> 接收<strong>辅助映射前</strong>的时长，正向解码时已缓存。</span></td>
+</tr>
+<tr id="space-map" data-search-entry>
+<td><code>IdentitySpatialMap&lt;D&gt; / custom space</code></td>
+<td><span data-lang="en" lang="en">Index is global 0…N, including endpoints. dimension(i) must be positive. Inverse returns a vector of that dimension (fixed-size vectors also work). <code>backwardInto()</code> overwrites only its pre-sized decision slice.</span><span data-lang="zh" lang="zh-CN">索引为含端点的全局 0…N，dimension(i) 须为正。逆映射返回该维度向量（也可定长）。<code>backwardInto()</code> 仅覆盖自己的预分配决策切片。</span></td>
+</tr>
+<tr id="aux-map" data-search-entry>
+<td><code>auxiliary.apply / backward</code></td>
+<td><span data-lang="en" lang="en">apply runs before spline construction and must preserve topology. backward transforms physical gradients to pre-auxiliary coordinates, adds to initially-zero gz and may return an auxiliary cost. Ordinary map pullbacks follow it.</span><span data-lang="zh" lang="zh-CN">apply 在构造前执行且须保持拓扑。backward 把物理梯度变回辅助映射前坐标，向初始零 gz 累加，并可返回辅助代价；普通映射反传在其后执行。</span></td>
+</tr>
+<tr id="map-status" data-search-entry>
+<td><span data-lang="en" lang="en">Return contracts</span><span data-lang="zh" lang="zh-CN">返回契约</span></td>
+<td><span data-lang="en" lang="en">Built-in total maps return values/void. Custom rejecting time/spatial maps may use StatusOr/Status in the same protocol. Keep map dimensions and inverse semantics fixed between preparations.</span><span data-lang="zh" lang="zh-CN">内置全定义映射返回值/void。可拒绝输入的自定义时间/空间映射可在同一协议中使用 StatusOr/Status。两次 prepare 之间维度与逆映射语义必须固定。</span></td>
+</tr>
+</tbody></table></div>
+</article>
+<article class="subsection">
+<h3 id="diagnostics"><span data-lang="en" lang="en">Parallel evaluation & gradient checking</span><span data-lang="zh" lang="zh-CN">并行求值与梯度校验</span><a class="anchor" href="#diagnostics" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>template&lt;class Optimizer, class Objective&gt;
+GradientCheckResult checkGradients(Optimizer&amp; optimizer, const Eigen::VectorXd&amp; x,
+    Objective&amp; objective, double step = 1e-6, double tolerance = 1e-4);</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API</span><span data-lang="zh" lang="zh-CN">接口</span></th><th><span data-lang="en" lang="en">Behavior</span><span data-lang="zh" lang="zh-CN">行为</span></th></tr></thead><tbody>
+<tr id="SerialExecutor" data-search-entry>
+<td><code>SerialExecutor</code></td>
+<td><span data-lang="en" lang="en">Default sequential segment execution.</span><span data-lang="zh" lang="zh-CN">默认顺序执行各段。</span></td>
+</tr>
+<tr id="OpenMPExecutor" data-search-entry>
+<td><code>OpenMPExecutor</code></td>
+<td><span data-lang="en" lang="en">OpenMP static segment loop when enabled; serial otherwise. Integral callbacks must be thread-safe; exceptions must not escape worker callbacks.</span><span data-lang="zh" lang="zh-CN">启用 OpenMP 时静态并行处理各段，否则串行。积分回调需线程安全，异常不可逃出工作线程回调。</span></td>
+</tr>
+<tr id="checkGradients" data-search-entry>
+<td><code>checkGradients(...)</code></td>
+<td><span data-lang="en" lang="en">Allocating central differences, then restores the base candidate. Positive finite step/tolerance; tolerance applies to the Euclidean error norm. Returns status, analytical/numerical vectors, relative/error norms and worst component.</span><span data-lang="zh" lang="zh-CN">分配内存做中心差分，随后恢复基准候选。step/tolerance 正且有限；容差用于欧氏误差范数。返回状态、解析/数值向量、相对/范数误差与最差分量。</span></td>
+</tr>
+</tbody></table></div>
+</article>
+</section>
+<section id="hulls" class="module">
+<h2 id="hulls-title"><span data-lang="en" lang="en">Convex-hull conversion & gradients</span><span data-lang="zh" lang="zh-CN">凸包转换与梯度</span><a class="anchor" href="#hulls-title" aria-label="Permalink / 固定链接">#</a></h2>
+<p class="header-ref"><code>#include "SplineConvexHull.hpp"</code></p>
+<article class="subsection">
+<h3 id="hull-build"><span data-lang="en" lang="en">Factories and workspace reuse</span><span data-lang="zh" lang="zh-CN">便利工厂与工作区复用</span><a class="anchor" href="#hull-build" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>template&lt;int DIM, int MaxCoefficients&gt;
+ConvexHullWorkspace&lt;DIM&gt; toBezier(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly,
+    int derivative_order = 0, int subdivision_depth = 0);
+template&lt;int DIM, int MaxCoefficients&gt;
+ConvexHullWorkspace&lt;DIM&gt; toMINVO(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly,
+    int derivative_order = 0, int subdivision_depth = 0);
+// ConvexHullWorkspace&lt;DIM&gt;:
+template&lt;int MaxCoefficients&gt;
+static ConvexHullWorkspace fromPPoly(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly,
+                                    HullOptions options = {});
+void configure(int segments, int coefficient_count, HullOptions options = {});
+template&lt;int MaxCoefficients&gt;
+void configure(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly, HullOptions options = {});
+template&lt;int MaxCoefficients&gt; void update(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly);</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API / options</span><span data-lang="zh" lang="zh-CN">接口 / 选项</span></th><th><span data-lang="en" lang="en">Return / meaning</span><span data-lang="zh" lang="zh-CN">返回 / 含义</span></th></tr></thead><tbody>
+<tr id="toBezier" data-search-entry>
+<td><code>toBezier / toMINVO / fromPPoly</code></td>
+<td><span data-lang="en" lang="en">Owning configured and updated workspace; may allocate and synchronize kernel acquisition. Does not retain a source reference.</span><span data-lang="zh" lang="zh-CN">返回已配置并数值更新、拥有存储的工作区；可能分配并同步获取转换核。不保留源引用。</span></td>
+</tr>
+<tr id="HullOptions" data-search-entry>
+<td><code>HullOptions {basis, derivative_order, subdivision_depth}</code></td>
+<td><span data-lang="en" lang="en">Default Bezier, position (0), depth 0. Derivative order is between 0 and source degree. MINVO result degree must be 0…7. Supported depth is 0…16; caller owns feasible memory/index bounds.</span><span data-lang="zh" lang="zh-CN">默认 Bezier、位置（0）、深度 0。导数阶在 0 到源次数之间；MINVO 结果次数须为 0…7。支持深度 0…16，调用方负责可用内存与索引范围。</span></td>
+</tr>
+<tr id="configure" data-search-entry>
+<td><code>configure(...)</code></td>
+<td><span data-lang="en" lang="en">Prepares topology and shared immutable kernel; controls are not valid yet. May allocate and lock the kernel cache.</span><span data-lang="zh" lang="zh-CN">准备拓扑与共享不可变核，控制点尚无效。可能分配并锁定核缓存。</span></td>
+</tr>
+<tr id="hull-update" data-search-entry>
+<td><code>update(poly)</code></td>
+<td><span data-lang="en" lang="en">Returns void; requires configured matching topology. Refreshes controls/time and adjoint caches without allocation or locking.</span><span data-lang="zh" lang="zh-CN">返回 void，要求已配置且拓扑匹配。无分配、无锁地更新控制点/时间与伴随缓存。</span></td>
+</tr>
+<tr id="hull-matches" data-search-entry>
+<td><code>isConfigured / isValid / matches(poly, options)</code></td>
+<td><span data-lang="en" lang="en">Separate topology readiness, numeric readiness and topology/options matching. Each concurrent computation needs its own mutable workspace.</span><span data-lang="zh" lang="zh-CN">分别判断拓扑就绪、数值就绪、拓扑/选项匹配。每个并发计算使用独立可变工作区。</span></td>
+</tr>
+</tbody></table></div>
+<details class="example"><summary><span data-lang="en" lang="en">Runnable control-cost adjoint example</span><span data-lang="zh" lang="zh-CN">可运行的控制点代价反传示例</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="hull"><code>#include &quot;SplineConvexHull.hpp&quot;
+#include &lt;iostream&gt;
+
+int main() {
+    using Spline = SplineTrajectory::QuinticSplineND&lt;3&gt;;
+    Spline::CoefficientMatrix points(3, 3);
+    points &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
+    auto result = Spline::create({1.2, 1.5}, points, 0.0);
+    if (!result) return 1;
+    auto spline = std::move(result).value();
+    SplineTrajectory::ConvexHullWorkspace&lt;3&gt; hull;
+    hull.configure(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 0, 1});
+    hull.update(spline.polynomial());
+
+    // L = 0.5 * ||controls||^2, dL/dControls = controls.
+    auto dControls = hull.controls().eval();
+    auto partials = hull.backward(dControls);
+    auto gradients = spline.backward(partials.coefficients, partials.durations);
+    std::cout &lt;&lt; hull.numPieces() &lt;&lt; &#x27;\n&#x27; &lt;&lt; gradients.durations.transpose() &lt;&lt; &#x27;\n&#x27;;
+}
+</code></pre></details>
+</article>
+<article class="subsection">
+<h3 id="hull-access"><span data-lang="en" lang="en">Controls and child-piece metadata</span><span data-lang="zh" lang="zh-CN">控制点与子段元数据</span><a class="anchor" href="#hull-access" aria-label="Permalink / 固定链接">#</a></h3>
+<p><span data-lang="en" lang="en">Depth d creates <code>H = N · 2^d</code> child pieces. If the derivative polynomial has degree q, each piece has <code>Q = q+1</code> controls. Controls are stored in piece-major row order.</span><span data-lang="zh" lang="zh-CN">深度 d 产生 <code>H = N · 2^d</code> 个子段。若导数多项式次数为 q，则每个子段有 <code>Q = q+1</code> 个控制点，按子段优先顺序存储。</span></p>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Method / field</span><span data-lang="zh" lang="zh-CN">方法 / 字段</span></th><th><span data-lang="en" lang="en">Shape / return</span><span data-lang="zh" lang="zh-CN">形状 / 返回</span></th><th><span data-lang="en" lang="en">Contract</span><span data-lang="zh" lang="zh-CN">契约</span></th></tr></thead><tbody>
+<tr id="controls" data-search-entry>
+<td><code>controls()</code></td>
+<td><code>const CoefficientMatrix&amp;</code> · <code>(H·Q) × D</code></td>
+<td><span data-lang="en" lang="en">Borrow all controls after update.</span><span data-lang="zh" lang="zh-CN">更新后借用全部控制点。</span></td>
+</tr>
+<tr id="pieceControls" data-search-entry>
+<td><code>pieceControls(i)</code></td>
+<td><code>Q × D</code></td>
+<td><span data-lang="en" lang="en">Borrow a block; requires valid piece index and updated workspace.</span><span data-lang="zh" lang="zh-CN">借用行块，要求合法子段索引与已更新工作区。</span></td>
+</tr>
+<tr id="pieceInfo" data-search-entry>
+<td><code>pieceInfo(i)</code> / <code>pieces()</code></td>
+<td><code>const PieceInfo&amp;</code> / <code>const std::vector&lt;PieceInfo&gt;&amp;</code></td>
+<td><span data-lang="en" lang="en">Contains source_segment, subdivision_index, source_fraction_begin/end, physical start_time and duration. Reconfiguration invalidates references.</span><span data-lang="zh" lang="zh-CN">包含源段号、细分号、源段归一化区间、物理起点与时长。重新配置使引用失效。</span></td>
+</tr>
+<tr id="hull-counts" data-search-entry>
+<td><code>numPieces / controlsPerPiece / piecesPerSegment / numSourceSegments</code></td>
+<td><code>H / Q / 2^d / N</code></td>
+<td><span data-lang="en" lang="en">Topology sizes.</span><span data-lang="zh" lang="zh-CN">拓扑规模。</span></td>
+</tr>
+<tr id="hull-properties" data-search-entry>
+<td><code>basis / derivativeOrder / degree / sourceDegree / subdivisionDepth</code></td>
+<td><span data-lang="en" lang="en">Basis enum / integers</span><span data-lang="zh" lang="zh-CN">基枚举 / 整数</span></td>
+<td><span data-lang="en" lang="en">q is the degree after differentiation; sourceDegree is the original degree.</span><span data-lang="zh" lang="zh-CN">degree 是求导后的次数 q，sourceDegree 是原次数。</span></td>
+</tr>
+<tr id="powerToControlMatrix" data-search-entry>
+<td><code>powerToControlMatrix(basis, degree)</code></td>
+<td><code>Eigen::MatrixXd</code></td>
+<td><span data-lang="en" lang="en">Owning B with controls = B × normalized ascending-power coefficients. <code>kernel()</code> borrows the shared immutable conversion data.</span><span data-lang="zh" lang="zh-CN">返回独立 B，使 controls = B × 归一化升幂系数。<code>kernel()</code> 借用共享不可变转换数据。</span></td>
+</tr>
+</tbody></table></div>
+</article>
+<article class="subsection">
+<h3 id="hull-adjoint"><span data-lang="en" lang="en">Control and explicit-time pullbacks</span><span data-lang="zh" lang="zh-CN">控制点与显式时间反传</span><a class="anchor" href="#hull-adjoint" aria-label="Permalink / 固定链接">#</a></h3>
+<pre class="signature"><code>BackwardResult backward(const CoefficientMatrix&amp; gdControls);
+void backwardInto(const CoefficientMatrix&amp; gdControls,
+                  CoefficientMatrix&amp; gdC, Eigen::VectorXd&amp; gdT);
+void backwardAdd(const CoefficientMatrix&amp; gdControls,
+                 Eigen::Ref&lt;CoefficientMatrix&gt; gdC, Eigen::Ref&lt;Eigen::VectorXd&gt; gdT);
+void backwardPieceTimesAdd(
+    const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; piece_start_gradients,
+    const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; piece_duration_gradients,
+    Eigen::Ref&lt;Eigen::VectorXd&gt; source_duration_gradients,
+    double&amp; source_start_time_gradient) const;</code></pre>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Method</span><span data-lang="zh" lang="zh-CN">方法</span></th><th><span data-lang="en" lang="en">Input → output</span><span data-lang="zh" lang="zh-CN">输入 → 输出</span></th><th><span data-lang="en" lang="en">Write behavior</span><span data-lang="zh" lang="zh-CN">写入语义</span></th></tr></thead><tbody>
+<tr id="hull-backward" data-search-entry>
+<td><code>backward(gdControls)</code></td>
+<td><code>(H·Q)×D → {coefficients: (N·K)×D, durations: N}</code></td>
+<td><span data-lang="en" lang="en">Returns an owning BackwardResult; allocates.</span><span data-lang="zh" lang="zh-CN">返回拥有的 BackwardResult，分配输出。</span></td>
+</tr>
+<tr id="backwardInto" data-search-entry>
+<td><code>backwardInto(gdControls, gdC, gdT)</code></td>
+<td><span data-lang="en" lang="en">Same shapes</span><span data-lang="zh" lang="zh-CN">相同形状</span></td>
+<td><span data-lang="en" lang="en">Overwrites pre-sized buffers without allocation.</span><span data-lang="zh" lang="zh-CN">无分配地覆盖预分配缓冲。</span></td>
+</tr>
+<tr id="backwardAdd" data-search-entry>
+<td><code>backwardAdd(gdControls, gdC, gdT)</code></td>
+<td><span data-lang="en" lang="en">Same shapes</span><span data-lang="zh" lang="zh-CN">相同形状</span></td>
+<td><span data-lang="en" lang="en">Adds to initialized buffers. Suitable inside the optimizer’s coefficient stage.</span><span data-lang="zh" lang="zh-CN">累加到已初始化缓冲，适用于优化器 coefficient 阶段。</span></td>
+</tr>
+<tr id="backwardPieceTimesAdd" data-search-entry>
+<td><code>backwardPieceTimesAdd(gStart, gDuration, gdT, gStartTime)</code></td>
+<td><code>H + H → N + scalar</code></td>
+<td><span data-lang="en" lang="en">Adds explicit child-piece time partials; separate from the control adjoint.</span><span data-lang="zh" lang="zh-CN">累加子段显式时间偏导，独立于控制点伴随。</span></td>
+</tr>
+</tbody></table></div>
+<p><span data-lang="en" lang="en">All adjoints require an updated workspace and matching finite inputs. Into/Add outputs must not alias inputs or workspace storage. Keep both <code>gdC</code> and <code>gdT</code>: normalization uses <code>aₖ = Tᵏcₖ</code>, so conversion depends explicitly on duration. Pass the resulting pair through <code>spline.backward()</code> for total physical gradients.</span><span data-lang="zh" lang="zh-CN">所有伴随要求工作区已更新、输入匹配且有限。Into/Add 输出不得与输入或工作区重叠。保留 <code>gdC</code> 与 <code>gdT</code> 两者：归一化使用 <code>aₖ = Tᵏcₖ</code>，转换显式依赖时长。将两者传给 <code>spline.backward()</code> 得到完整物理梯度。</span></p>
+</article>
+<article class="subsection">
+<h3 id="hull-demo"><span data-lang="en" lang="en">Bezier subdivision and convex bounds</span><span data-lang="zh" lang="zh-CN">Bezier 细分与凸包约束</span><a class="anchor" href="#hull-demo" aria-label="Permalink / 固定链接">#</a></h3>
+<div class="visual"><div class="visual-controls"><label for="hull-depth"><span data-lang="en" lang="en">Subdivision depth</span><span data-lang="zh" lang="zh-CN">细分深度</span></label><select id="hull-depth"><option>0</option><option selected>1</option><option>2</option><option>3</option></select><label class="checkbox"><input id="show-controls" type="checkbox" checked><span data-lang="en" lang="en">Control polygons</span><span data-lang="zh" lang="zh-CN">控制多边形</span></label><output id="hull-stats"></output></div><svg id="hull-plot" viewBox="0 0 800 320" role="img" aria-labelledby="hull-title"><title id="hull-title">Bezier convex bounds / Bezier 凸包约束</title></svg>
+<p class="caption"><span data-lang="en" lang="en">Dark line: one fixed quintic trajectory. Shading: convex hull of each child piece’s controls. Subdivision changes the bounds, not the curve. Control data comes from the C++ Bezier conversion; browser subdivision uses de Casteljau at 1/2. This figure does not compare MINVO.</span><span data-lang="zh" lang="zh-CN">深色线是固定五次轨迹；阴影是各子段控制点的凸包。细分改变包络，不改变轨迹。控制点来自 C++ Bezier 转换；浏览器采用 1/2 处 de Casteljau 细分。此图不作 MINVO 对比。</span></p>
+</div>
+<p class="note"><span data-lang="en" lang="en">If every position control of a piece is inside one convex corridor, the whole curve piece is inside it. Derivative controls give conservative velocity/acceleration bounds. Positive ESDF values at controls in a nonconvex region do not prove continuous collision freedom; soft penalties do not guarantee hard feasibility.</span><span data-lang="zh" lang="zh-CN">若一段的全部位置控制点位于同一凸走廊，整段曲线就在走廊内。导数控制点可给出保守速度/加速度界。非凸区域中的控制点 ESDF 为正不证明整段无碰撞，软惩罚也不保证硬约束满足。</span></p>
+</article>
+</section>
+<footer><span>SplineTrajectory · C++17 / Eigen</span><span><span data-lang="en" lang="en">Static, offline documentation</span><span data-lang="zh" lang="zh-CN">静态文档 · 离线可用</span></span><a href="#overview"><span data-lang="en" lang="en">Back to top ↑</span><span data-lang="zh" lang="zh-CN">返回顶部 ↑</span></a></footer></main></div><noscript><p class="noscript">中文正文无需 JavaScript；切换语言、搜索和图示需要启用 JavaScript。 Enable JavaScript for English, search and diagrams.</p></noscript></body></html>
