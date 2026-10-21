@@ -1560,20 +1560,26 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Compute partial gradient of energy w.r.t. boundary conditions (Position, Velocity).
-         * @return BoundaryGradients containing gradients for start/end pos and vel.
+         * @brief Compute energy gradients w.r.t. boundary position and velocity.
+         * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
+         *        physical-time derivative convention (seconds); acceleration and jerk are zero.
+         * @throws std::logic_error If the spline is invalid; grad remains unchanged.
+         * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
-        BoundaryGradients energyBoundaryGradient() const
+        void energyBoundaryGradient(BoundaryGradients &grad) const
         {
             if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
+
             BoundaryGradients res;
 
+            // Evaluate the start-boundary terms at local time zero.
             const RowVector c2_first = trajectory_.coefficients_.row(2);
             const RowVector c3_first = trajectory_.coefficients_.row(3);
 
             res.start.p = 12.0 * c3_first.transpose();
             res.start.v = -4.0 * c2_first.transpose();
 
+            // Evaluate the end-boundary terms at the final segment's physical duration.
             int last_idx = num_segments_ - 1;
             double T = time_segments_[last_idx];
 
@@ -1586,6 +1592,19 @@ namespace SplineTrajectory
             res.end.p = -2.0 * jerk_end.transpose();
             res.end.v = 2.0 * acc_end.transpose();
 
+            // Publish the complete result, including zero unconstrained derivatives.
+            grad = res;
+        }
+
+        /** @brief Return energy gradients w.r.t. boundary position and velocity.
+         * @return Owned start/end gradients using physical seconds and the caller's coordinates;
+         *         acceleration and jerk gradients are zero.
+         * @throws std::logic_error If the spline is invalid.
+         * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
+        BoundaryGradients energyBoundaryGradient() const
+        {
+            BoundaryGradients res;
+            energyBoundaryGradient(res);
             return res;
         }
 
@@ -2252,14 +2271,19 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Compute partial gradient of energy w.r.t. boundary conditions (Pos, Vel, Acc).
-         * @return BoundaryGradients containing gradients.
+         * @brief Compute energy gradients w.r.t. boundary position, velocity and acceleration.
+         * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
+         *        physical-time derivative convention (seconds); jerk gradients are zero.
+         * @throws std::logic_error If the spline is invalid; grad remains unchanged.
+         * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
-        BoundaryGradients energyBoundaryGradient() const
+        void energyBoundaryGradient(BoundaryGradients &grad) const
         {
             if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
+
             BoundaryGradients res;
 
+            // Evaluate the start-boundary terms at local time zero.
             const RowVector c3_first = trajectory_.coefficients_.row(3);
             const RowVector c4_first = trajectory_.coefficients_.row(4);
             const RowVector c5_first = trajectory_.coefficients_.row(5);
@@ -2268,6 +2292,7 @@ namespace SplineTrajectory
             res.start.v = 48.0 * c4_first.transpose();
             res.start.a = -12.0 * c3_first.transpose();
 
+            // Evaluate the end-boundary terms at the final segment's physical duration.
             int last_idx = num_segments_ - 1;
             double T = time_segments_[last_idx];
             double T2 = T * T;
@@ -2284,6 +2309,19 @@ namespace SplineTrajectory
             res.end.v = -2.0 * snap_end.transpose();
             res.end.a = 2.0 * jerk_end.transpose();
 
+            // Publish the complete result, including zero unconstrained derivatives.
+            grad = res;
+        }
+
+        /** @brief Return energy gradients w.r.t. boundary position, velocity and acceleration.
+         * @return Owned start/end gradients using physical seconds and the caller's coordinates;
+         *         jerk gradients are zero.
+         * @throws std::logic_error If the spline is invalid.
+         * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
+        BoundaryGradients energyBoundaryGradient() const
+        {
+            BoundaryGradients res;
+            energyBoundaryGradient(res);
             return res;
         }
 
@@ -3103,14 +3141,19 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Compute partial gradient of energy w.r.t. boundary conditions (Pos, Vel, Acc, Jerk).
-         * @return BoundaryGradients containing gradients.
+         * @brief Compute energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
+         * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
+         *        physical-time derivative convention (seconds).
+         * @throws std::logic_error If the spline is invalid; grad remains unchanged.
+         * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
-        BoundaryGradients energyBoundaryGradient() const
+        void energyBoundaryGradient(BoundaryGradients &grad) const
         {
             if (!trajectory_.isValid()) throw std::logic_error("Energy gradients require a valid spline");
+
             BoundaryGradients res;
 
+            // Evaluate the start-boundary terms at local time zero.
             const RowVector c4_first = trajectory_.coefficients_.row(4);
             const RowVector c5_first = trajectory_.coefficients_.row(5);
             const RowVector c6_first = trajectory_.coefficients_.row(6);
@@ -3121,6 +3164,7 @@ namespace SplineTrajectory
             res.start.a = 240.0 * c5_first.transpose();
             res.start.j = -48.0 * c4_first.transpose();
 
+            // Evaluate the end-boundary terms at the final segment's physical duration.
             int last_idx = num_segments_ - 1;
             double T = time_segments_[last_idx];
             double T2 = T * T;
@@ -3142,6 +3186,18 @@ namespace SplineTrajectory
             res.end.a = -2.0 * crackle_end.transpose();
             res.end.j = 2.0 * snap_end.transpose();
 
+            // Publish the complete result, including zero unconstrained derivatives.
+            grad = res;
+        }
+
+        /** @brief Return energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
+         * @return Owned start/end gradients using physical seconds and the caller's coordinates.
+         * @throws std::logic_error If the spline is invalid.
+         * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
+        BoundaryGradients energyBoundaryGradient() const
+        {
+            BoundaryGradients res;
+            energyBoundaryGradient(res);
             return res;
         }
 
