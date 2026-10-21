@@ -35,7 +35,6 @@
 #include <limits>
 #include <stdexcept>
 #include <vector>
-#include <cassert>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -357,7 +356,6 @@ namespace SplineTrajectory
 
     private:
         // Numeric kernel aliases are local; public dimensions come from Spline.
-        using IntegralSampleBuffer = SampleBuffer;
         struct IntegralBasis
         {
             Eigen::Matrix<double, 1, Spline::kCoefficientCount> p, v, a, j, s, c;
@@ -519,30 +517,36 @@ namespace SplineTrajectory
             return x;
         }
 
-        Status prepareImpl(const Problem &problem, OptimizerOptions options, bool need_samples) try
+        /** @brief Validate reference topology and numerical options without changing workspace state.
+         * @param problem Physical input with durations in seconds and waypoints in caller coordinates.
+         * @param options Fixed integration and energy settings.
+         * @return Success or the first invalid-input/dimension status; maps are checked during layout setup. */
+        static Status validateProblem(const Problem &problem, OptimizerOptions options)
         {
-            // Copy before modifying state: problem may be this optimizer's read-only problem view.
-            Problem snapshot = problem;
-            prepared_.status = Status{};
-            if (snapshot.durations.empty() ||
-                snapshot.durations.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / Spline::kCoefficientCount))
-                return failPreparation(error(ErrorCode::InvalidInput, "Invalid segment count"));
-            const int n = static_cast<int>(snapshot.durations.size());
-            if (snapshot.waypoints.rows() != n + 1 || snapshot.waypoints.cols() != DIM)
-                return failPreparation(error(ErrorCode::DimensionMismatch, "Waypoint shape must be (segments + 1) by dimension"));
-            if (!snapshot.waypoints.allFinite() || !finiteBoundary(snapshot.boundary) || !std::isfinite(snapshot.start_time))
-                return failPreparation(error(ErrorCode::InvalidInput, "Nonfinite reference state"));
-            for (double duration : snapshot.durations)
+            if (problem.durations.empty() ||
+                problem.durations.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / Spline::kCoefficientCount))
+                return error(ErrorCode::InvalidInput, "Invalid segment count");
+            const int n = static_cast<int>(problem.durations.size());
+            if (problem.waypoints.rows() != n + 1 || problem.waypoints.cols() != DIM)
+                return error(ErrorCode::DimensionMismatch, "Waypoint shape must be (segments + 1) by dimension");
+            if (!problem.waypoints.allFinite() || !finiteBoundary(problem.boundary) || !std::isfinite(problem.start_time))
+                return error(ErrorCode::InvalidInput, "Nonfinite reference state");
+            for (double duration : problem.durations)
                 if (!std::isfinite(duration) || duration <= 0.0)
-                    return failPreparation(error(ErrorCode::InvalidInput, "Durations must be finite and positive"));
+                    return error(ErrorCode::InvalidInput, "Durations must be finite and positive");
             if (options.integration_steps <= 0 || options.integration_steps == std::numeric_limits<int>::max() ||
                 !std::isfinite(options.energy_weight) || options.energy_weight < 0.0)
-                return failPreparation(error(ErrorCode::InvalidInput, "Invalid integration steps or energy weight"));
+                return error(ErrorCode::InvalidInput, "Invalid integration steps or energy weight");
 
-            prepared_.problem = std::move(snapshot);
-            prepared_.num_segments = n;
-            prepared_.options = options;
-            prepared_.sample_capability = need_samples || options.record_samples;
+            return Status::success();
+        }
+
+        /** @brief Expand the active mask and assign each decision coordinate a fixed offset.
+         * @return Success or invalid mask/map dimensions; requires a validated prepared problem.
+         * @note May allocate layout storage and call user maps; no numerical candidate is built. */
+        Status prepareDecisionLayout()
+        {
+            const int n = prepared_.num_segments;
             prepared_.mask = prepared_.problem.mask.value_or(OptimizationMask{});
             auto &mask = prepared_.mask;
             if (mask.time.empty()) mask.time.assign(n, 1);
@@ -552,13 +556,13 @@ namespace SplineTrajectory
                 mask.waypoints.front() = mask.waypoints.back() = 0;
             }
             if (mask.time.size() != static_cast<std::size_t>(n) || mask.waypoints.size() != static_cast<std::size_t>(n + 1))
-                return failPreparation(error(ErrorCode::DimensionMismatch, "Optimization mask does not match topology"));
+                return error(ErrorCode::DimensionMismatch, "Optimization mask does not match topology");
             if constexpr (Spline::kDegree < 5)
                 if (mask.start.a || mask.end.a)
-                    return failPreparation(error(ErrorCode::InvalidInput, "This spline has no acceleration boundary variables"));
+                    return error(ErrorCode::InvalidInput, "This spline has no acceleration boundary variables");
             if constexpr (Spline::kDegree < 7)
                 if (mask.start.j || mask.end.j)
-                    return failPreparation(error(ErrorCode::InvalidInput, "This spline has no jerk boundary variables"));
+                    return error(ErrorCode::InvalidInput, "This spline has no jerk boundary variables");
 
             auto &layout = prepared_.layout;
             layout.time.clear();
@@ -571,7 +575,7 @@ namespace SplineTrajectory
                 if (!mask.waypoints[i]) continue;
                 const int dof = spaceMap().dimension(i);
                 if (dof <= 0 || offset + dof > std::numeric_limits<int>::max())
-                    return failPreparation(error(ErrorCode::InvalidInput, "Invalid spatial decision dimension"));
+                    return error(ErrorCode::InvalidInput, "Invalid spatial decision dimension");
                 layout.waypoints.push_back({i, static_cast<int>(offset), dof});
                 offset += dof;
             }
@@ -579,13 +583,24 @@ namespace SplineTrajectory
             forEachBoundary([&](int) { offset += DIM; });
             const int auxiliary = auxiliaryDimension();
             if (auxiliary < 0 || offset + auxiliary > std::numeric_limits<int>::max())
-                return failPreparation(error(ErrorCode::InvalidInput, "Invalid auxiliary decision dimension"));
+                return error(ErrorCode::InvalidInput, "Invalid auxiliary decision dimension");
             layout.auxiliary_offset = static_cast<int>(offset);
             layout.dimension = static_cast<int>(offset + auxiliary);
+            return Status::success();
+        }
+
+        /** @brief Allocate evaluation buffers and precompute the normalized quadrature basis.
+         * @return Success or an unsupported sample-count status; requires a valid decision layout.
+         * @note Mutates owned storage during preparation only; evaluation reuses these buffers. */
+        Status prepareEvaluationStorage()
+        {
+            const int n = prepared_.num_segments;
+            const auto &options = prepared_.options;
+            const int auxiliary = prepared_.layout.dimension - prepared_.layout.auxiliary_offset;
             const std::int64_t sample_count = prepared_.sample_capability ?
                 static_cast<std::int64_t>(n) * (options.integration_steps + 1) : 0;
             if (sample_count > std::numeric_limits<int>::max())
-                return failPreparation(error(ErrorCode::InvalidInput, "Sample count exceeds supported indices"));
+                return error(ErrorCode::InvalidInput, "Sample count exceeds supported indices");
 
             prepared_.basis.resize(static_cast<std::size_t>(options.integration_steps) + 1);
             for (int k = 0; k <= options.integration_steps; ++k)
@@ -598,6 +613,34 @@ namespace SplineTrajectory
             state_.durations.resize(n);
             state_.waypoints.resize(n + 1, DIM);
             state_.auxiliary_vars.resize(auxiliary);
+            return Status::success();
+        }
+
+        /** @brief Prepare owned input, decision layout, reusable storage and the initial candidate.
+         * @param problem Physical reference input, copied before changing potentially aliased state.
+         * @param options Fixed integration and energy settings.
+         * @param need_samples Whether the objective requires recorded sample storage.
+         * @return Success or a preparation failure that leaves no usable candidate.
+         * @note Requires exclusive access; allocation and user map exceptions follow prepare(). */
+        Status prepareImpl(const Problem &problem, OptimizerOptions options, bool need_samples) try
+        {
+            // Snapshot first: callers may pass this optimizer's current problem view.
+            Problem snapshot = problem;
+            prepared_.status = Status{};
+            const Status input = validateProblem(snapshot, options);
+            if (!input) return failPreparation(input);
+            prepared_.problem = std::move(snapshot);
+            prepared_.num_segments = static_cast<int>(prepared_.problem.durations.size());
+            prepared_.options = options;
+            prepared_.sample_capability = need_samples || options.record_samples;
+
+            // Resolve maps and offsets before sizing the buffers consumed by evaluation.
+            const Status layout = prepareDecisionLayout();
+            if (!layout) return failPreparation(layout);
+            const Status storage = prepareEvaluationStorage();
+            if (!storage) return failPreparation(storage);
+
+            // Encode once and build the initial candidate through the same path as later trials.
             prepared_.status = Status::success();
             try
             {
@@ -804,6 +847,8 @@ namespace SplineTrajectory
             if constexpr (detail::HasSample<O>::value)
                 if (!prepared_.sample_capability)
                     return failEvaluation(error(ErrorCode::SamplingNotPrepared, "Prepare with the objective before evaluating its sample stage"), gradient);
+
+            // Decode once, then accumulate all independent coefficient/time partials before the adjoint.
             gradient.setZero();
             const Status built = buildCandidate(x);
             if (!built) return failEvaluation(built, gradient);
@@ -813,6 +858,59 @@ namespace SplineTrajectory
             b.grad_times.setZero();
             b.grad_start_time = 0.0;
             double cost = 0.0;
+            constexpr bool needs_integral = detail::HasIntegral<O>::value;
+            accumulateCoefficientCosts(objective, executor, cost);
+            if (!std::isfinite(cost) || !b.grad_coeffs.allFinite() || !b.grad_times.allFinite() || !std::isfinite(b.grad_start_time))
+                return failEvaluation(error(ErrorCode::NumericalFailure, "Nonfinite coefficient-stage objective or partials"), gradient);
+
+            // Inactive coefficient-stage costs need no spline adjoint. Test components
+            // exactly: a norm can underflow and incorrectly erase nonzero partials.
+            bool needs_adjoint = false;
+            if constexpr (needs_integral || detail::HasSample<O>::value || detail::HasCoefficient<O>::value)
+                needs_adjoint = (b.grad_coeffs.array() != 0.0).any();
+            if (needs_adjoint)
+                state_.spline.backward(b.grad_coeffs, b.grad_times, b.grads);
+            else
+                detail::initializeGradients(b.grad_times, b.grads);
+
+            // Physical costs and auxiliary maps act before ordinary time/space coordinate pullbacks.
+            cost += accumulateEnergy();
+            accumulateParameterCosts(objective, cost, gradient);
+            writeDecisionGradient(x, gradient);
+
+            // Direct decision penalties add to the mapped gradient; publish only finite results.
+            if constexpr (detail::HasDecision<O>::value)
+            {
+                auto &function = detail::unwrap(objective.decision);
+                using Output = Eigen::Ref<Eigen::VectorXd>;
+                constexpr bool valid = std::is_invocable_r_v<double, decltype(function), const DecisionView &, Output>;
+                static_assert(valid, "Objective.decision must return double and accept (const DecisionView&, Eigen::Ref<VectorXd>)");
+                if constexpr (valid) cost += function(DecisionView{x, prepared_.layout}, Output(gradient));
+            }
+            if (!std::isfinite(cost) || !gradient.allFinite() || !std::isfinite(b.grad_start_time))
+                return failEvaluation(error(ErrorCode::NumericalFailure, "Nonfinite objective or decision gradient"), gradient);
+            last_status_ = Status::success();
+            return {cost, last_status_};
+        }
+
+        /** @brief Scalar adapter for an external solver; inspect lastStatus() on infinity.
+         * @note This calls the same evaluation path and does not retain the objective. */
+        template<class Objective, class Executor = SerialExecutor>
+        double costAndGradient(const Eigen::VectorXd &x, Eigen::VectorXd &gradient,
+                               Objective &objective, const Executor &executor = {})
+        { return evaluate(x, gradient, objective, executor).cost; }
+
+    private:
+        /** @brief Accumulate duration, integral, sample and coefficient costs before the spline adjoint.
+         * @param[in,out] objective Statically bound callbacks borrowed for this evaluation only.
+         * @param executor Segment executor; parallel integral callbacks must be thread-safe.
+         * @param[in,out] cost Additive scalar objective; owned partial buffers were cleared by evaluate().
+         * @note Uses the current candidate and prepared buffers; no library allocation occurs. */
+        template<class Objective, class Executor>
+        void accumulateCoefficientCosts(Objective &objective, const Executor &executor, double &cost)
+        {
+            using O = detail::Plain<Objective>;
+            auto &b = buffers_;
             if constexpr (detail::HasDuration<O>::value)
             {
                 auto &function = detail::unwrap(objective.duration);
@@ -844,10 +942,7 @@ namespace SplineTrajectory
                 if constexpr (valid)
                 {
                     cost += function(b.integral_samples, PositionOutput(b.sample_position_grad_buffer), TimeOutput(b.sample_time_grad_buffer));
-                    accumulateSampleCostGradients(b.integral_samples, b.sample_position_grad_buffer,
-                                                  b.sample_time_grad_buffer, b.grad_coeffs, b.grad_times,
-                                                  b.global_time_grad_buffer, prepared_.num_segments);
-                    b.grad_start_time += b.global_time_grad_buffer.sum();
+                    accumulateSampleCostGradients();
                 }
             }
             if constexpr (detail::HasCoefficient<O>::value)
@@ -862,19 +957,18 @@ namespace SplineTrajectory
                     cost += function(input, output);
                 }
             }
-            if (!std::isfinite(cost) || !b.grad_coeffs.allFinite() || !b.grad_times.allFinite() || !std::isfinite(b.grad_start_time))
-                return failEvaluation(error(ErrorCode::NumericalFailure, "Nonfinite coefficient-stage objective or partials"), gradient);
+        }
 
-            // Inactive coefficient-stage costs need no spline adjoint. Test components
-            // exactly: a norm can underflow and incorrectly erase nonzero partials.
-            bool needs_adjoint = false;
-            if constexpr (needs_integral || detail::HasSample<O>::value || detail::HasCoefficient<O>::value)
-                needs_adjoint = (b.grad_coeffs.array() != 0.0).any();
-            if (needs_adjoint)
-                state_.spline.backward(b.grad_coeffs, b.grad_times, b.grads);
-            else
-                detail::initializeGradients(b.grad_times, b.grads);
-            cost += accumulateEnergy();
+        /** @brief Add physical-parameter costs and reverse auxiliary maps after the spline adjoint.
+         * @param[in,out] objective Borrowed callbacks for direct physical-parameter costs.
+         * @param[in,out] cost Additive scalar objective.
+         * @param[in,out] gradient Pre-sized decision gradient; writes only auxiliary coordinates here.
+         * @note Mutates owned physical gradients before ordinary time/space map pullbacks. */
+        template<class Objective>
+        void accumulateParameterCosts(Objective &objective, double &cost, Eigen::VectorXd &gradient)
+        {
+            using O = detail::Plain<Objective>;
+            auto &b = buffers_;
             if constexpr (detail::HasParameter<O>::value)
             {
                 auto &function = detail::unwrap(objective.parameter);
@@ -896,29 +990,8 @@ namespace SplineTrajectory
                                                 Eigen::Ref<Eigen::VectorXd>(b.auxiliary_grad_buffer));
                 gradient.segment(prepared_.layout.auxiliary_offset, b.auxiliary_grad_buffer.size()) = b.auxiliary_grad_buffer;
             }
-            writeDecisionGradient(x, gradient);
-            if constexpr (detail::HasDecision<O>::value)
-            {
-                auto &function = detail::unwrap(objective.decision);
-                using Output = Eigen::Ref<Eigen::VectorXd>;
-                constexpr bool valid = std::is_invocable_r_v<double, decltype(function), const DecisionView &, Output>;
-                static_assert(valid, "Objective.decision must return double and accept (const DecisionView&, Eigen::Ref<VectorXd>)");
-                if constexpr (valid) cost += function(DecisionView{x, prepared_.layout}, Output(gradient));
-            }
-            if (!std::isfinite(cost) || !gradient.allFinite() || !std::isfinite(b.grad_start_time))
-                return failEvaluation(error(ErrorCode::NumericalFailure, "Nonfinite objective or decision gradient"), gradient);
-            last_status_ = Status::success();
-            return {cost, last_status_};
         }
 
-        /** @brief Scalar adapter for an external solver; inspect lastStatus() on infinity.
-         * @note This calls the same evaluation path and does not retain the objective. */
-        template<class Objective, class Executor = SerialExecutor>
-        double costAndGradient(const Eigen::VectorXd &x, Eigen::VectorXd &gradient,
-                               Objective &objective, const Executor &executor = {})
-        { return evaluate(x, gradient, objective, executor).cost; }
-
-    private:
         template<class Integral, class Executor>
         double evaluateIntegral(Integral &integral, const Executor &executor, bool record_samples)
         {
@@ -932,9 +1005,7 @@ namespace SplineTrajectory
             if constexpr (valid && derivative_order >= 0 && derivative_order <= 4)
             {
                 if constexpr (detail::HasBeginEvaluation<Integral>::value) integral.beginEvaluation();
-                accumulateIntegralCost(buffers_.grad_coeffs, buffers_.grad_times, cost, integral,
-                                       state_.start_time, record_samples, executor);
-                buffers_.grad_start_time += buffers_.global_time_grad_buffer.sum();
+                cost = accumulateIntegralCost(integral, record_samples, executor);
                 buffers_.samples_valid = record_samples;
             }
             return cost;
@@ -995,26 +1066,18 @@ namespace SplineTrajectory
             });
         }
 
-        void accumulateSampleCostGradients(const IntegralSampleBuffer &samples,
-                                           const SampleGradMatrix &sample_position_gradients,
-                                           const Eigen::VectorXd &sample_time_gradients,
-                                           CoefficientMatrix &grad_coeffs,
-                                           Eigen::VectorXd &grad_times,
-                                           Eigen::VectorXd &global_time_grad,
-                                           int num_segments) const
+        /** @brief Reverse recorded position/global-time partials into owned coefficient/time buffers.
+         * @note Requires sample-capable preparation and callback outputs with their fixed shapes.
+         *       Reuses exclusive buffers without allocation; time drift remains unconditional. */
+        void accumulateSampleCostGradients()
         {
+            const auto &samples = buffers_.integral_samples;
+            const auto &sample_position_gradients = buffers_.sample_position_grad_buffer;
+            const auto &sample_time_gradients = buffers_.sample_time_grad_buffer;
+            auto &grad_coeffs = buffers_.grad_coeffs;
+            auto &grad_times = buffers_.grad_times;
+            auto &global_time_grad = buffers_.global_time_grad_buffer;
             const Eigen::Index sample_count = static_cast<Eigen::Index>(samples.size());
-            if (sample_count == 0)
-            {
-                return;
-            }
-
-            if (sample_position_gradients.rows() != DIM || sample_position_gradients.cols() != sample_count)
-            {
-                assert(false && "[SplineOptimizer Error] Sample position gradient shape mismatch.");
-                return;
-            }
-
             global_time_grad.setZero();
 
             for (Eigen::Index sample_idx = 0; sample_idx < sample_count; ++sample_idx)
@@ -1024,45 +1087,56 @@ namespace SplineTrajectory
                 const int base_row = segment_index * SplineType::kCoefficientCount;
                 const Vector grad_position = sample_position_gradients.col(sample_idx);
 
-                grad_coeffs.template block<SplineType::kCoefficientCount, DIM>(base_row, 0).noalias() +=
-                    sample.b_p.transpose() * grad_position.transpose();
+                // Exact component tests preserve tiny nonzero partials and propagate NaNs.
+                if ((grad_position.array() != 0.0).any())
+                    grad_coeffs.template block<SplineType::kCoefficientCount, DIM>(base_row, 0).noalias() +=
+                        sample.b_p.transpose() * grad_position.transpose();
                 grad_times(segment_index) += grad_position.dot(sample.v) * sample.point.alpha;
 
-                if (sample_idx < sample_time_gradients.size())
-                {
-                    const double grad_time = sample_time_gradients(sample_idx);
-                    grad_times(segment_index) += grad_time * sample.point.alpha;
-                    global_time_grad(segment_index) += grad_time;
-                }
+                const double grad_time = sample_time_gradients(sample_idx);
+                grad_times(segment_index) += grad_time * sample.point.alpha;
+                global_time_grad(segment_index) += grad_time;
             }
 
-            double accumulator = 0.0;
-            for (int i = num_segments - 1; i > 0; --i)
-            {
-                accumulator += global_time_grad(i);
-                grad_times(i - 1) += accumulator;
-            }
+            accumulateGlobalTimeGradients();
         }
 
+        /** @brief Reverse explicit global-time partials to earlier durations and the common start time.
+         * @note Each buffer entry sums the current stage's partials within one segment. Called once
+         *       per stage, after local-duration terms are added; preserves reverse accumulation order. */
+        void accumulateGlobalTimeGradients()
+        {
+            double accumulator = 0.0;
+            for (int i = prepared_.num_segments - 1; i > 0; --i)
+            {
+                accumulator += buffers_.global_time_grad_buffer(i);
+                buffers_.grad_times(i - 1) += accumulator;
+            }
+            buffers_.grad_start_time += buffers_.global_time_grad_buffer.sum();
+        }
+
+        /** @brief Integrate a statically bound cost and accumulate its coefficient/time partials.
+         * @param[in,out] integral_cost Borrowed integrand with unweighted physical-state partials.
+         * @param record_samples Whether to fill already prepared sample storage.
+         * @param executor Segment executor with disjoint per-segment writes.
+         * @return Trapezoid-rule cost in the integrand's physical units.
+         * @note Uses exclusive owned buffers; parallel callbacks must be thread-safe. No allocation. */
         template <typename IntegralFunc, typename Executor>
 #if defined(__GNUC__) || defined(__clang__)
         // Keep statically bound sample/flatness call chains visible inside the quadrature loop.
         // GCC 9 otherwise outlines them after structured state binding, increasing measured planner cost.
         __attribute__((flatten))
 #endif
-        void accumulateIntegralCost(CoefficientMatrix &grad_coeffs,
-                                    Eigen::VectorXd &grad_times,
-                                    double &cost,
-                                    IntegralFunc &&integral_cost,
-                                    double start_time,
-                                    bool record_samples,
-                                    const Executor& executor)
+        double accumulateIntegralCost(IntegralFunc &integral_cost, bool record_samples,
+                                      const Executor &executor)
         {
             auto &state = state_;
             auto &buffers = buffers_;
+            auto &grad_coeffs = buffers.grad_coeffs;
+            auto &grad_times = buffers.grad_times;
             const auto &coeffs = state.spline.polynomial().coefficients();
 
-            double running_time = start_time;
+            double running_time = state.start_time;
             for(int i = 0; i < prepared_.num_segments; ++i) {
                 buffers.segment_begin_times[i] = running_time;
                 running_time += state.durations[i];
@@ -1194,16 +1268,12 @@ namespace SplineTrajectory
                     grad_coeffs.row(base_row + power) += time_powers(power) * local_acc_gdC.row(power);
             });
 
-            for(int i = 0; i < prepared_.num_segments; ++i) {
+            // Reduce in segment order after workers finish, then reverse the global time chain.
+            double cost = 0.0;
+            for (int i = 0; i < prepared_.num_segments; ++i)
                 cost += buffers.segment_cost_buffer[i];
-            }
-
-            double accumulator = 0.0;
-            for (int i = prepared_.num_segments - 1; i > 0; --i)
-            {
-                accumulator += buffers.global_time_grad_buffer(i);
-                grad_times(i - 1) += accumulator;
-            }
+            accumulateGlobalTimeGradients();
+            return cost;
         }
 
     };

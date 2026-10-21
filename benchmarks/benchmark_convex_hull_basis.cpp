@@ -122,7 +122,7 @@ void addForwardMeasurement(std::vector<Measurement> &measurements,
     const double elapsed = medianNanoseconds([&]()
     {
         auto representation = Hull::fromPPoly(
-            polynomial, basis, derivative, subdivision_depth);
+            polynomial, {basis, derivative, subdivision_depth});
         benchmark_sink +=
             representation.controls()(representation.controls().rows() - 1, 0);
     });
@@ -196,7 +196,7 @@ void addBackwardMeasurement(std::vector<Measurement> &measurements,
         basis == SplineTrajectory::ConvexHullBasis::Bezier
             ? "Bezier" : "MINVO";
     auto representation = Hull::fromPPoly(
-        polynomial, basis, derivative, subdivision_depth);
+        polynomial, {basis, derivative, subdivision_depth});
     const Matrix gradients =
         makeGradients(representation.controls().rows(), generator);
     const double elapsed = medianNanoseconds([&]()

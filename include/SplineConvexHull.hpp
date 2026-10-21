@@ -408,19 +408,20 @@ namespace SplineTrajectory
 
         ConvexHullWorkspace() = default;
 
+        /** @brief Configure and update an owning hull workspace from one polynomial.
+         * @param polynomial Valid source in physical time; values are copied, not borrowed.
+         * @param options Conversion basis, physical derivative order and subdivision depth.
+         * @param memory_budget_bytes Maximum kernel plus workspace storage in bytes.
+         * @return Independent mutable workspace with a shared immutable conversion kernel.
+         * @note May allocate and synchronize the kernel cache; errors follow configure()/update(). */
         template <int MaxCoefficients>
         static ConvexHullWorkspace fromPPoly(
             const PPolyND<DIM, MaxCoefficients> &polynomial,
-            ConvexHullBasis basis,
-            int derivative_order = 0,
-            int subdivision_depth = 0)
+            HullOptions options = {},
+            std::size_t memory_budget_bytes = kDefaultMemoryBudgetBytes)
         {
-            if (!polynomial.isValid())
-                throw std::invalid_argument("Convex-hull conversion requires an initialized PPolyND.");
-            if (derivative_order < 0 || derivative_order > polynomial.degree())
-                throw std::invalid_argument("Derivative order must be between zero and the polynomial degree.");
             ConvexHullWorkspace result;
-            result.configure(polynomial, {basis, derivative_order, subdivision_depth});
+            result.configure(polynomial, options, memory_budget_bytes);
             result.update(polynomial);
             return result;
         }
@@ -529,6 +530,16 @@ namespace SplineTrajectory
             normalized_derivative_.resize(kernel_->degree + 1, DIM);
             normalized_gradient_.resize(kernel_->degree + 1, DIM);
             pieces_.resize(num_source_segments_ * kernel_->leaves_per_segment);
+
+            // Segment ownership and normalized intervals depend only on the configured topology.
+            for (int segment = 0; segment < num_source_segments_; ++segment)
+                for (int leaf = 0; leaf < kernel_->leaves_per_segment; ++leaf)
+                {
+                    auto &piece = pieces_[segment * kernel_->leaves_per_segment + leaf];
+                    piece = PieceInfo{segment, leaf, kernel_->leaf_begin_fractions(leaf),
+                                      static_cast<double>(leaf + 1) / kernel_->leaves_per_segment,
+                                      0.0, 0.0};
+                }
         }
 
         /** @brief Update numeric data with fixed topology, without allocation or locking.
@@ -595,48 +606,39 @@ namespace SplineTrajectory
             return controls_.middleRows(piece_index * controlsPerPiece(), controlsPerPiece());
         }
 
-        /**
-         * @brief Reverse a scalar objective gradient from hull controls to the
-         *        source PPolyND coefficients and independent segment durations.
-         *
-         * durations is the partial derivative with the local power coefficients
-         * held fixed. It can be passed together with coefficients to a MINCO
-         * spline's backward() method.
-         */
+        /** @brief Allocate and return source coefficient and independent-duration partials.
+         * @param control_gradients Partials for the piece-major rows of controls().
+         * @return Owned gradients; durations holds local physical-time coefficients fixed.
+         * @throws std::logic_error For an invalid workspace; invalid_argument for wrong input shape.
+         * @note Requires exclusive workspace access. Pass both outputs to the spline adjoint. */
         BackwardResult backward(const CoefficientMatrix &control_gradients)
         {
-            if (!isValid()) throw std::logic_error("Cannot backpropagate an invalid workspace");
+            checkBackwardInput(control_gradients);
             BackwardResult result;
             result.coefficients = CoefficientMatrix::Zero(
                 num_source_segments_ * kernel_->source_num_coeffs, DIM);
             result.durations = Eigen::VectorXd::Zero(num_source_segments_);
-            backward(control_gradients, result.coefficients, result.durations);
+            accumulateControlGradients(control_gradients, result.coefficients, result.durations);
             return result;
         }
 
-        void backward(const CoefficientMatrix &control_gradients,
-                      CoefficientMatrix &coefficient_gradients,
-                      Eigen::VectorXd &duration_gradients)
+        /** @brief Overwrite pre-sized source partials without allocating or resizing.
+         * @param control_gradients Partials for the piece-major rows of controls().
+         * @param[out] coefficient_gradients Source coefficient-shaped output in caller-owned storage.
+         * @param[out] duration_gradients One independent physical-duration partial per source segment.
+         * @throws std::logic_error For an invalid workspace; invalid_argument for any wrong shape.
+         * @note Checks all shapes before writing. Inputs/outputs must not alias each other or
+         *       workspace storage. Requires exclusive workspace and output access. */
+        void backwardInto(const CoefficientMatrix &control_gradients,
+                          CoefficientMatrix &coefficient_gradients,
+                          Eigen::VectorXd &duration_gradients)
         {
-            if (!isValid())
-                throw std::logic_error("Cannot backpropagate an uninitialized representation.");
-            if (control_gradients.rows() != controls_.rows() ||
-                control_gradients.cols() != DIM)
-                throw std::invalid_argument("Control-gradient dimensions do not match controls().");
+            checkBackwardInput(control_gradients);
+            checkBackwardOutputs(coefficient_gradients, duration_gradients);
 
-            if (coefficient_gradients.rows() !=
-                    num_source_segments_ * kernel_->source_num_coeffs ||
-                coefficient_gradients.cols() != DIM)
-            {
-                coefficient_gradients.resize(
-                    num_source_segments_ * kernel_->source_num_coeffs, DIM);
-            }
             coefficient_gradients.setZero();
-            if (duration_gradients.size() != num_source_segments_)
-                duration_gradients.resize(num_source_segments_);
             duration_gradients.setZero();
-            backwardAdd(control_gradients, coefficient_gradients,
-                        duration_gradients);
+            accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
         }
 
         /**
@@ -648,62 +650,17 @@ namespace SplineTrajectory
          * @param control_gradients Partials for piece-major control rows.
          * @param[in,out] coefficient_gradients Source local-power partials, accumulated in place.
          * @param[in,out] duration_gradients Independent time partials at fixed source coefficients.
-         * @note Mutates scratch storage; requires exclusive workspace access.
+         * @throws std::logic_error For an invalid workspace; invalid_argument for any wrong shape.
+         * @note Checks all shapes before writing. Inputs/outputs must not alias each other or
+         *       workspace storage. Mutates scratch storage; requires exclusive workspace/output access.
          */
         void backwardAdd(const CoefficientMatrix &control_gradients,
                          Eigen::Ref<CoefficientMatrix> coefficient_gradients,
                          Eigen::Ref<Eigen::VectorXd> duration_gradients)
         {
-            if (!isValid())
-                throw std::logic_error(
-                    "Cannot backpropagate an uninitialized representation.");
-            if (control_gradients.rows() != controls_.rows() ||
-                control_gradients.cols() != DIM)
-                throw std::invalid_argument(
-                    "Control-gradient dimensions do not match controls().");
-            if (coefficient_gradients.rows() !=
-                    num_source_segments_ * kernel_->source_num_coeffs ||
-                coefficient_gradients.cols() != DIM ||
-                duration_gradients.size() != num_source_segments_)
-                throw std::invalid_argument(
-                    "backwardAdd() destinations must be pre-sized.");
-
-            const int cp = controlsPerPiece();
-            for (int segment = 0; segment < num_source_segments_; ++segment)
-            {
-                const int first_row =
-                    segment * kernel_->leaves_per_segment * cp;
-                normalized_gradient_.noalias() =
-                    kernel_->stacked_control_to_power_adjoint *
-                    control_gradients.middleRows(
-                        first_row, kernel_->leaves_per_segment * cp);
-                const double duration = source_durations_(segment);
-                for (int normalized_power = 0;
-                     normalized_power <= kernel_->degree;
-                     ++normalized_power)
-                {
-                    const int k = normalized_power + kernel_->derivative_order;
-                    const double scale =
-                        kernel_->derivative_factors(normalized_power) *
-                        duration_powers_(segment, normalized_power);
-                    coefficient_gradients.row(
-                        segment * kernel_->source_num_coeffs + k) +=
-                        scale *
-                        normalized_gradient_.row(normalized_power);
-
-                    if (normalized_power > 0)
-                    {
-                        const auto source_coefficient =
-                            source_coefficients_.row(
-                                segment * kernel_->source_num_coeffs + k);
-                        duration_gradients(segment) +=
-                            (static_cast<double>(normalized_power) *
-                             scale / duration) *
-                            normalized_gradient_.row(normalized_power)
-                                .dot(source_coefficient);
-                    }
-                }
-            }
+            checkBackwardInput(control_gradients);
+            checkBackwardOutputs(coefficient_gradients, duration_gradients);
+            accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
         }
 
         /**
@@ -762,12 +719,87 @@ namespace SplineTrajectory
         CoefficientMatrix controls_;
         CoefficientMatrix source_coefficients_;
         Eigen::VectorXd source_durations_;
-        Eigen::MatrixXd duration_powers_;
+        Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> duration_powers_;
         CoefficientMatrix normalized_gradient_;
         CoefficientMatrix normalized_derivative_;
         std::vector<PieceInfo> pieces_;
         std::shared_ptr<const ConvexHullKernel> kernel_;
 
+        /** @brief Validate the common source and incoming control partials before any output writes.
+         * @param control_gradients Borrowed piece-major partials; columns are fixed to DIM.
+         * @throws std::logic_error For an invalid workspace; invalid_argument for a wrong row count. */
+        void checkBackwardInput(const CoefficientMatrix &control_gradients) const
+        {
+            if (!isValid()) throw std::logic_error("Cannot backpropagate an invalid workspace");
+            if (control_gradients.rows() != controls_.rows())
+                throw std::invalid_argument("Control-gradient dimensions do not match controls()");
+        }
+
+        /** @brief Validate both pre-sized destinations without modifying them.
+         * @param coefficient_gradients Borrowed coefficient-shaped output; columns are fixed to DIM.
+         * @param duration_gradients Borrowed output with one entry per source segment.
+         * @throws std::invalid_argument For a wrong output shape; requires a configured workspace. */
+        void checkBackwardOutputs(const Eigen::Ref<CoefficientMatrix> &coefficient_gradients,
+                                  const Eigen::Ref<Eigen::VectorXd> &duration_gradients) const
+        {
+            if (coefficient_gradients.rows() != source_coefficients_.rows() ||
+                duration_gradients.size() != num_source_segments_)
+                throw std::invalid_argument("Hull backward destinations must be pre-sized");
+        }
+
+        /** @brief Accumulate the hull adjoint after source and all shapes have been validated.
+         * @param control_gradients Borrowed piece-major input partials.
+         * @param[in,out] coefficient_gradients Additive local physical-time coefficient partials.
+         * @param[in,out] duration_gradients Additive duration partials at fixed source coefficients.
+         * @note Uses exclusive scratch storage; no allocation occurs and buffers must not alias. */
+        void accumulateControlGradients(const CoefficientMatrix &control_gradients,
+                                        Eigen::Ref<CoefficientMatrix> coefficient_gradients,
+                                        Eigen::Ref<Eigen::VectorXd> duration_gradients)
+        {
+            const int cp = controlsPerPiece();
+            for (int segment = 0; segment < num_source_segments_; ++segment)
+            {
+                const int first_row =
+                    segment * kernel_->leaves_per_segment * cp;
+                normalized_gradient_.noalias() =
+                    kernel_->stacked_control_to_power_adjoint *
+                    control_gradients.middleRows(
+                        first_row, kernel_->leaves_per_segment * cp);
+                const double duration = source_durations_(segment);
+                for (int normalized_power = 0;
+                     normalized_power <= kernel_->degree;
+                     ++normalized_power)
+                {
+                    const int k = normalized_power + kernel_->derivative_order;
+                    const double scale =
+                        kernel_->derivative_factors(normalized_power) *
+                        duration_powers_(segment, normalized_power);
+                    coefficient_gradients.row(
+                        segment * kernel_->source_num_coeffs + k) +=
+                        scale *
+                        normalized_gradient_.row(normalized_power);
+
+                    if (normalized_power > 0)
+                    {
+                        const auto source_coefficient =
+                            source_coefficients_.row(
+                                segment * kernel_->source_num_coeffs + k);
+                        duration_gradients(segment) +=
+                            (static_cast<double>(normalized_power) *
+                             scale / duration) *
+                            normalized_gradient_.row(normalized_power)
+                                .dot(source_coefficient);
+                    }
+                }
+            }
+        }
+
+        /** @brief Refresh hull controls and adjoint caches at the configured topology.
+         * @param breakpoints Strictly increasing physical times, one per segment boundary.
+         * @param coefficients Borrowed local-power coefficients; copied into workspace storage.
+         * @throws std::invalid_argument For incompatible shapes or invalid segment durations.
+         * @throws std::overflow_error If a computed control is nonfinite.
+         * @note Requires exclusive workspace access; fixed-topology updates do not allocate. */
         void update(const std::vector<double> &breakpoints,
                     const CoefficientMatrix &coefficients)
         {
@@ -797,55 +829,82 @@ namespace SplineTrajectory
                         duration_powers_(segment, power - 1) *
                         duration;
 
-                for (int power = 0; power <= kernel_->degree; ++power)
+                // A constant derivative has the same control in every subdivided piece.
+                // In 3D, bypass normalization scratch and the paired accumulation below.
+                if (DIM == 3 && cp == 1)
                 {
-                    const int source_power =
-                        power + kernel_->derivative_order;
-                    normalized_derivative_.row(power) =
-                        kernel_->derivative_factors(power) *
-                        duration_powers_(segment, power) *
-                        source_coefficients_.row(
-                            segment * kernel_->source_num_coeffs +
-                            source_power);
-                }
-
-                const int first_row =
-                    segment * kernel_->leaves_per_segment * cp;
-                // Fixed-dimensional row accumulation avoids small dynamic GEMM setup and
-                // checks each result while it is still local, rather than rescanning all controls.
-                for (int row = 0; row < kernel_->leaves_per_segment * cp; ++row)
-                {
-                    Vector control = Vector::Zero();
-                    for (int power = 0; power < cp; ++power)
-                        control.noalias() += kernel_->stacked_power_to_control(row, power) *
-                            normalized_derivative_.row(power).transpose();
+                    const int first_row = segment * kernel_->leaves_per_segment * cp;
+                    const Vector control = kernel_->derivative_factors(0) *
+                        source_coefficients_.row(segment * kernel_->source_num_coeffs +
+                                                 kernel_->derivative_order).transpose();
                     if (!control.allFinite()) throw std::overflow_error("Nonfinite hull control");
-                    controls_.row(first_row + row) = control.transpose();
+                    for (int row = 0; row < kernel_->leaves_per_segment; ++row)
+                        controls_.row(first_row + row) = control.transpose();
+                }
+                else
+                {
+                    // Express the physical derivative in each segment's normalized time.
+                    for (int power = 0; power <= kernel_->degree; ++power)
+                    {
+                        const int source_power =
+                            power + kernel_->derivative_order;
+                        normalized_derivative_.row(power) =
+                            kernel_->derivative_factors(power) *
+                            duration_powers_(segment, power) *
+                            source_coefficients_.row(
+                                segment * kernel_->source_num_coeffs +
+                                source_power);
+                    }
+
+                    const int first_row = segment * kernel_->leaves_per_segment * cp;
+                    int row = 0;
+                    // Pair 3D controls along contiguous transform columns: each axis uses
+                    // a full two-double packet, keeping the original power summation order.
+                    if constexpr (DIM == 3)
+                    {
+                        const auto &transform = kernel_->stacked_power_to_control;
+                        const int control_count = static_cast<int>(transform.rows());
+                        using ControlPair = Eigen::Matrix<double, 2, DIM>;
+                        for (; row + 1 < control_count; row += 2)
+                        {
+                            ControlPair control_pair = ControlPair::Zero();
+                            for (int power = 0; power < cp; ++power)
+                                control_pair.noalias() += transform.template block<2, 1>(row, power) *
+                                    normalized_derivative_.row(power);
+                            if (!control_pair.allFinite()) throw std::overflow_error("Nonfinite hull control");
+                            controls_.template middleRows<2>(first_row + row) = control_pair;
+                        }
+                    }
+
+                    // Other dimensions and an odd final control use the scalar-row path.
+                    for (; row < kernel_->leaves_per_segment * cp; ++row)
+                    {
+                        Vector control = Vector::Zero();
+                        for (int power = 0; power < cp; ++power)
+                            control.noalias() += kernel_->stacked_power_to_control(row, power) *
+                                normalized_derivative_.row(power).transpose();
+                        if (!control.allFinite()) throw std::overflow_error("Nonfinite hull control");
+                        controls_.row(first_row + row) = control.transpose();
+                    }
                 }
 
                 for (int leaf = 0; leaf < kernel_->leaves_per_segment;
                      ++leaf)
                 {
-                    const int piece_index =
-                        segment * kernel_->leaves_per_segment + leaf;
-                    const double begin_fraction =
-                        kernel_->leaf_begin_fractions(leaf);
-                    pieces_[piece_index] = PieceInfo{
-                        segment,
-                        leaf,
-                        begin_fraction,
-                        static_cast<double>(leaf + 1) /
-                            static_cast<double>(kernel_->leaves_per_segment),
-                        breakpoints[segment] +
-                            begin_fraction * duration,
-                        duration /
-                            static_cast<double>(kernel_->leaves_per_segment)};
+                    auto &piece = pieces_[segment * kernel_->leaves_per_segment + leaf];
+                    piece.start_time = breakpoints[segment] + piece.source_fraction_begin * duration;
+                    piece.duration = duration / static_cast<double>(kernel_->leaves_per_segment);
                 }
             }
             initialized_ = true;
         }
     };
 
+    /** @brief Create an owning Bezier hull for one polynomial or its physical derivative.
+     * @param polynomial Valid source; copied values do not borrow its lifetime.
+     * @param derivative_order Physical derivative order, between zero and the source degree.
+     * @param subdivision_depth Nonnegative binary subdivision depth.
+     * @return Configured, updated workspace; uses the default memory budget and may allocate. */
     template <int DIM, int MaxCoefficients>
     inline ConvexHullWorkspace<DIM>
     toBezier(const PPolyND<DIM, MaxCoefficients> &polynomial,
@@ -853,10 +912,14 @@ namespace SplineTrajectory
              int subdivision_depth = 0)
     {
         return ConvexHullWorkspace<DIM>::fromPPoly(
-            polynomial, ConvexHullBasis::Bezier,
-            derivative_order, subdivision_depth);
+            polynomial, {ConvexHullBasis::Bezier, derivative_order, subdivision_depth});
     }
 
+    /** @brief Create an owning MINVO hull for a polynomial or derivative of degree zero through seven.
+     * @param polynomial Valid source; copied values do not borrow its lifetime.
+     * @param derivative_order Physical derivative order, between zero and the source degree.
+     * @param subdivision_depth Nonnegative binary subdivision depth.
+     * @return Configured, updated workspace; uses the default memory budget and may allocate. */
     template <int DIM, int MaxCoefficients>
     inline ConvexHullWorkspace<DIM>
     toMINVO(const PPolyND<DIM, MaxCoefficients> &polynomial,
@@ -864,8 +927,7 @@ namespace SplineTrajectory
             int subdivision_depth = 0)
     {
         return ConvexHullWorkspace<DIM>::fromPPoly(
-            polynomial, ConvexHullBasis::MINVO,
-            derivative_order, subdivision_depth);
+            polynomial, {ConvexHullBasis::MINVO, derivative_order, subdivision_depth});
     }
 }
 

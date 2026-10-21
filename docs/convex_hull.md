@@ -16,6 +16,9 @@ auto velocity = SplineTrajectory::toMINVO(spline.polynomial(), 1, 1);
 The arguments after the polynomial are derivative order and binary subdivision depth.
 Depth `d` creates `2^d` pieces per original segment. Controls are stored piece by piece;
 `pieceInfo(i).source_segment` maps a subdivided piece back to its source corridor.
+For a selectable basis or explicit memory budget, use
+`ConvexHullWorkspace<3>::fromPPoly(polynomial, HullOptions{basis, derivative, depth}, budget_bytes)`.
+The options match `configure()`; the positional basis/order/depth factory signature is replaced.
 
 ```cpp
 SplineTrajectory::ConvexHullWorkspace<3> hull;
@@ -28,7 +31,19 @@ hull.backwardAdd(control_partials, coefficient_partials, duration_partials);
 `configure()` prepares storage and shared conversion data. `update()` and `backwardAdd()` reuse
 that storage. The immutable conversion kernel can be shared; each concurrent evaluation needs
 its own mutable workspace. The workspace retains the source values needed by its adjoint.
-`backwardAdd()` adds to the output gradients.
+Fixed piece indices and normalized intervals are prepared by `configure()`; `update()` refreshes
+controls and physical times. Numeric results are usable only after a successful update.
+
+The adjoint has three output forms:
+
+- `backward(control_partials)` allocates and returns coefficient and duration gradients.
+- `backwardInto(control_partials, coefficient_partials, duration_partials)` overwrites pre-sized outputs.
+- `backwardAdd(control_partials, coefficient_partials, duration_partials)` adds to pre-sized outputs.
+
+`Into` and `Add` never resize or allocate. They check the workspace and every input/output shape
+before writing; errors leave both outputs unchanged. Input and output buffers must not alias each
+other or workspace storage. The former resizing three-argument `backward()` is replaced by
+`backwardInto()`; size its outputs before calling, or use the allocating result overload.
 
 ## Convex constraints
 

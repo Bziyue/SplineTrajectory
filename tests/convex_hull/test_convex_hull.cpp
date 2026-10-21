@@ -41,7 +41,7 @@ double objective(const PPoly &polynomial,
                  const Matrix &weights)
 {
     auto representation = Hull::fromPPoly(
-        polynomial, basis, derivative, subdivision_depth);
+        polynomial, {basis, derivative, subdivision_depth});
     return (representation.controls().array() * weights.array()).sum();
 }
 
@@ -51,7 +51,7 @@ void checkRepresentationValues(const PPoly &polynomial,
                                int subdivision_depth)
 {
     auto representation = Hull::fromPPoly(
-        polynomial, basis, derivative, subdivision_depth);
+        polynomial, {basis, derivative, subdivision_depth});
     const Eigen::MatrixXd transform =
         Hull::powerToControlMatrix(basis, representation.degree());
     const Eigen::MatrixXd inverse = transform.inverse();
@@ -108,7 +108,7 @@ void checkBackward(SplineTrajectory::ConvexHullBasis basis,
 
     PPoly polynomial = makePolynomial(durations, coefficients, num_coefficients);
     auto representation = Hull::fromPPoly(
-        polynomial, basis, derivative, subdivision_depth);
+        polynomial, {basis, derivative, subdivision_depth});
 
     Matrix weights(representation.controls().rows(), 3);
     for (Eigen::Index row = 0; row < weights.rows(); ++row)
@@ -181,7 +181,7 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
         polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3});
     workspace.update(polynomial);
     const auto reference = Hull::fromPPoly(
-        polynomial, SplineTrajectory::ConvexHullBasis::MINVO, 2, 3);
+        polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3});
     require((workspace.controls() - reference.controls()).norm() < 1e-13,
             "Workspace update differs from one-shot conversion.");
     require(workspace.kernel().get() == reference.kernel().get(),

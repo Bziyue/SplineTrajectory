@@ -102,8 +102,12 @@ objective. Preparation is the allocation boundary. After the solver returns, che
 | Manual field-by-field topology matching | `matches(poly, options)` |
 | One initialization flag | `isConfigured()` and `isValid()` |
 | Const `backward()/backwardAdd()` | Non-const operations using exclusive workspace scratch |
+| `fromPPoly(poly, basis, derivative, depth)` | `fromPPoly(poly, HullOptions{basis, derivative, depth}, budget)`; budget is optional |
+| Resizing `backward(partials, coefficients, durations)` | Pre-size both outputs, then call `backwardInto(partials, coefficients, durations)` |
 
-`toBezier()`, `toMINVO()` and `fromPPoly()` retain their convenience arguments. `update()` with
+`toBezier()` and `toMINVO()` retain their convenience arguments. The one-argument `backward()`
+still returns owned gradients; `backwardInto()` overwrites pre-sized outputs and `backwardAdd()`
+accumulates into them. Both validate all shapes before writing and never resize. `update()` with
 invalid source/topology invalidates the numerical state and throws. Numeric overflow is also
 rejected. The immutable kernel cache is consulted only during configuration; it is shared
 across spatial dimensions. A complete tuple key avoids packed-field collisions.
