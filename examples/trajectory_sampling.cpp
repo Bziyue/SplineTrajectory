@@ -7,8 +7,12 @@ int main()
     Spline::CoefficientMatrix points(3, 3);
     points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
     const std::vector<double> durations{1.2, 1.5};
-    auto spline = Spline::create(durations, points, 0.0).value();
-    if (!spline.isValid()) return 1;
+    Spline spline;
+    if (const auto status = spline.update(durations, points, 0.0); !status)
+    {
+        std::cerr << status.message << '\n';
+        return 1;
+    }
 
     const auto &trajectory = spline.polynomial();
     auto sampler = trajectory.makeSampler<2>();

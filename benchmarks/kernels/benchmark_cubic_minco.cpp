@@ -4,6 +4,7 @@
 #include <minco.hpp>
 #include <trajectory.hpp>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 #include <random>
 #include <chrono>
@@ -191,7 +192,9 @@ void runTest()
     for (int i = 0; i < fit_runs; ++i)
     {
         auto t1 = std::chrono::high_resolution_clock::now();
-        auto cubic_spline = Spline::create(time_segments_vec, waypoints, start_time, bv).value();
+        Spline cubic_spline;
+        if (const auto status = cubic_spline.update(time_segments_vec, waypoints, start_time, bv); !status)
+            throw std::runtime_error(status.message);
         auto t2 = std::chrono::high_resolution_clock::now();
         total_cubic_fit_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     }
@@ -228,7 +231,9 @@ void runTest()
     std::cout << "  - MINCO 模拟 " << DIM << "D 拟合: " << std::fixed << std::setprecision(2)
               << total_minco_fit_time_us / fit_runs << " μs (" << num_minco_instances << "个实例)" << std::endl;
 
-    auto cubic_spline = Spline::create(time_segments_vec, waypoints, start_time, bv).value();
+    Spline cubic_spline;
+    if (const auto status = cubic_spline.update(time_segments_vec, waypoints, start_time, bv); !status)
+        throw std::runtime_error(status.message);
     std::vector<minco::MINCO_S2NU> minco_solvers_for_query(num_minco_instances);
     std::vector<Trajectory<3>> minco_trajs(num_minco_instances);
     for (int j = 0; j < num_minco_instances; ++j)

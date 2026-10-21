@@ -31,7 +31,9 @@ template <class Curve>
 void CheckSplineValidity()
 {
   const auto problem = MakeProblem();
-  auto curve = Curve::create(problem.durations, problem.waypoints, 0.0).value();
+  Curve curve;
+  if (const auto status = curve.update(problem.durations, problem.waypoints, 0.0); !status)
+      throw std::runtime_error(status.message);
   require(curve.isValid(), "valid initial curve");
 
   require(!curve.update(problem.durations, problem.waypoints, 2e16), "Invalid construction must return failure");

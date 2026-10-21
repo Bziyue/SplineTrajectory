@@ -113,7 +113,7 @@
 <section id="splines" class="module">
 <h2 id="splines-title"><span data-lang="en" lang="en">Spline construction & gradients</span><span data-lang="zh" lang="zh-CN">样条构造与梯度</span><a class="anchor" href="#splines-title" aria-label="Permalink / 固定链接">#</a></h2>
 <p class="header-ref"><code>#include "SplineTrajectory.hpp"</code></p>
-<p><span data-lang="en" lang="en">The following signatures apply to <code>CubicSplineND</code>, <code>QuinticSplineND</code> and <code>SepticSplineND</code>. Declare an empty <code>Spline spline;</code>, then initialize it with <code>update()</code> and check success before querying. Subsequent updates reuse the same object. <code>create()</code> remains an optional factory returning <code>StatusOr&lt;Spline&gt;</code>.</span><span data-lang="zh" lang="zh-CN">以下签名适用于 <code>CubicSplineND</code>、<code>QuinticSplineND</code> 与 <code>SepticSplineND</code>。先用 <code>Spline spline;</code> 声明空对象，再调用 <code>update()</code> 初始化，确认成功后进行查询；后续更新继续复用该对象。<code>create()</code> 仍可作为返回 <code>StatusOr&lt;Spline&gt;</code> 的工厂使用。</span></p>
+<p><span data-lang="en" lang="en">The following signatures apply to <code>CubicSplineND</code>, <code>QuinticSplineND</code> and <code>SepticSplineND</code>. Declare an empty <code>Spline spline;</code>, then initialize it with <code>update()</code> and check success before querying. Subsequent updates reuse the same object.</span><span data-lang="zh" lang="zh-CN">以下签名适用于 <code>CubicSplineND</code>、<code>QuinticSplineND</code> 与 <code>SepticSplineND</code>。先用 <code>Spline spline;</code> 声明空对象，再调用 <code>update()</code> 初始化，确认成功后进行查询；后续更新继续复用该对象。</span></p>
 <article class="subsection">
 <h3 id="construction"><span data-lang="en" lang="en">Construction & in-place update</span><span data-lang="zh" lang="zh-CN">构造与原位更新</span><a class="anchor" href="#construction" aria-label="Permalink / 固定链接">#</a></h3>
 <pre class="signature"><code>Spline();
@@ -121,11 +121,6 @@ Status update(const std::vector&lt;double&gt;&amp; durations,
     const CoefficientMatrix&amp; points, double start_time,
     const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
 Status update(const std::vector&lt;double&gt;&amp; knots,
-    const CoefficientMatrix&amp; points, const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
-static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; durations,
-    const CoefficientMatrix&amp; points, double start_time,
-    const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
-static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; knots,
     const CoefficientMatrix&amp; points, const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});</code></pre>
 <div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API / argument</span><span data-lang="zh" lang="zh-CN">接口 / 参数</span></th><th><span data-lang="en" lang="en">Shape / return</span><span data-lang="zh" lang="zh-CN">形状 / 返回</span></th><th><span data-lang="en" lang="en">Use & constraints</span><span data-lang="zh" lang="zh-CN">用途与约束</span></th></tr></thead><tbody>
 <tr id="spline-default" data-search-entry>
@@ -142,16 +137,6 @@ static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; knots,
 <td><code>update(knots, points, bc)</code></td>
 <td><code>Status</code></td>
 <td><span data-lang="en" lang="en">N+1 strictly increasing absolute times, one for each waypoint row. No separate start-time argument; this vector contains knots, not durations.</span><span data-lang="zh" lang="zh-CN">N+1 个严格递增的绝对时刻，与插值点行一一对应。无需另传起点时间；该数组表示时间节点，而非段时长。</span></td>
-</tr>
-<tr id="create" data-search-entry>
-<td><code>create(durations, points, start_time, bc)</code></td>
-<td><code>StatusOr&lt;Spline&gt;</code></td>
-<td><span data-lang="en" lang="en">Optional factory with the same duration-input contract as <code>update()</code>; returns a new owning spline or an error.</span><span data-lang="zh" lang="zh-CN">可选工厂，输入契约与段时长版 <code>update()</code> 相同；返回新的样条对象或错误。</span></td>
-</tr>
-<tr id="create-knots" data-search-entry>
-<td><code>create(knots, points, bc)</code></td>
-<td><code>StatusOr&lt;Spline&gt;</code></td>
-<td><span data-lang="en" lang="en">Optional factory with the same absolute-time contract as <code>update()</code>; returns a new owning spline or an error.</span><span data-lang="zh" lang="zh-CN">可选工厂，输入契约与绝对时间版 <code>update()</code> 相同；返回新的样条对象或错误。</span></td>
 </tr>
 <tr id="boundary-conditions" data-search-entry>
 <td><code>BoundaryConditions&lt;DIM&gt;</code></td>

@@ -3,6 +3,7 @@
 #include <minco.hpp>
 #include <trajectory.hpp>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 #include <random>
 #include <chrono>
@@ -255,7 +256,9 @@ void runSepticTest()
     for (int i = 0; i < fit_runs; ++i)
     {
         auto t1 = std::chrono::high_resolution_clock::now();
-        auto septic_spline = SepticSpline::create(time_segments_vec, waypoints, start_time, bc).value();
+        SepticSpline septic_spline;
+        if (const auto status = septic_spline.update(time_segments_vec, waypoints, start_time, bc); !status)
+            throw std::runtime_error(status.message);
         auto t2 = std::chrono::high_resolution_clock::now();
         total_septic_fit_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     }
@@ -321,7 +324,9 @@ void runSepticTest()
               << total_minco_fit_time_us / fit_runs << " μs (" << num_minco_instances << "个实例)" << std::endl;
 
     // 创建用于查询的样条实例
-    auto septic_spline = SepticSpline::create(time_segments_vec, waypoints, start_time, bc).value();
+    SepticSpline septic_spline;
+    if (const auto status = septic_spline.update(time_segments_vec, waypoints, start_time, bc); !status)
+        throw std::runtime_error(status.message);
 
     // 创建用于查询的MINCO实例
     std::vector<minco::MINCO_S4NU> minco_solvers_for_query(num_minco_instances);

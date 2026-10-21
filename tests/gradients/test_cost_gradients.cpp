@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 #include "SplineTrajectory.hpp"
@@ -169,7 +170,9 @@ void test_cubic()
     bc.start_velocity.setConstant(0.15);
     bc.end_velocity.setConstant(-0.05);
 
-    auto sp = Spline::create(T, P, 0.0, bc).value();
+    Spline sp;
+    if (const auto status = sp.update(T, P, 0.0, bc); !status)
+        throw std::runtime_error(status.message);
 
     Mat dLdC;
     Eigen::VectorXd dLdT;
@@ -189,7 +192,9 @@ void test_cubic()
     auto eval_loss = [&](const std::vector<double> &TT,
                          const Mat &PP,
                          const SplineTrajectory::BoundaryConditions<DIM> &bcc) {
-        auto tmp = Spline::create(TT, PP, 0.0, bcc).value();
+        Spline tmp;
+        if (const auto status = tmp.update(TT, PP, 0.0, bcc); !status)
+            throw std::runtime_error(status.message);
         return loss_from_spline(tmp, alpha_time);
     };
 
@@ -311,7 +316,9 @@ void test_quintic()
     bc.start_acceleration.setConstant(0.05);
     bc.end_acceleration.setConstant(-0.03);
 
-    auto sp = Spline::create(T, Pvec, 0.0, bc).value();
+    Spline sp;
+    if (const auto status = sp.update(T, Pvec, 0.0, bc); !status)
+        throw std::runtime_error(status.message);
 
     Mat dLdC;
     Eigen::VectorXd dLdT;
@@ -331,7 +338,9 @@ void test_quintic()
     auto eval_loss = [&](const std::vector<double> &TT,
                          const Mat &PP,
                          const SplineTrajectory::BoundaryConditions<DIM> &bcc) {
-        auto tmp = Spline::create(TT, PP, 0.0, bcc).value();
+        Spline tmp;
+        if (const auto status = tmp.update(TT, PP, 0.0, bcc); !status)
+            throw std::runtime_error(status.message);
         return loss_from_spline(tmp, alpha_time);
     };
 
@@ -472,7 +481,9 @@ void test_septic()
     bc.start_jerk.setConstant(0.015);
     bc.end_jerk.setConstant(-0.01);
 
-    auto sp = Spline::create(T, Pvec, 0.0, bc).value();
+    Spline sp;
+    if (const auto status = sp.update(T, Pvec, 0.0, bc); !status)
+        throw std::runtime_error(status.message);
 
     typename Spline::CoefficientMatrix dLdC;
     Eigen::VectorXd dLdT;
@@ -492,7 +503,9 @@ void test_septic()
     auto eval_loss = [&](const std::vector<double> &TT,
                          const Mat &PP,
                          const SplineTrajectory::BoundaryConditions<DIM> &bcc) {
-        auto tmp = Spline::create(TT, PP, 0.0, bcc).value();
+        Spline tmp;
+        if (const auto status = tmp.update(TT, PP, 0.0, bcc); !status)
+            throw std::runtime_error(status.message);
         return loss_from_spline(tmp, alpha_time);
     };
 

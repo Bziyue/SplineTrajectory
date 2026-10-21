@@ -182,7 +182,7 @@ if (const auto status = spline_from_knots.update(knots, points); !status) return
 再次调用 `update()` 可复用同一对象，段数不变时复用工作区；更新成功后才能进行数值查询。
 
 底层样条、多项式和凸包接口要求调用方保证输入维度正确、数值有限，以及分段时长为正。
-数值构造失败通过 `Status` / `StatusOr` 返回；优化器在 `prepare()` 阶段检查问题输入。
+样条初始化与更新通过 `Status` 返回数值失败；优化器在 `prepare()` 阶段检查问题输入。
 详见[接口契约](https://bziyue.github.io/SplineTrajectory/api/?lang=zh#contracts)。
 
 ### 创建优化器

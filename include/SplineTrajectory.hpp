@@ -1597,7 +1597,7 @@ namespace SplineTrajectory
      *       have one owner. Updates and backward() require exclusive access; const energy
      *       and polynomial queries may run concurrently on an unchanged valid object.
      *       Copies own independent data. Moving invalidates borrowed views and the source polynomial.
-     *       Updates return status and invalidate the polynomial on numerical failure; factories return StatusOr.
+     *       Initialize and reuse default-constructed objects with update(); numerical failure invalidates the polynomial.
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
      *       Energy and adjoint queries require successful construction and return plain values or void.
@@ -1655,33 +1655,6 @@ namespace SplineTrajectory
 
         /** @brief Construct an empty, invalid spline with independent storage. */
         CubicSplineND() : num_segments_(0), start_time_(0.0) {}
-
-        /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
-         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @note Inputs are copied; failure is returned without publishing an invalid value.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<CubicSplineND> create(const std::vector<double> &t_points, const CoefficientMatrix &spatial_points,
-                                    const BoundaryConditions<DIM> &boundary = {})
-        {
-            CubicSplineND result;
-            if (const auto status = result.update(t_points, spatial_points, boundary); !status) return status;
-            return result;
-        }
-
-        /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
-         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
-         * @param start_time Absolute time origin in seconds.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @note Inputs are copied; failure is returned without publishing an invalid value.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<CubicSplineND> create(const std::vector<double> &time_segments, const CoefficientMatrix &spatial_points,
-                                    double start_time, const BoundaryConditions<DIM> &boundary = {})
-        {
-            CubicSplineND result;
-            if (const auto status = result.update(time_segments, spatial_points, start_time, boundary); !status) return status;
-            return result;
-        }
 
         /** @brief Replace interpolation data using caller-validated absolute knots.
          * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
@@ -2301,7 +2274,7 @@ namespace SplineTrajectory
      *       have one owner. Updates and backward() require exclusive access; const energy
      *       and polynomial queries may run concurrently on an unchanged valid object.
      *       Copies own independent data. Moving invalidates borrowed views and the source polynomial.
-     *       Updates return status and invalidate the polynomial on numerical failure; factories return StatusOr.
+     *       Initialize and reuse default-constructed objects with update(); numerical failure invalidates the polynomial.
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
      *       Energy and adjoint queries require successful construction and return plain values or void.
@@ -2365,33 +2338,6 @@ namespace SplineTrajectory
 
         /** @brief Construct an empty, invalid spline with independent storage. */
         QuinticSplineND() = default;
-
-        /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
-         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @note Inputs are copied; failure is returned without publishing an invalid value.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<QuinticSplineND> create(const std::vector<double> &t_points, const CoefficientMatrix &spatial_points,
-                                    const BoundaryConditions<DIM> &boundary = {})
-        {
-            QuinticSplineND result;
-            if (const auto status = result.update(t_points, spatial_points, boundary); !status) return status;
-            return result;
-        }
-
-        /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
-         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
-         * @param start_time Absolute time origin in seconds.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @note Inputs are copied; failure is returned without publishing an invalid value.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<QuinticSplineND> create(const std::vector<double> &time_segments, const CoefficientMatrix &spatial_points,
-                                    double start_time, const BoundaryConditions<DIM> &boundary = {})
-        {
-            QuinticSplineND result;
-            if (const auto status = result.update(time_segments, spatial_points, start_time, boundary); !status) return status;
-            return result;
-        }
 
         /** @brief Replace interpolation data using caller-validated absolute knots.
          * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
@@ -3146,7 +3092,7 @@ namespace SplineTrajectory
      *       have one owner. Updates and backward() require exclusive access; const energy
      *       and polynomial queries may run concurrently on an unchanged valid object.
      *       Copies own independent data. Moving invalidates borrowed views and the source polynomial.
-     *       Updates return status and invalidate the polynomial on numerical failure; factories return StatusOr.
+     *       Initialize and reuse default-constructed objects with update(); numerical failure invalidates the polynomial.
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
      *       Energy and adjoint queries require successful construction and return plain values or void.
@@ -3212,33 +3158,6 @@ namespace SplineTrajectory
 
         /** @brief Construct an empty, invalid spline with independent storage. */
         SepticSplineND() = default;
-
-        /** @brief Construct from N+1 strictly increasing finite knots and N+1 waypoint rows.
-         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @note Inputs are copied; failure is returned without publishing an invalid value.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<SepticSplineND> create(const std::vector<double> &t_points, const CoefficientMatrix &spatial_points,
-                                    const BoundaryConditions<DIM> &boundary = {})
-        {
-            SepticSplineND result;
-            if (const auto status = result.update(t_points, spatial_points, boundary); !status) return status;
-            return result;
-        }
-
-        /** @brief Construct from N positive durations, N+1 waypoint rows and a common time origin.
-         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
-         * @param start_time Absolute time origin in seconds.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @note Inputs are copied; failure is returned without publishing an invalid value.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<SepticSplineND> create(const std::vector<double> &time_segments, const CoefficientMatrix &spatial_points,
-                                    double start_time, const BoundaryConditions<DIM> &boundary = {})
-        {
-            SepticSplineND result;
-            if (const auto status = result.update(time_segments, spatial_points, start_time, boundary); !status) return status;
-            return result;
-        }
 
         /** @brief Replace interpolation data using caller-validated absolute knots.
          * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.

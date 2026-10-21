@@ -14,12 +14,14 @@ Spline::CoefficientMatrix points(3, 3);
 points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
 SplineTrajectory::BoundaryConditions<3> boundary;
 boundary.start_velocity = Eigen::Vector3d(0.2, 0, 0);
-auto created = Spline::create({1.2, 1.5}, points, 0.0, boundary);
-if (!created) return created.status();
-auto spline = std::move(created).value();
+Spline spline;
+if (const auto status = spline.update({1.2, 1.5}, points, 0.0, boundary); !status)
+    return status;
 ```
 
 `update(durations, points, start_time, boundary)` returns `Status` and reuses storage for unchanged topology.
+Alternatively, `update(knots, points, boundary)` takes N+1 absolute waypoint times.
+Both overloads initialize an empty spline or update an existing one; check success before queries.
 A spline owns its `PPolyND` polynomial. `polynomial()` borrows it; `copyPolynomial()` returns an
 independent snapshot. An update or move invalidates borrowed segments, iterators and samplers.
 
@@ -85,8 +87,8 @@ strictly increasing knots and representable arithmetic. Derivatives above degree
 Full-capacity fixed-size polynomials expose a static Horner bound; reduced-degree and dynamic
 polynomials still use the actual coefficient count.
 
-Spline construction retains `Status`/`StatusOr` for unrepresentable knots and factorization
-failure and clears its polynomial on failure. Energy and adjoints require a successful build;
+Spline initialization and updates return `Status` for unrepresentable knots and factorization
+failure, clearing the polynomial on failure. Energy and adjoints require a successful build;
 they assert that precondition in debug builds without scanning results for overflow.
 Single-derivative batch queries fill above-degree outputs with zero before traversing the samples.
 Fixed-capacity and reduced-degree queries share the existing Horner dispatch.

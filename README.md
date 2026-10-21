@@ -197,8 +197,8 @@ to reuse the same object and, when the segment count is unchanged, its workspace
 Query only after a successful update.
 
 Low-level spline, polynomial and hull APIs expect caller-validated input shapes and finite
-values, with positive segment durations. Numerical construction failures use `Status` /
-`StatusOr`; the optimizer validates its problem at `prepare()`. See the
+values, with positive segment durations. Spline initialization and updates return `Status`
+for numerical failures; the optimizer validates its problem at `prepare()`. See the
 [API contracts](https://bziyue.github.io/SplineTrajectory/api/?lang=en#contracts).
 
 ### Create an optimizer

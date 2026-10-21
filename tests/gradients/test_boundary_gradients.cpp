@@ -32,7 +32,9 @@ void testCubicGradients() {
     bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
     bc.end_velocity = Eigen::Matrix<double, DIM, 1>::Random();
 
-    auto spline = SplineType::create(times, points, 0.0, bc).value();
+    SplineType spline;
+    if (const auto status = spline.update(times, points, 0.0, bc); !status)
+        throw std::runtime_error(status.message);
 
     auto gdC = spline.energyCoefficientPartials();
     auto gdT = spline.energyDurationPartials();
@@ -148,7 +150,9 @@ void testQuinticGradients() {
     bc.end_velocity = Eigen::Matrix<double, DIM, 1>::Random();
     bc.end_acceleration = Eigen::Matrix<double, DIM, 1>::Random();
 
-    auto spline = SplineType::create(times, points, 0.0, bc).value();
+    SplineType spline;
+    if (const auto status = spline.update(times, points, 0.0, bc); !status)
+        throw std::runtime_error(status.message);
 
     auto gdC = spline.energyCoefficientPartials();
     auto gdT = spline.energyDurationPartials();
@@ -278,7 +282,9 @@ void testSepticGradients() {
     bc.end_acceleration = Eigen::Matrix<double, DIM, 1>::Random();
     bc.end_jerk = Eigen::Matrix<double, DIM, 1>::Random();
 
-    auto spline = SplineType::create(times, points, 0.0, bc).value();
+    SplineType spline;
+    if (const auto status = spline.update(times, points, 0.0, bc); !status)
+        throw std::runtime_error(status.message);
 
     auto gdC = spline.energyCoefficientPartials();
     auto gdT = spline.energyDurationPartials();

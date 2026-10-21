@@ -6,6 +6,7 @@ Use this guide when updating code written against `d504135` or earlier.
 
 | Previous API | Current API |
 | --- | --- |
+| Parameterized spline constructors / `Spline::create(...)` | Default-construct a spline, call either `update()` overload, and check its `Status` |
 | `PPolyND<DIM, ORDER>` | `PPolyND<DIM, MaxCoefficients>`; capacity, not degree |
 | `Spline::ORDER`, `COEFF_NUM` | `kDegree`, `kCoefficientCount`; also `kDimension`, `kMinDerivativeOrder` |
 | `VectorType`, `RowVectorType`, `MatrixType`, `TrajectoryType` | `Vector`, `RowVector`, `CoefficientMatrix`, `Polynomial` |
@@ -38,8 +39,8 @@ partials and overwrites physical gradients; `ConvexHullWorkspace::backwardAdd()`
 partials. Distinguish those contracts when combining multiple objectives.
 
 Shared `ErrorCode`, `Status` and `StatusOr<T>` live in `SplineTrajectory.hpp`; no planner types
-are required. Spline `create()`/`update()` retain explicit failures for unrepresentable knots or
-failed factorization. Polynomial transforms retain explicit state/numerical failures.
+are required. Initialize and reuse splines through `update()`, which returns `Status` for
+unrepresentable knots or failed factorization. Polynomial transforms retain explicit state/numerical failures.
 Polynomial queries and hull update/adjoints require initialized/configured objects instead
 of returning call-order errors. Discard partial output after any reported numerical failure.
 
