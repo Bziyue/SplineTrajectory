@@ -32,11 +32,10 @@ auto position = poly.evaluate(0.5);
 auto state = poly.evaluateDerivatives<2>(0.5);
 auto sampler = poly.makeSampler<3>();
 auto times = poly.generateTimeSequence(0.01);
-if (!position || !state || !times) { /* Handle the corresponding status. */ }
+if (!times) { /* Handle time-sequence generation failure. */ }
 for (double time : times.value()) {
     const auto pvaj = sampler.evaluateDerivatives(time);
-    if (!pvaj) return pvaj.status();
-    // Consume pvaj.value()[0] through pvaj.value()[3].
+    // Consume pvaj[0] through pvaj[3].
 }
 ```
 
@@ -45,7 +44,7 @@ segment's coefficients; backward jumps are supported. Each traversal uses its ow
 No source warm-up is required. `evaluateInto(times, output, derivative)` writes batch samples
 into a caller-owned matrix, one row per time.
 
-Polynomial queries use the trajectory time axis. `poly.at(i).value().evaluateLocal(t)` uses time from
+Polynomial queries use the trajectory time axis. `poly.at(i).evaluateLocal(t)` uses time from
 that segment's start. Interior knots select the right segment; the final knot selects the last.
 Queries outside the trajectory extrapolate the endpoint polynomial.
 
@@ -54,15 +53,17 @@ Queries outside the trajectory extrapolate the endpoint polynomial.
 ```cpp
 auto energy = spline.energy();
 auto gradient = spline.energyGradient();
-if (!energy) return energy.status();
-if (!gradient) return gradient.status();
-// energy.value(); gradient.value().inner_points/durations/start/end
+// energy is a double; gradient owns inner_points/durations/start/end.
 ```
 
 For a custom coefficient-space cost, accumulate coefficient and independent duration partials,
 then use `spline.backward(coefficient_partials, duration_partials, output)` to obtain physical
 waypoint, duration and boundary gradients. The output is overwritten. For repeated calls,
-prepare it once with `output.resetTopology(spline.numSegments())`.
+prepare it once with `output.resetTopology(spline.numSegments())`. All spline energy and
+adjoint methods require successful construction and return values directly (or `void` for
+output-reference overloads). Reference outputs must be pre-sized; they are never resized.
+`energyGradientAdd(output, weight)` adds a weighted energy contribution without a temporary
+gradient. Other energy-gradient overloads overwrite their outputs.
 
 `energyDurationPartials()` holds local coefficients fixed; `energyDurationGradient()` includes
 the interpolation constraints. Use the latter for derivatives of the interpolating trajectory's energy.
@@ -73,15 +74,21 @@ the interpolation constraints. Use the latter for derivatives of the interpolati
 The compile-time parameter is coefficient capacity, not polynomial degree. Spline traits are
 `kDimension`, `kDegree`, `kCoefficientCount` and `kMinDerivativeOrder`.
 
-Fallible value queries return `StatusOr<T>`; check the result before accessing `.value()`.
-Output-reference operations return `Status`. Callers guarantee finite input values, legal orders
-and indices, positive durations or strictly increasing knots, and matching input/output shapes.
-The low-level APIs do not validate these preconditions. `at()` retains `StatusOr<Segment>` but
-requires the same valid index as `operator[]`. Derivatives above degree remain zero.
-Callers also guarantee a representable working range, including extrapolation. Evaluation,
-coefficient transforms, energy and gradients do not scan their results for overflow.
-Invalid object state still returns an error. Spline construction reports unrepresentable knots
-or failed factorization and clears the polynomial; it does not rescan completed coefficients.
-Direct polynomial `update()` copies trusted data. Creation uses `create(...)`; borrowed getters
-retain their documented lifetime/preconditions. Batch state is checked once before writing,
-so state failures leave output untouched. See [numerical notes](numerical_notes.md) for conditioning.
+Polynomial queries require an initialized source (asserted at the public entry) and return
+values directly, or `void` when writing pre-sized outputs. Polynomial transforms retain their
+`StatusOr<T>`/`Status` error contracts. Borrowed `Sampler` and `Segment` views assert source
+validity at construction, then return values or write pre-sized outputs directly. The source must stay alive and unchanged. `at()` and
+`operator[]` both return a borrowed `Segment`; neither checks the caller-supplied index.
+
+`PPolyND::create`, `zero`, and `constant` return owning polynomials directly; `update` returns
+`void`. Callers guarantee finite input values, legal orders and indices, matching shapes,
+strictly increasing knots and representable arithmetic. Derivatives above degree remain zero.
+Full-capacity fixed-size polynomials expose a static Horner bound; reduced-degree and dynamic
+polynomials still use the actual coefficient count.
+
+Spline construction retains `Status`/`StatusOr` for unrepresentable knots and factorization
+failure and clears its polynomial on failure. Energy and adjoints require a successful build;
+they assert that precondition in debug builds without scanning results for overflow.
+Single-derivative batch queries fill above-degree outputs with zero before traversing the samples.
+Fixed-capacity and reduced-degree queries share the existing Horner dispatch.
+See [numerical notes](numerical_notes.md) for conditioning.

@@ -171,9 +171,7 @@ std::vector<double> durations{1.2, 1.5};
 auto created = Spline::create(durations, points, 0.0);
 if (!created) return 1;
 auto spline = std::move(created).value();
-auto sampled = spline.polynomial().evaluateDerivatives<2>(0.5);
-if (!sampled) return 1;
-auto state = std::move(sampled).value(); // position, velocity, acceleration
+auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // position, velocity, acceleration
 ```
 
 ### Create an optimizer

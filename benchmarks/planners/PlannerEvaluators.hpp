@@ -86,7 +86,7 @@ public:
         flatmap_.reset(p.physical[0],p.physical[1],p.physical[2],p.physical[3],p.physical[4],p.physical[5]);
         if constexpr(UseSpline) {
             all_points_=p.waypoints; spline_times_=p.durations; boundary_=splineProblem(p).boundary;
-            if (const auto status = spline_gradients_.resetTopology(n); !status) { throw std::runtime_error(status.message); }
+            spline_gradients_.resetTopology(n);
             if (const auto status = kernel_.update(spline_times_,all_points_,0.0,boundary_); !status) { throw std::runtime_error(status.message); }
         } else {
             Eigen::Matrix<double,3,coefficients/2> head,tail;
@@ -101,8 +101,8 @@ public:
         double energy;
         if constexpr(UseSpline) {
             if(!kernel_.isValid()) { gradient.setZero(); return std::numeric_limits<double>::infinity(); }
-            energy=kernel_.energy().value();
-            if (const auto status = kernel_.energyCoefficientPartials(partial_coefficients_); !status) { throw std::runtime_error(status.message); } if (const auto status = kernel_.energyDurationPartials(partial_times_); !status) { throw std::runtime_error(status.message); }
+            energy=kernel_.energy();
+            kernel_.energyCoefficientPartials(partial_coefficients_); kernel_.energyDurationPartials(partial_times_);
         } else {
             kernel_.getEnergy(energy);
             kernel_.getEnergyPartialGradByCoeffs(partial_coefficients_); kernel_.getEnergyPartialGradByTimes(partial_times_);
@@ -119,7 +119,7 @@ public:
             flatmap_,cost,partial_times_,partial_coefficients_,penalty_log_,PositionPenalty{problem_});
 #endif
         if constexpr(UseSpline) {
-            if (const auto status = kernel_.backward(partial_coefficients_,partial_times_,spline_gradients_); !status) { throw std::runtime_error(status.message); }
+            kernel_.backward(partial_coefficients_,partial_times_,spline_gradients_);
             gradient_points_=spline_gradients_.inner_points.transpose(); gradient_times_=spline_gradients_.durations;
         } else kernel_.propogateGrad(partial_coefficients_,partial_times_,gradient_points_,gradient_times_);
         cost+=problem_.time_weight*times_.sum(); gradient_times_.array()+=problem_.time_weight;
@@ -142,7 +142,7 @@ public:
         else {
             std::vector<double> knots(problem_.segments+1,0.0);
             for(int i=0;i<problem_.segments;++i) knots[i+1]=knots[i]+times_(i);
-            return Spline::Polynomial::create(knots,coefficientsView(),coefficients).value();
+            return Spline::Polynomial::create(knots,coefficientsView(),coefficients);
         }
     }
 };

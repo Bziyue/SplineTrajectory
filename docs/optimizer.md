@@ -185,14 +185,19 @@ are supported when supplied to the constructor/factory.
 ### Time map
 
 ```cpp
-StatusOr<double> toTime(double tau) const;
-StatusOr<double> toTau(double duration) const;
-StatusOr<double> backward(double tau, double duration, double grad_duration) const;
+double toTime(double tau) const;
+double toTau(double duration) const;
+double backward(double tau, double duration, double grad_duration) const;
 ```
+
+Built-in maps use these direct returns. A custom map that can reject its domain may return
+`StatusOr<double>` instead; its explicit failure is propagated. The protocol is resolved at
+compile time, with no status object returned by total maps.
 
 `toTau()` is the inverse used for initial coordinates. `backward()` returns the chain rule for
 one unconstrained coordinate. Its `duration` is the output of `toTime(tau)` **before** any
-auxiliary transformation. This matters for maps whose derivative uses the physical duration,
+auxiliary transformation; it is cached during forward decoding, never recomputed during pullback.
+This matters for maps whose derivative uses the physical duration,
 such as the exponential map. `QuadInvTimeMap` is the default; `IdentityTimeMap` is also available.
 The optimizer rejects nonpositive/nonfinite decoded durations. Unrepresentable cumulative times
 are detected during spline construction. Built-in identity maps copy caller-validated data;
@@ -204,16 +209,18 @@ pullback in the final accumulated gradient. Standalone callers own numerical-ran
 
 ```cpp
 int dimension(int global_index) const;
-StatusOr<Vector> toPhysical(const Eigen::Ref<const Eigen::VectorXd>& xi, int global_index) const;
-StatusOr<Eigen::VectorXd> toUnconstrained(const Vector& point, int global_index) const;
-Status backwardInto(const Eigen::Ref<const Eigen::VectorXd>& xi, const Vector& grad_point,
+Vector toPhysical(const Eigen::Ref<const Eigen::VectorXd>& xi, int global_index) const;
+Eigen::VectorXd toUnconstrained(const Vector& point, int global_index) const;
+void backwardInto(const Eigen::Ref<const Eigen::VectorXd>& xi, const Vector& grad_point,
                   int global_index, Eigen::Ref<Eigen::VectorXd> destination) const;
 ```
 
 `Vector = S::Vector`. Global waypoint indices run from 0 to N, including endpoints. Each mapped
 dimension must be positive. `toPhysical()` must return DIM values; `toUnconstrained()` returns
 the configured mapped dimension and is allowed to allocate in preparation/initial-guess creation.
-A `StatusOr` containing a fixed-size vector also satisfies the inverse protocol. `backwardInto()` **overwrites**
+Fixed-size vectors also satisfy the inverse protocol. Custom maps with domain rejection can
+return `StatusOr<VectorType>` and `Status` instead of plain values and `void`; failures propagate.
+`backwardInto()` **overwrites**
 its exclusive pre-sized decision slice; the optimizer handles accumulation between cost stages.
 There is no owning-vector fallback on the hot path.
 
@@ -285,3 +292,13 @@ For previous API names, use the [migration guide](api_migration.md).
 `prepare()` encodes the initial decision vector once. `initialGuess()` returns an owning copy of
 that prepared vector, so nonlinear inverse maps are not solved again. Reprepare after changing
 a borrowed parameterization or the physical reference; trial evaluations leave the initial vector intact.
+
+Preparation copies fixed physical parameters once. Without an auxiliary map, candidate decoding
+updates only active coordinates. With an auxiliary map, each candidate restores reference
+parameters because `apply()` may transform fixed coordinates as well. The spline keeps its
+own interpolation inputs, preserving independent ownership and lifetime.
+
+Integral evaluation uses a compact derivative-basis matrix and a combined coefficient pullback.
+Segment start times come from the constructed polynomial. Recording without an integral stage
+only evaluates positions/velocities; it does not run a zero-cost integral or an integral adjoint.
+Energy partials accumulate directly into the prepared physical gradient buffer.

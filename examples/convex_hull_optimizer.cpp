@@ -16,9 +16,8 @@ struct HullCost
     {
         for (int derivative = 0; derivative < 3; ++derivative)
         {
-            if (const auto status = hulls[derivative].configure(polynomial,
-                    {SplineTrajectory::ConvexHullBasis::Bezier, derivative, 1}); !status)
-                throw std::runtime_error(status.message);
+            hulls[derivative].configure(polynomial,
+                {SplineTrajectory::ConvexHullBasis::Bezier, derivative, 1});
             control_gradients[derivative].resize(hulls[derivative].controls().rows(), 2);
         }
     }
@@ -31,7 +30,7 @@ struct HullCost
         {
             auto &hull = hulls[derivative];
             auto &partials = control_gradients[derivative];
-            if (const auto status = hull.update(state.polynomial); !status) return {std::numeric_limits<double>::infinity(), status};
+            hull.update(state.polynomial);
             partials.setZero();
             for (int piece = 0; piece < hull.numPieces(); ++piece)
             {
@@ -47,7 +46,7 @@ struct HullCost
                 }
             }
             // Include explicit duration partials from conversion, in addition to coefficient partials.
-            if (const auto status = hull.backwardAdd(partials, gradient.coefficients, gradient.durations); !status) return {std::numeric_limits<double>::infinity(), status};
+            hull.backwardAdd(partials, gradient.coefficients, gradient.durations);
         }
         return {cost, SplineTrajectory::Status::success()};
     }
@@ -69,7 +68,7 @@ int main(int argc, char **argv) try
     for (int derivative = 0; derivative < 3; ++derivative)
     {
         auto &hull = objective.coefficient.hulls[derivative];
-        if (const auto status = hull.update(optimizer.polynomial()); !status) { throw std::runtime_error(status.message); }
+        hull.update(optimizer.polynomial());
         if (derivative != 0)
         {
             std::cout << "control bound on " << (derivative == 1 ? "speed: " : "acceleration: ")

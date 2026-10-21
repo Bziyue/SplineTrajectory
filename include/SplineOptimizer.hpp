@@ -96,13 +96,13 @@ namespace SplineTrajectory
         /** @brief Copy a physical-time coordinate without transforming it.
          * @param value Finite coordinate in seconds; the optimizer validates decoded positivity.
          * @return The unchanged coordinate. */
-        StatusOr<double> toTime(double value) const noexcept
+        double toTime(double value) const noexcept
         { return value; }
         /** @brief Copy physical seconds. @param value Caller-validated positive finite duration. @return Coordinate. */
-        StatusOr<double> toTau(double value) const noexcept { return toTime(value); }
+        double toTau(double value) const noexcept { return toTime(value); }
         /** @brief Pull back a finite time partial. @param tau Decision coordinate. @param time Physical seconds.
          * @param gradient Finite physical partial. @return The unchanged decision partial. */
-        StatusOr<double> backward(double tau, double time, double gradient) const noexcept
+        double backward(double tau, double time, double gradient) const noexcept
         {
             (void)tau; (void)time;
             return gradient;
@@ -116,7 +116,7 @@ namespace SplineTrajectory
          * @param tau Finite dimensionless decision coordinate.
          * @return Computed duration in seconds; Optimizer checks its range once during decoding.
          * @note Stateless and reentrant; standalone callers own numerical-range validation. */
-        StatusOr<double> toTime(double tau) const noexcept
+        double toTime(double tau) const noexcept
         {
             const double time = tau > 0.0 ? (0.5 * tau + 1.0) * tau + 1.0
                                          : 1.0 / ((0.5 * tau - 1.0) * tau + 1.0);
@@ -126,7 +126,7 @@ namespace SplineTrajectory
          * @param duration Positive physical duration in seconds.
          * @return Computed coordinate; Optimizer validates the assembled initial vector once.
          * @note Stateless and reentrant; standalone callers own numerical-range validation. */
-        StatusOr<double> toTau(double duration) const noexcept
+        double toTau(double duration) const noexcept
         {
             const double tau = duration > 1.0 ? std::sqrt(2.0 * duration - 1.0) - 1.0
                                              : 1.0 - std::sqrt(2.0 / duration - 1.0);
@@ -138,7 +138,7 @@ namespace SplineTrajectory
          * @param gradient Partial with respect to physical duration.
          * @return Decision partial; Optimizer checks the final accumulated gradient once.
          * @note Stateless and reentrant; standalone callers guarantee representable arithmetic. */
-        StatusOr<double> backward(double tau, double time, double gradient) const noexcept
+        double backward(double tau, double time, double gradient) const noexcept
         {
             (void)time;
             const double denominator = (0.5 * tau - 1.0) * tau + 1.0;
@@ -153,20 +153,35 @@ namespace SplineTrajectory
     struct IdentitySpatialMap
     {
         using Vector = Eigen::Matrix<double, DIM, 1>;
-        int dimension(int) const noexcept { return DIM; }
-        StatusOr<Vector> toPhysical(const Eigen::Ref<const Eigen::VectorXd> &value, int) const
+        /** @brief Report Cartesian decision dimension.
+         * @param index Global waypoint index; this map uses the same dimension everywhere.
+         * @return DIM independent coordinates. */
+        int dimension(int index) const noexcept { (void)index; return DIM; }
+        /** @brief Copy decision coordinates into physical Cartesian coordinates.
+         * @param value Finite DIM-sized coordinates. @param index Global waypoint index; unused.
+         * @return Owned vector in the caller's coordinate frame; stateless and reentrant. */
+        Vector toPhysical(const Eigen::Ref<const Eigen::VectorXd> &value, int index) const
         {
+            (void)index;
             return Vector(value);
         }
-        StatusOr<Vector> toUnconstrained(const Vector &point, int) const
+        /** @brief Copy physical Cartesian coordinates into decision coordinates.
+         * @param point Finite physical position. @param index Global waypoint index; unused.
+         * @return Independent DIM-sized vector; stateless and reentrant. */
+        Vector toUnconstrained(const Vector &point, int index) const
         {
+            (void)index;
             return point;
         }
-        Status backwardInto(const Eigen::Ref<const Eigen::VectorXd> &, const Vector &gradient,
-                            int, Eigen::Ref<Eigen::VectorXd> destination) const
+        /** @brief Overwrite a Cartesian decision partial with the physical partial.
+         * @param coordinates Forward decision coordinates; unused by the identity Jacobian.
+         * @param gradient Physical position partial. @param index Global waypoint index; unused.
+         * @param[out] destination Exclusive DIM-sized decision slice; no allocation or resizing. */
+        void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &coordinates, const Vector &gradient,
+                          int index, Eigen::Ref<Eigen::VectorXd> destination) const
         {
+            (void)coordinates; (void)index;
             destination = gradient;
-            return Status::success();
         }
     };
 
@@ -264,13 +279,12 @@ namespace SplineTrajectory
         /** @brief Add a waypoint partial using the global index, including both endpoints.
          * @param index Valid waypoint index in [0, inner_points.rows()+1]; not checked.
          * @param gradient Finite position partial in the caller's coordinates.
-         * @return Success after additive accumulation; requires exclusive output access. */
-        Status addWaypoint(int index, const typename Spline::Vector &gradient)
+         * @note Additive, allocation-free; requires exclusive output access. */
+        void addWaypoint(int index, const typename Spline::Vector &gradient)
         {
             if (index == 0) start.p += gradient;
             else if (index == inner_points.rows() + 1) end.p += gradient;
             else inner_points.row(index - 1) += gradient.transpose();
-            return Status::success();
         }
     };
 
@@ -329,13 +343,29 @@ namespace SplineTrajectory
         template<class T> struct IntegralDerivativeOrder<T, std::void_t<decltype(T::kDerivativeOrder)>>
             : std::integral_constant<int, T::kDerivativeOrder> {};
 
-        struct ZeroIntegral
+        /** @brief Read a total map's result without wrapping or copying it.
+         * @param value Borrowed mapping result. @return The same value for immediate consumption. */
+        template<class T> const T &mappingValue(const T &value) { return value; }
+        /** @brief Read a fallible map after its status has been checked.
+         * @param value Successful borrowed mapping result. @return Borrow valid while value lives. */
+        template<class T> const T &mappingValue(const StatusOr<T> &value) { return value.value(); }
+        /** @brief Total maps cannot reject their input domain.
+         * @param value Mapping result. @return Compile-time unconditional success. */
+        template<class T> Status mappingStatus(const T &value) { (void)value; return Status::success(); }
+        /** @brief Preserve a user map's explicit domain rejection.
+         * @param value Fallible mapping result. @return Its original success or failure status. */
+        template<class T> Status mappingStatus(const StatusOr<T> &value) { return value.status(); }
+
+        /** @brief Invoke a spatial pullback with either a total or a fallible contract.
+         * @param function Synchronous, exclusively borrowed pullback, returning void or Status.
+         * @return Success for a total map, otherwise the map's original status. */
+        template<class Function> Status invokeMapping(Function &&function)
         {
-            static constexpr int kDerivativeOrder = 0;
-            template<int DIM>
-            EvaluationResult operator()(const IntegralPointInfo &, const SampleState<DIM> &, SampleGradient<DIM> &) const
-            { return {0.0, Status::success()}; }
-        };
+            if constexpr (std::is_void_v<std::invoke_result_t<Function>>)
+            { function(); return Status::success(); }
+            else return function();
+        }
+
     }
 
     /** @brief Reusable, exclusively owned spline optimization workspace.
@@ -374,10 +404,9 @@ namespace SplineTrajectory
 
     private:
         // Numeric kernel aliases are local; public dimensions come from Spline.
-        struct IntegralBasis
-        {
-            Eigen::Matrix<double, 1, Spline::kCoefficientCount> p, v, a, j, s, c;
-        };
+        using IntegralBasis = Eigen::Matrix<double, 6, Spline::kCoefficientCount, Eigen::RowMajor>;
+        using SegmentCoefficients = Eigen::Matrix<double, Spline::kCoefficientCount, DIM>;
+        using SegmentPowers = Eigen::Matrix<double, Spline::kCoefficientCount, 1>;
         struct PreparedData
         {
             Problem problem;
@@ -397,17 +426,16 @@ namespace SplineTrajectory
             CoefficientMatrix waypoints;
             BoundaryConditions<DIM> bc;
             double start_time = 0.0;
-            Eigen::VectorXd auxiliary_vars;
+            Eigen::VectorXd auxiliary_vars, mapped_durations;
         };
         struct EvaluationBuffers
         {
             CoefficientMatrix grad_coeffs;
             Eigen::VectorXd grad_times, global_time_grad_buffer, auxiliary_grad_buffer;
             double grad_start_time = 0.0;
-            Gradients grads, energy_grads;
+            Gradients grads;
             SampleGradMatrix sample_position_grad_buffer;
             Eigen::VectorXd sample_time_grad_buffer;
-            std::vector<double> segment_begin_times;
             std::vector<EvaluationResult> segment_results;
             SampleBuffer integral_samples;
             bool samples_valid = false;
@@ -418,9 +446,7 @@ namespace SplineTrajectory
                 grad_times.resize(pieces);
                 global_time_grad_buffer.resize(pieces);
                 auxiliary_grad_buffer.resize(auxiliary);
-                (void)grads.resetTopology(pieces);
-                (void)energy_grads.resetTopology(pieces);
-                segment_begin_times.resize(pieces);
+                grads.resetTopology(pieces);
                 segment_results.resize(pieces);
                 integral_samples.resize(static_cast<std::size_t>(samples));
                 sample_position_grad_buffer.resize(DIM, samples);
@@ -515,16 +541,16 @@ namespace SplineTrajectory
             for (const auto &variable : prepared_.layout.time)
             {
                 auto value = timeMap().toTau(reference.durations[variable.segment_index]);
-                if (!value) return value.status();
-                x(variable.offset) = value.value();
+                if (const auto status = detail::mappingStatus(value); !status) return status;
+                x(variable.offset) = detail::mappingValue(value);
             }
             for (const auto &variable : prepared_.layout.waypoints)
             {
                 auto value = spaceMap().toUnconstrained(reference.waypoints.row(variable.point_index).transpose(), variable.point_index);
-                if (!value) return value.status();
-                if (value.value().size() != variable.dof)
+                if (const auto status = detail::mappingStatus(value); !status) return status;
+                if (detail::mappingValue(value).size() != variable.dof)
                     return Status{ErrorCode::DimensionMismatch, "Spatial map initial dimension mismatch", variable.point_index};
-                x.segment(variable.offset, variable.dof) = value.value();
+                x.segment(variable.offset, variable.dof) = detail::mappingValue(value);
             }
             int offset = prepared_.layout.boundary_offset;
             forEachBoundary([&](int slot) {
@@ -631,13 +657,19 @@ namespace SplineTrajectory
             prepared_.basis.resize(static_cast<std::size_t>(options.integration_steps) + 1);
             for (int k = 0; k <= options.integration_steps; ++k)
             {
-                auto &basis = prepared_.basis[k];
+                Eigen::Matrix<double, 1, Spline::kCoefficientCount> p, v, a, j, snap, c;
                 Spline::computeBasisFunctions(static_cast<double>(k) / options.integration_steps,
-                                             basis.p, basis.v, basis.a, basis.j, basis.s, basis.c);
+                                             p, v, a, j, snap, c);
+                prepared_.basis[k] << p, v, a, j, snap, c;
             }
             buffers_.prepare(n, auxiliary, static_cast<Eigen::Index>(sample_count));
-            state_.durations.resize(n);
-            state_.waypoints.resize(n + 1, DIM);
+            // Fixed parameters are initialized once; only auxiliary maps can later change them.
+            state_.durations = prepared_.problem.durations;
+            state_.waypoints = prepared_.problem.waypoints;
+            state_.bc = prepared_.problem.boundary;
+            state_.start_time = prepared_.problem.start_time;
+            if constexpr (has_auxiliary)
+                state_.mapped_durations.resize(prepared_.layout.time.size());
             state_.auxiliary_vars.resize(auxiliary);
             return Status::success();
         }
@@ -683,24 +715,30 @@ namespace SplineTrajectory
         Status buildCandidate(const Eigen::VectorXd &x)
         {
             auto reject = [&](Status status) { state_.spline = Spline{}; return status; };
-            const auto &reference = prepared_.problem;
-            state_.durations = reference.durations;
-            state_.waypoints = reference.waypoints;
-            state_.bc = reference.boundary;
-            state_.start_time = reference.start_time;
+            // Auxiliary maps may modify even fixed coordinates, so restore those inputs per trial.
+            if constexpr (has_auxiliary)
+            {
+                const auto &reference = prepared_.problem;
+                state_.durations = reference.durations;
+                state_.waypoints = reference.waypoints;
+                state_.bc = reference.boundary;
+                state_.start_time = reference.start_time;
+            }
             for (const auto &variable : prepared_.layout.time)
             {
                 auto value = timeMap().toTime(x(variable.offset));
-                if (!value) return reject(value.status());
-                if (!(value.value() > 0.0) || !std::isfinite(value.value()))
+                if (const auto status = detail::mappingStatus(value); !status) return reject(status);
+                const double duration = detail::mappingValue(value);
+                if (!(duration > 0.0) || !std::isfinite(duration))
                     return reject({ErrorCode::NumericalFailure, "Mapped duration must be finite and positive", variable.segment_index});
-                state_.durations[variable.segment_index] = value.value();
+                state_.durations[variable.segment_index] = duration;
+                if constexpr (has_auxiliary) state_.mapped_durations(variable.offset) = duration;
             }
             for (const auto &variable : prepared_.layout.waypoints)
             {
                 auto point = spaceMap().toPhysical(x.segment(variable.offset, variable.dof), variable.point_index);
-                if (!point) return reject(point.status());
-                state_.waypoints.row(variable.point_index) = point.value().transpose();
+                if (const auto status = detail::mappingStatus(point); !status) return reject(status);
+                state_.waypoints.row(variable.point_index) = detail::mappingValue(point).transpose();
             }
             int offset = prepared_.layout.boundary_offset;
             forEachBoundary([&](int slot) {
@@ -785,7 +823,11 @@ namespace SplineTrajectory
         /** @brief Return unweighted minimum-derivative energy of the last constructed trajectory.
          * @return Finite energy in physical-time units, or an explicit state/numerical failure.
          * @note Read-only and allocation-free; a valid trial is not necessarily an accepted solution. */
-        StatusOr<double> energy() const { return state_.spline.energy(); }
+        StatusOr<double> energy() const
+        {
+            if (!state_.spline.isValid()) return Status{ErrorCode::InvalidState, "Energy requires a valid candidate"};
+            return state_.spline.energy();
+        }
         /** @brief Borrow records from the latest successful recording evaluation; otherwise empty. */
         const SampleBuffer &recordedSamples() const noexcept
         {
@@ -877,17 +919,12 @@ namespace SplineTrajectory
             if constexpr (needs_integral || detail::HasSample<O>::value || detail::HasCoefficient<O>::value)
                 needs_adjoint = (b.grad_coeffs.array() != 0.0).any();
             if (needs_adjoint)
-            {
-                if (const auto status = state_.spline.backward(b.grad_coeffs, b.grad_times, b.grads); !status)
-                    return failEvaluation(status, gradient);
-            }
+                state_.spline.backward(b.grad_coeffs, b.grad_times, b.grads);
             else
                 detail::initializeGradients(b.grad_times, b.grads);
 
             // Physical costs and auxiliary maps act before ordinary time/space coordinate pullbacks.
-            const auto energy = accumulateEnergy();
-            if (!energy) return failEvaluation(energy.status, gradient);
-            cost += energy.cost;
+            cost += accumulateEnergy();
             if (const auto status = accumulateParameterCosts(objective, cost, gradient); !status)
                 return failEvaluation(status, gradient);
             if (const auto status = writeDecisionGradient(x, gradient); !status)
@@ -949,10 +986,7 @@ namespace SplineTrajectory
             }
             else if (record_samples)
             {
-                detail::ZeroIntegral integral;
-                const auto result = evaluateIntegral(integral, executor, true);
-                if (!result) return result.status;
-                cost += result.cost;
+                recordSamples(executor);
             }
             if constexpr (detail::HasSample<O>::value)
             {
@@ -1046,33 +1080,15 @@ namespace SplineTrajectory
             return result;
         }
 
-        EvaluationResult accumulateEnergy()
+        /** @brief Add energy directly to the prepared physical gradients.
+         * @return Weighted energy; the candidate was successfully built before this stage.
+         * @note No temporary gradient, resizing, or repeated runtime validity check. */
+        double accumulateEnergy()
         {
             const double weight = prepared_.options.energy_weight;
-            if (weight == 0.0) return {0.0, Status::success()};
-            auto &g = buffers_.grads;
-            auto &e = buffers_.energy_grads;
-            const auto energy = state_.spline.energy();
-            if (!energy) return {std::numeric_limits<double>::infinity(), energy.status()};
-            if (const auto status = state_.spline.energyGradient(e); !status)
-                return {std::numeric_limits<double>::infinity(), status};
-            g.inner_points += weight * e.inner_points;
-            g.durations += weight * e.durations;
-            g.start.p += weight * e.start.p;
-            g.end.p += weight * e.end.p;
-            g.start.v += weight * e.start.v;
-            g.end.v += weight * e.end.v;
-            if constexpr (Spline::kDegree >= 5)
-            {
-                g.start.a += weight * e.start.a;
-                g.end.a += weight * e.end.a;
-            }
-            if constexpr (Spline::kDegree >= 7)
-            {
-                g.start.j += weight * e.start.j;
-                g.end.j += weight * e.end.j;
-            }
-            return {weight * energy.value(), Status::success()};
+            if (weight == 0.0) return 0.0;
+            state_.spline.energyGradientAdd(buffers_.grads, weight);
+            return weight * state_.spline.energy();
         }
 
         Status writeDecisionGradient(const Eigen::VectorXd &x, Eigen::VectorXd &gradient) const
@@ -1085,14 +1101,10 @@ namespace SplineTrajectory
                 // A time map using its physical argument must see the duration before apply().
                 double mapped_duration = state_.durations[variable.segment_index];
                 if constexpr (has_auxiliary)
-                {
-                    const auto mapped = timeMap().toTime(tau);
-                    if (!mapped) return mapped.status();
-                    mapped_duration = mapped.value();
-                }
+                    mapped_duration = state_.mapped_durations(variable.offset);
                 const auto result = timeMap().backward(tau, mapped_duration, g.durations(variable.segment_index));
-                if (!result) return result.status();
-                gradient(variable.offset) = result.value();
+                if (const auto status = detail::mappingStatus(result); !status) return status;
+                gradient(variable.offset) = detail::mappingValue(result);
             }
             for (const auto &variable : prepared_.layout.waypoints)
             {
@@ -1100,8 +1112,11 @@ namespace SplineTrajectory
                 if (variable.point_index == 0) physical = g.start.p;
                 else if (variable.point_index == prepared_.num_segments) physical = g.end.p;
                 else physical = g.inner_points.row(variable.point_index - 1).transpose();
-                if (const auto status = spaceMap().backwardInto(x.segment(variable.offset, variable.dof), physical,
-                        variable.point_index, gradient.segment(variable.offset, variable.dof)); !status) return status;
+                const auto status = detail::invokeMapping([&] {
+                    return spaceMap().backwardInto(x.segment(variable.offset, variable.dof), physical,
+                        variable.point_index, gradient.segment(variable.offset, variable.dof));
+                });
+                if (!status) return status;
             }
             int offset = prepared_.layout.boundary_offset;
             forEachBoundary([&](int slot) {
@@ -1113,7 +1128,7 @@ namespace SplineTrajectory
 
         /** @brief Reverse recorded position/global-time partials into owned coefficient/time buffers.
          * @note Requires sample-capable preparation and callback outputs with their fixed shapes.
-         *       Reuses exclusive buffers without allocation; time drift remains unconditional. */
+         *       Reuses exclusive buffers without allocation; explicit time partials are always accumulated. */
         void accumulateSampleCostGradients()
         {
             const auto &samples = buffers_.integral_samples;
@@ -1134,9 +1149,11 @@ namespace SplineTrajectory
 
                 // Exact component tests preserve tiny nonzero partials and propagate NaNs.
                 if ((grad_position.array() != 0.0).any())
+                {
                     grad_coeffs.template block<SplineType::kCoefficientCount, DIM>(base_row, 0).noalias() +=
                         sample.b_p.transpose() * grad_position.transpose();
-                grad_times(segment_index) += grad_position.dot(sample.v) * sample.point.alpha;
+                    grad_times(segment_index) += grad_position.dot(sample.v) * sample.point.alpha;
+                }
 
                 const double grad_time = sample_time_gradients(sample_idx);
                 grad_times(segment_index) += grad_time * sample.point.alpha;
@@ -1160,11 +1177,68 @@ namespace SplineTrajectory
             buffers_.grad_start_time += buffers_.global_time_grad_buffer.sum();
         }
 
+        /** @brief Express a segment's coefficients on the unit time interval.
+         * @param segment Valid candidate segment index.
+         * @param[out] coefficients Fixed-size normalized coefficient block.
+         * @param[out] powers Ascending physical duration powers used by the pullback and records.
+         * @note Reads the current candidate only; separate outputs permit parallel segment execution. */
+        void prepareIntegralSegment(int segment, SegmentCoefficients &coefficients, SegmentPowers &powers) const
+        {
+            const double duration = state_.durations[segment];
+            powers(0) = 1.0;
+            for (int k = 1; k < Spline::kCoefficientCount; ++k) powers(k) = powers(k - 1) * duration;
+            const auto source = state_.spline.polynomial().coefficients().template middleRows<Spline::kCoefficientCount>(
+                segment * Spline::kCoefficientCount);
+            for (int k = 0; k < Spline::kCoefficientCount; ++k) coefficients.row(k) = powers(k) * source.row(k);
+        }
+
+        /** @brief Store one prepared quadrature point for a later sample cost or diagnostics.
+         * @param point Physical location with its segment and quadrature indices.
+         * @param powers Duration powers mapping the position basis to physical time.
+         * @param position Physical position. @param velocity Physical velocity per second.
+         * @note Writes one disjoint record in preallocated storage; no shared accumulation. */
+        void recordSample(const IntegralPointInfo &point, const SegmentPowers &powers,
+                          const Vector &position, const Vector &velocity)
+        {
+            auto &sample = buffers_.integral_samples[point.segment_index * (point.step_count + 1) + point.step_index];
+            sample.point = point;
+            sample.trap_weight = point.isSegmentStart() || point.isSegmentEnd() ? 0.5 : 1.0;
+            sample.b_p = prepared_.basis[point.step_index].row(0).array() * powers.transpose().array();
+            sample.p = position;
+            sample.v = velocity;
+        }
+
+        /** @brief Record positions and velocities when no integral objective is present.
+         * @param executor Segment executor with disjoint writes to prepared sample storage.
+         * @note Requires a valid candidate and sample-capable preparation. No cost/gradient work occurs. */
+        template<class Executor>
+        void recordSamples(const Executor &executor)
+        {
+            const int steps = prepared_.options.integration_steps;
+            const double inverse_steps = 1.0 / steps;
+            executor(0, prepared_.num_segments, [&](int segment) {
+                SegmentCoefficients coefficients;
+                SegmentPowers powers;
+                prepareIntegralSegment(segment, coefficients, powers);
+                const double duration = state_.durations[segment];
+                for (int k = 0; k <= steps; ++k)
+                {
+                    const double alpha = k * inverse_steps;
+                    const double local_time = alpha * duration;
+                    const Eigen::Matrix<double, 2, DIM> values = prepared_.basis[k].template topRows<2>() * coefficients;
+                    const IntegralPointInfo point{segment, prepared_.num_segments, k, steps, alpha,
+                        duration, duration * inverse_steps, local_time, state_.spline.breakpoints()[segment] + local_time};
+                    recordSample(point, powers, values.row(0).transpose(), values.row(1).transpose() / duration);
+                }
+            });
+            buffers_.samples_valid = true;
+        }
+
         /** @brief Integrate a statically bound cost and accumulate its coefficient/time partials.
          * @param[in,out] integral_cost Borrowed integrand with unweighted physical-state partials.
          * @param record_samples Whether to fill already prepared sample storage.
          * @param executor Segment executor with disjoint per-segment writes.
-         * @return Trapezoid-rule cost in the integrand's physical units.
+         * @return Trapezoid-rule cost, or the first callback failure in segment order.
          * @note Uses exclusive owned buffers; parallel callbacks must be thread-safe. No allocation. */
         template <typename IntegralFunc, typename Executor>
 #if defined(__GNUC__) || defined(__clang__)
@@ -1179,14 +1253,6 @@ namespace SplineTrajectory
             auto &buffers = buffers_;
             auto &grad_coeffs = buffers.grad_coeffs;
             auto &grad_times = buffers.grad_times;
-            const auto &coeffs = state.spline.polynomial().coefficients();
-
-            double running_time = state.start_time;
-            for(int i = 0; i < prepared_.num_segments; ++i) {
-                buffers.segment_begin_times[i] = running_time;
-                running_time += state.durations[i];
-            }
-
             std::fill(buffers.segment_results.begin(), buffers.segment_results.end(), EvaluationResult{0.0, Status::success()});
 
             buffers.global_time_grad_buffer.setZero();
@@ -1199,17 +1265,9 @@ namespace SplineTrajectory
                 double dt = T * inv_K;
                 int base_row = i * SplineType::kCoefficientCount;
 
-                Eigen::Matrix<double, SplineType::kCoefficientCount, DIM> coeff_block =
-                    coeffs.template block<SplineType::kCoefficientCount, DIM>(base_row, 0);
-
-                // A fixed normalized quadrature rule is shared by all pieces/evaluations.
-                // Scale coefficients once per piece; time drift below remains at fixed physical coefficients.
-                Eigen::Matrix<double, SplineType::kCoefficientCount, 1> time_powers;
-                time_powers(0) = 1.0;
-                for (int power = 1; power < SplineType::kCoefficientCount; ++power)
-                    time_powers(power) = time_powers(power - 1) * T;
-                for (int power = 0; power < SplineType::kCoefficientCount; ++power)
-                    coeff_block.row(power) *= time_powers(power);
+                SegmentCoefficients coeff_block;
+                SegmentPowers time_powers;
+                prepareIntegralSegment(i, coeff_block, time_powers);
                 const double inverse_time = 1.0 / T;
                 const double inverse_time2 = inverse_time * inverse_time;
                 const double inverse_time3 = inverse_time2 * inverse_time;
@@ -1223,7 +1281,7 @@ namespace SplineTrajectory
                 Eigen::Matrix<double, SplineType::kCoefficientCount, DIM> local_acc_gdC;
                 local_acc_gdC.setZero();
 
-                double current_segment_start_time = buffers.segment_begin_times[i];
+                double current_segment_start_time = state.spline.breakpoints()[i];
 
                 for (int k = 0; k <= K; ++k)
                 {
@@ -1236,8 +1294,6 @@ namespace SplineTrajectory
                     double t_global = current_segment_start_time + t;
 
                     const auto &basis = prepared_.basis[k];
-                    const auto &b_p = basis.p; const auto &b_v = basis.v; const auto &b_a = basis.a;
-                    const auto &b_j = basis.j; const auto &b_s = basis.s; const auto &b_c = basis.c;
 
                     using Cost = std::decay_t<IntegralFunc>;
                     constexpr int derivative_order = detail::IntegralDerivativeOrder<Cost>::value;
@@ -1247,12 +1303,15 @@ namespace SplineTrajectory
                     auto &p = sample_state.p; auto &v = sample_state.v; auto &a = sample_state.a;
                     auto &j = sample_state.j; auto &s = sample_state.s;
                     [[maybe_unused]] Vector c = Vector::Zero();
-                    p.transpose().noalias() = b_p * coeff_block;
-                    v.transpose().noalias() = (b_v * coeff_block) * inverse_time;
-                    if constexpr (derivative_order >= 1) a.transpose().noalias() = (b_a * coeff_block) * inverse_time2;
-                    if constexpr (derivative_order >= 2) j.transpose().noalias() = (b_j * coeff_block) * inverse_time3;
-                    if constexpr (derivative_order >= 3) s.transpose().noalias() = (b_s * coeff_block) * inverse_time4;
-                    if constexpr (derivative_order >= 4) c.transpose().noalias() = (b_c * coeff_block) * inverse_time5;
+                    // One fixed-size product evaluates the requested states and their time drift.
+                    const Eigen::Matrix<double, derivative_order + 2, DIM> values =
+                        basis.template topRows<derivative_order + 2>() * coeff_block;
+                    p = values.row(0).transpose();
+                    v = inverse_time * values.row(1).transpose();
+                    if constexpr (derivative_order >= 1) a = inverse_time2 * values.row(2).transpose();
+                    if constexpr (derivative_order >= 2) j = inverse_time3 * values.row(3).transpose();
+                    if constexpr (derivative_order >= 3) s = inverse_time4 * values.row(4).transpose();
+                    if constexpr (derivative_order >= 4) c = inverse_time5 * values.row(5).transpose();
 
                     SampleGradient<DIM> partials;
                     auto &gp = partials.p; auto &gv = partials.v; auto &ga = partials.a;
@@ -1273,23 +1332,15 @@ namespace SplineTrajectory
 
                     local_acc_cost += c_val * common_weight;
 
-                    // Inactive constraints return exact zero partials. Avoid their outer
-                    // products without a norm/tolerance test that could erase small gradients.
-                    // Time drift and explicit time partials are accumulated independently.
-                    if ((gp.array() != 0.0).any())
-                        local_acc_gdC.noalias() += b_p.transpose() * gp.transpose() * common_weight;
-                    if constexpr (derivative_order >= 1)
-                        if ((gv.array() != 0.0).any())
-                            local_acc_gdC.noalias() += b_v.transpose() * gv.transpose() * (common_weight * inverse_time);
-                    if constexpr (derivative_order >= 2)
-                        if ((ga.array() != 0.0).any())
-                            local_acc_gdC.noalias() += b_a.transpose() * ga.transpose() * (common_weight * inverse_time2);
-                    if constexpr (derivative_order >= 3)
-                        if ((gj.array() != 0.0).any())
-                            local_acc_gdC.noalias() += b_j.transpose() * gj.transpose() * (common_weight * inverse_time3);
-                    if constexpr (derivative_order >= 4)
-                        if ((gs.array() != 0.0).any())
-                            local_acc_gdC.noalias() += b_s.transpose() * gs.transpose() * (common_weight * inverse_time4);
+                    // Gather physical partials once, then accumulate one basis-transpose product.
+                    // No norm/tolerance test discards tiny nonzero gradients.
+                    Eigen::Matrix<double, derivative_order + 1, DIM> weighted_partials;
+                    weighted_partials.row(0) = common_weight * gp.transpose();
+                    if constexpr (derivative_order >= 1) weighted_partials.row(1) = (common_weight * inverse_time) * gv.transpose();
+                    if constexpr (derivative_order >= 2) weighted_partials.row(2) = (common_weight * inverse_time2) * ga.transpose();
+                    if constexpr (derivative_order >= 3) weighted_partials.row(3) = (common_weight * inverse_time3) * gj.transpose();
+                    if constexpr (derivative_order >= 4) weighted_partials.row(4) = (common_weight * inverse_time4) * gs.transpose();
+                    local_acc_gdC.noalias() += basis.template topRows<derivative_order + 1>().transpose() * weighted_partials;
 
                     local_acc_gdT += c_val * weight_trap * inv_K;
                     double drift_grad = gp.dot(v);
@@ -1302,18 +1353,7 @@ namespace SplineTrajectory
                     local_acc_gdT += gt * alpha * common_weight;
                     local_acc_explicit_time_grad += gt * common_weight;
 
-                    // Record the completed sample after numerical accumulation, keeping
-                    // bookkeeping stores separate from the coefficient/time arithmetic.
-                    if (record_samples)
-                    {
-                        const int sample_index = i * (K + 1) + k;
-                        IntegralSample &sample = buffers.integral_samples[sample_index];
-                        sample.point = point;
-                        sample.trap_weight = weight_trap;
-                        sample.b_p = b_p.array() * time_powers.transpose().array();
-                        sample.p = p;
-                        sample.v = v;
-                    }
+                    if (record_samples) recordSample(point, time_powers, p, v);
                 }
 
                 buffers.segment_results[i] = {local_acc_cost, Status::success()};

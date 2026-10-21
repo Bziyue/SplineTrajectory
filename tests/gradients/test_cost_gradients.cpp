@@ -174,7 +174,7 @@ void test_cubic()
     Mat dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.backward(dLdC, dLdT).value();
+    auto g = sp.backward(dLdC, dLdT);
 
     minco::MINCO_S2NU minco_s2;
     build_minco_s2(T, P, bc, minco_s2);
@@ -316,7 +316,7 @@ void test_quintic()
     Mat dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.backward(dLdC, dLdT).value();
+    auto g = sp.backward(dLdC, dLdT);
 
     minco::MINCO_S3NU minco_s3;
     build_minco_s3(T, Pvec, bc, minco_s3);
@@ -477,7 +477,7 @@ void test_septic()
     typename Spline::CoefficientMatrix dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.backward(dLdC, dLdT).value();
+    auto g = sp.backward(dLdC, dLdT);
 
     minco::MINCO_S4NU minco_s4;
     build_minco_s4(T, Pvec, bc, minco_s4);

@@ -156,20 +156,21 @@ void testCubic(int N, int BENCH_ITERS)
         if (const auto status = cubic_spline.update(times, all_points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
 
         cout << "Spline3 Generation: \033[32mOK\033[0m" << endl;
-        cout << "Energy: " << cubic_spline.energy().value() << endl;
+        cout << "Energy: " << cubic_spline.energy() << endl;
         cout << "Duration: " << cubic_spline.duration() << endl;
 
         // Test gradient computation
-        auto gdC = cubic_spline.energyCoefficientPartials().value();
-        auto gdT = cubic_spline.energyDurationPartials().value();
+        auto gdC = cubic_spline.energyCoefficientPartials();
+        auto gdT = cubic_spline.energyDurationPartials();
         cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
         cout << "Partial Grad (Times) size: " << gdT.size() << endl;
 
         // Test backward
-        auto grads = cubic_spline.backward(gdC, gdT).value();
+        auto grads = cubic_spline.backward(gdC, gdT);
         // Test reference overload
         SplineTrajectory::CubicSpline3D::Gradients grads_ref;
-        if (const auto status = cubic_spline.backward(gdC, gdT, grads_ref); !status) { throw std::runtime_error(status.message); }
+        grads_ref.resetTopology(cubic_spline.numSegments());
+        cubic_spline.backward(gdC, gdT, grads_ref);
         printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
         SplineTrajectory::CubicSpline3D::CoefficientMatrix gradP_full(N + 1, 3);
@@ -183,9 +184,9 @@ void testCubic(int N, int BENCH_ITERS)
 
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
-        auto direct_gradT = cubic_spline.energyDurationGradient().value();
-        auto direct_gradP_inner = cubic_spline.energyWaypointGradient().value();
-        auto direct_bc_grads = cubic_spline.energyBoundaryGradient().value();
+        auto direct_gradT = cubic_spline.energyDurationGradient();
+        auto direct_gradP_inner = cubic_spline.energyWaypointGradient();
+        auto direct_bc_grads = cubic_spline.energyBoundaryGradient();
 
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.durations).norm());
 
@@ -249,7 +250,7 @@ void testCubic(int N, int BENCH_ITERS)
     // 2. Consistency Check: Energy & Coeffs
     printSubHeader("Consistency: MINCO vs Spline");
     double e_minco; minco_s2.getEnergy(e_minco);
-    printCheck("Energy Difference", std::abs(e_minco - cubic_spline.energy().value()));
+    printCheck("Energy Difference", std::abs(e_minco - cubic_spline.energy()));
     printCheck("Coeffs Difference", (minco_s2.getCoeffs() - cubic_spline.polynomial().coefficients()).norm());
 
     // 3. Gradient Calculation & Propagation Benchmark
@@ -260,22 +261,23 @@ void testCubic(int N, int BENCH_ITERS)
     Eigen::Matrix<double, 3, 2> gradHeadPV_minco, gradTailPV_minco;
 
     SplineTrajectory::CubicSpline3D::CoefficientMatrix gdC_spline;
-    Eigen::VectorXd gdT_spline;
+    Eigen::VectorXd gdT_spline(N);
     SplineTrajectory::CubicSpline3D::CoefficientMatrix gradP_spline_full;
     Eigen::VectorXd gradT_spline_out;
 
     // Propagation-only benchmark: partial gradients are fixed outside loop.
     minco_s2.getEnergyPartialGradByCoeffs(gdC_minco);
     minco_s2.getEnergyPartialGradByTimes(gdT_minco);
-    gdC_spline = cubic_spline.energyCoefficientPartials().value();
-    gdT_spline = cubic_spline.energyDurationPartials().value();
+    gdC_spline = cubic_spline.energyCoefficientPartials();
+    gdT_spline = cubic_spline.energyDurationPartials();
     SplineTrajectory::CubicSpline3D::Gradients grads_ref;
+    grads_ref.resetTopology(cubic_spline.numSegments());
 
     const auto grad_minco_stats = runBenchmark([&]() {
         minco_s2.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
     }, BENCH_ITERS);
     const auto grad_spline_stats = runBenchmark([&]() {
-        if (const auto status = cubic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+        cubic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     }, BENCH_ITERS);
 
     gradT_spline_out = grads_ref.durations;
@@ -298,9 +300,9 @@ void testCubic(int N, int BENCH_ITERS)
     }, BENCH_ITERS);
     const auto step_spline_stats = runBenchmark([&]() {
         if (const auto status = cubic_spline.update(times, all_points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        gdC_spline = cubic_spline.energyCoefficientPartials().value();
-        gdT_spline = cubic_spline.energyDurationPartials().value();
-        if (const auto status = cubic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+        gdC_spline = cubic_spline.energyCoefficientPartials();
+        gdT_spline = cubic_spline.energyDurationPartials();
+        cubic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     }, BENCH_ITERS);
     printTimeStats("MINCO S2 Opt Step", step_minco_stats);
     printTimeStats("Spline3 Opt Step", step_spline_stats);
@@ -323,10 +325,10 @@ void testCubic(int N, int BENCH_ITERS)
 
     // 5. Self-Check (Direct vs Propagated)
     printSubHeader("Self-Check: Direct vs Propagated");
-    auto direct_gradT = cubic_spline.energyDurationGradient().value();
-    auto direct_gradP_inner = cubic_spline.energyWaypointGradient().value();
-    auto direct_bc_grads = cubic_spline.energyBoundaryGradient().value();
-    if (const auto status = cubic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+    auto direct_gradT = cubic_spline.energyDurationGradient();
+    auto direct_gradP_inner = cubic_spline.energyWaypointGradient();
+    auto direct_bc_grads = cubic_spline.energyBoundaryGradient();
+    cubic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     printCheck("Reference overload", 0.0);
 
     // Spline Propagated Inner (as (N-1)x3)
@@ -407,20 +409,21 @@ void testQuintic(int N, int BENCH_ITERS)
         if (const auto status = quintic_spline.update(times, all_points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
 
         cout << "Spline5 Generation: \033[32mOK\033[0m" << endl;
-        cout << "Energy: " << quintic_spline.energy().value() << endl;
+        cout << "Energy: " << quintic_spline.energy() << endl;
         cout << "Duration: " << quintic_spline.duration() << endl;
 
         // Test gradient computation
-        auto gdC = quintic_spline.energyCoefficientPartials().value();
-        auto gdT = quintic_spline.energyDurationPartials().value();
+        auto gdC = quintic_spline.energyCoefficientPartials();
+        auto gdT = quintic_spline.energyDurationPartials();
         cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
         cout << "Partial Grad (Times) size: " << gdT.size() << endl;
 
         // Test backward
-        auto grads = quintic_spline.backward(gdC, gdT).value();
+        auto grads = quintic_spline.backward(gdC, gdT);
         // Test reference overload
         SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
-        if (const auto status = quintic_spline.backward(gdC, gdT, grads_ref); !status) { throw std::runtime_error(status.message); }
+        grads_ref.resetTopology(quintic_spline.numSegments());
+        quintic_spline.backward(gdC, gdT, grads_ref);
         printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
         SplineTrajectory::QuinticSpline3D::CoefficientMatrix gradP_full(N + 1, 3);
@@ -434,9 +437,9 @@ void testQuintic(int N, int BENCH_ITERS)
 
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
-        auto direct_gradT = quintic_spline.energyDurationGradient().value();
-        auto direct_gradP_inner = quintic_spline.energyWaypointGradient().value();
-        auto direct_bc_grads = quintic_spline.energyBoundaryGradient().value();
+        auto direct_gradT = quintic_spline.energyDurationGradient();
+        auto direct_gradP_inner = quintic_spline.energyWaypointGradient();
+        auto direct_bc_grads = quintic_spline.energyBoundaryGradient();
 
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.durations).norm());
 
@@ -511,7 +514,7 @@ void testQuintic(int N, int BENCH_ITERS)
     // 2. Consistency Check: Energy & Coeffs (vs MINCO)
     printSubHeader("Consistency: MINCO vs Spline");
     double e_minco; minco_s3.getEnergy(e_minco);
-    printCheck("Energy Difference", std::abs(e_minco - quintic_spline.energy().value()));
+    printCheck("Energy Difference", std::abs(e_minco - quintic_spline.energy()));
     printCheck("Coeffs Difference", (minco_s3.getCoeffs() - quintic_spline.polynomial().coefficients()).norm());
 
     // 3. Gradient Calculation & Propagation Benchmark (Spline vs MINCO)
@@ -522,22 +525,23 @@ void testQuintic(int N, int BENCH_ITERS)
     Eigen::Matrix3d gradHeadPVA_minco, gradTailPVA_minco;
 
     SplineTrajectory::QuinticSpline3D::CoefficientMatrix gdC_spline;
-    Eigen::VectorXd gdT_spline;
+    Eigen::VectorXd gdT_spline(N);
     SplineTrajectory::QuinticSpline3D::CoefficientMatrix gradP_spline_full;
     Eigen::VectorXd gradT_spline_out;
 
     SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
+    grads_ref.resetTopology(quintic_spline.numSegments());
 
     minco_s3.getEnergyPartialGradByCoeffs(gdC_minco);
     minco_s3.getEnergyPartialGradByTimes(gdT_minco);
-    gdC_spline = quintic_spline.energyCoefficientPartials().value();
-    gdT_spline = quintic_spline.energyDurationPartials().value();
+    gdC_spline = quintic_spline.energyCoefficientPartials();
+    gdT_spline = quintic_spline.energyDurationPartials();
 
     const auto grad_minco_stats = runBenchmark([&]() {
         minco_s3.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
     }, BENCH_ITERS);
     const auto grad_spline_stats = runBenchmark([&]() {
-        if (const auto status = quintic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+        quintic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     }, BENCH_ITERS);
 
     gradT_spline_out = grads_ref.durations;
@@ -560,9 +564,9 @@ void testQuintic(int N, int BENCH_ITERS)
     }, BENCH_ITERS);
     const auto step_spline_stats = runBenchmark([&]() {
         if (const auto status = quintic_spline.update(times, all_points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        gdC_spline = quintic_spline.energyCoefficientPartials().value();
-        gdT_spline = quintic_spline.energyDurationPartials().value();
-        if (const auto status = quintic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+        gdC_spline = quintic_spline.energyCoefficientPartials();
+        gdT_spline = quintic_spline.energyDurationPartials();
+        quintic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     }, BENCH_ITERS);
     printTimeStats("MINCO S3 Opt Step", step_minco_stats);
     printTimeStats("Spline5 Opt Step", step_spline_stats);
@@ -585,9 +589,9 @@ void testQuintic(int N, int BENCH_ITERS)
 
     // 5. Direct Gradient Consistency Check (vs Ref min_jerk)
     printSubHeader("Consistency: Direct Gradients vs Ref");
-    auto direct_gradT = quintic_spline.energyDurationGradient().value();
-    auto direct_gradP_inner = quintic_spline.energyWaypointGradient().value();
-    auto direct_bc_grads = quintic_spline.energyBoundaryGradient().value();
+    auto direct_gradT = quintic_spline.energyDurationGradient();
+    auto direct_gradP_inner = quintic_spline.energyWaypointGradient();
+    auto direct_bc_grads = quintic_spline.energyBoundaryGradient();
 
     // Ref min_jerk returns 3x(N-1), need transpose
     Eigen::MatrixXd ref_gradP = jerk_opt.getGradInnerP().transpose();
@@ -607,7 +611,7 @@ void testQuintic(int N, int BENCH_ITERS)
     printCheck("Direct vs Prop (End V)", (direct_bc_grads.end.v - grads_ref.end.v).norm());
     printCheck("Direct vs Prop (End A)", (direct_bc_grads.end.a - grads_ref.end.a).norm());
     // Test reference overload
-    if (const auto status = quintic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+    quintic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     printCheck("Reference overload", 0.0);
 
     // 7. Point-by-Point Gradient Comparison
@@ -684,20 +688,21 @@ void testSeptic(int N, int BENCH_ITERS)
         if (const auto status = septic_spline.update(times, all_points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
 
         cout << "Spline7 Generation: \033[32mOK\033[0m" << endl;
-        cout << "Energy: " << septic_spline.energy().value() << endl;
+        cout << "Energy: " << septic_spline.energy() << endl;
         cout << "Duration: " << septic_spline.duration() << endl;
 
         // Test gradient computation
-        auto gdC = septic_spline.energyCoefficientPartials().value();
-        auto gdT = septic_spline.energyDurationPartials().value();
+        auto gdC = septic_spline.energyCoefficientPartials();
+        auto gdT = septic_spline.energyDurationPartials();
         cout << "Partial Grad (Coeffs) shape: " << gdC.rows() << "x" << gdC.cols() << endl;
         cout << "Partial Grad (Times) size: " << gdT.size() << endl;
 
         // Test backward
-        auto grads = septic_spline.backward(gdC, gdT).value();
+        auto grads = septic_spline.backward(gdC, gdT);
         // Test reference overload
         SplineTrajectory::SepticSpline3D::Gradients grads_ref;
-        if (const auto status = septic_spline.backward(gdC, gdT, grads_ref); !status) { throw std::runtime_error(status.message); }
+        grads_ref.resetTopology(septic_spline.numSegments());
+        septic_spline.backward(gdC, gdT, grads_ref);
         printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
         SplineTrajectory::SepticSpline3D::CoefficientMatrix gradP_full(N + 1, 3);
@@ -711,9 +716,9 @@ void testSeptic(int N, int BENCH_ITERS)
 
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
-        auto direct_gradT = septic_spline.energyDurationGradient().value();
-        auto direct_gradP_inner = septic_spline.energyWaypointGradient().value();
-        auto direct_bc_grads = septic_spline.energyBoundaryGradient().value();
+        auto direct_gradT = septic_spline.energyDurationGradient();
+        auto direct_gradP_inner = septic_spline.energyWaypointGradient();
+        auto direct_bc_grads = septic_spline.energyBoundaryGradient();
 
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.durations).norm());
 
@@ -792,7 +797,7 @@ void testSeptic(int N, int BENCH_ITERS)
     // 2. Consistency Check: Energy & Coeffs (vs MINCO)
     printSubHeader("Consistency: MINCO vs Spline");
     double e_minco; minco_s4.getEnergy(e_minco);
-    printCheck("Energy Difference", std::abs(e_minco - septic_spline.energy().value()));
+    printCheck("Energy Difference", std::abs(e_minco - septic_spline.energy()));
     printCheck("Coeffs Difference", (minco_s4.getCoeffs() - septic_spline.polynomial().coefficients()).norm());
 
     // 3. Gradient Calculation & Propagation Benchmark (Spline vs MINCO)
@@ -802,23 +807,24 @@ void testSeptic(int N, int BENCH_ITERS)
     Eigen::Matrix3Xd gradP_minco_out; Eigen::VectorXd gradT_minco_out;
     Eigen::Matrix<double, 3, 4> gradHeadPVAJ_minco, gradTailPVAJ_minco;
 
-    SplineTrajectory::SepticSpline3D::CoefficientMatrix gdC_spline;
-    Eigen::VectorXd gdT_spline;
+    SplineTrajectory::SepticSpline3D::CoefficientMatrix gdC_spline(N * 8, 3);
+    Eigen::VectorXd gdT_spline(N);
     SplineTrajectory::SepticSpline3D::CoefficientMatrix gradP_spline_full;
     Eigen::VectorXd gradT_spline_out;
 
     SplineTrajectory::SepticSpline3D::Gradients grads_ref;
+    grads_ref.resetTopology(septic_spline.numSegments());
 
     minco_s4.getEnergyPartialGradByCoeffs(gdC_minco);
     minco_s4.getEnergyPartialGradByTimes(gdT_minco);
-    if (const auto status = septic_spline.energyCoefficientPartials(gdC_spline); !status) { throw std::runtime_error(status.message); }
-    if (const auto status = septic_spline.energyDurationPartials(gdT_spline); !status) { throw std::runtime_error(status.message); }
+    septic_spline.energyCoefficientPartials(gdC_spline);
+    septic_spline.energyDurationPartials(gdT_spline);
 
     const auto grad_minco_stats = runBenchmark([&]() {
         minco_s4.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
     }, BENCH_ITERS);
     const auto grad_spline_stats = runBenchmark([&]() {
-        if (const auto status = septic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+        septic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     }, BENCH_ITERS);
 
     gradT_spline_out = grads_ref.durations;
@@ -841,9 +847,9 @@ void testSeptic(int N, int BENCH_ITERS)
     }, BENCH_ITERS);
     const auto step_spline_stats = runBenchmark([&]() {
         if (const auto status = septic_spline.update(times, all_points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        if (const auto status = septic_spline.energyCoefficientPartials(gdC_spline); !status) { throw std::runtime_error(status.message); }
-        if (const auto status = septic_spline.energyDurationPartials(gdT_spline); !status) { throw std::runtime_error(status.message); }
-        if (const auto status = septic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+        septic_spline.energyCoefficientPartials(gdC_spline);
+        septic_spline.energyDurationPartials(gdT_spline);
+        septic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     }, BENCH_ITERS);
     printTimeStats("MINCO S4 Opt Step", step_minco_stats);
     printTimeStats("Spline7 Opt Step", step_spline_stats);
@@ -868,9 +874,9 @@ void testSeptic(int N, int BENCH_ITERS)
 
     // 5. Direct Gradient Consistency Check (vs Ref min_snap)
     printSubHeader("Consistency: Direct Gradients vs Ref");
-    auto direct_gradT = septic_spline.energyDurationGradient().value();
-    auto direct_gradP_inner = septic_spline.energyWaypointGradient().value();
-    auto direct_bc_grads = septic_spline.energyBoundaryGradient().value();
+    auto direct_gradT = septic_spline.energyDurationGradient();
+    auto direct_gradP_inner = septic_spline.energyWaypointGradient();
+    auto direct_bc_grads = septic_spline.energyBoundaryGradient();
 
     // Ref min_snap returns 3x(N-1), need transpose
     Eigen::MatrixXd ref_gradP = snap_opt.getGradInnerP().transpose();
@@ -892,7 +898,7 @@ void testSeptic(int N, int BENCH_ITERS)
     printCheck("Direct vs Prop (End A)", (direct_bc_grads.end.a.transpose() - grads_ref.end.a.transpose()).norm());
     printCheck("Direct vs Prop (End J)", (direct_bc_grads.end.j.transpose() - grads_ref.end.j.transpose()).norm());
     // Test reference overload
-    if (const auto status = septic_spline.backward(gdC_spline, gdT_spline, grads_ref); !status) { throw std::runtime_error(status.message); }
+    septic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     printCheck("Reference overload", 0.0);
 
     // 7. Point-by-Point Gradient Comparison

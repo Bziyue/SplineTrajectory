@@ -39,7 +39,7 @@ void CheckSplineValidity()
           "outer spline must reject collapsed polynomial time knots");
 
   if (const auto status = curve.update(problem.durations, problem.waypoints, 0.0); !status) { throw std::runtime_error(status.message); }
-  require(curve.isValid() && curve.polynomial().evaluate(0.5).value().allFinite(),
+  require(curve.isValid() && curve.polynomial().evaluate(0.5).allFinite(),
           "curve must recover after invalid updates");
 }
 

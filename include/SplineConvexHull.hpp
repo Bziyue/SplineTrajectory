@@ -37,7 +37,6 @@
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <initializer_list>
 #include <map>
 #include <array>
 #include <vector>
@@ -64,16 +63,7 @@ namespace SplineTrajectory
         Eigen::VectorXd derivative_factors;
         Eigen::VectorXd leaf_begin_fractions;
 
-        std::size_t memoryBytes() const
-        {
-            return sizeof(ConvexHullKernel) +
-                   static_cast<std::size_t>(
-                       stacked_power_to_control.size() +
-                       stacked_control_to_power_adjoint.size() +
-                       derivative_factors.size() +
-                       leaf_begin_fractions.size()) *
-                       sizeof(double);
-        }
+
     };
 
 
@@ -92,12 +82,10 @@ namespace SplineTrajectory
             /** @brief Build the configured basis transform from ascending powers.
              * @param basis Supported Bezier or MINVO basis.
              * @param degree Supported nonnegative degree with representable conversion arithmetic.
-             * @return Owned matrix, or ResourceLimit when its dimension exceeds index capacity.
+             * @return Owned conversion matrix; supported degree and allocation size are caller preconditions.
              * @note Reentrant; allocation exceptions propagate normally. */
-            static StatusOr<Eigen::MatrixXd> powerToControlMatrix(ConvexHullBasis basis, int degree)
+            static Eigen::MatrixXd powerToControlMatrix(ConvexHullBasis basis, int degree)
             {
-                if (degree == std::numeric_limits<int>::max())
-                    return Status{ErrorCode::ResourceLimit, "Polynomial degree exceeds index capacity"};
                 Eigen::MatrixXd result = basis == ConvexHullBasis::Bezier ?
                     bezierPowerToControlMatrix(degree) : minvoPowerToControlMatrix(degree);
                 return result;
@@ -203,64 +191,26 @@ namespace SplineTrajectory
             return b;
         }
 
-            /** @brief Multiply dimensions without overflowing.
-             * @param a First dimension. @param b Second dimension. @return Product or resource limit. */
-            static StatusOr<std::size_t> checkedProduct(std::size_t a, std::size_t b)
-            {
-                if (a != 0 && b > std::numeric_limits<std::size_t>::max() / a)
-                    return Status{ErrorCode::ResourceLimit, "Convex-hull topology size overflow"};
-                return a * b;
-            }
-
-            /** @brief Account for one storage array without overflowing or exceeding the budget.
-             * @param factors Dimensions and element size in bytes. @param budget Total byte limit.
-             * @param[in,out] bytes Already reserved bytes; unchanged on failure.
-             * @return Success or a resource limit, before any allocation occurs. */
-            static Status addStorage(std::initializer_list<std::size_t> factors,
-                                     std::size_t budget, std::size_t &bytes)
-            {
-                if (bytes > budget) return {ErrorCode::ResourceLimit, "Convex-hull memory budget exceeded"};
-                std::size_t size = 1;
-                for (std::size_t factor : factors)
-                {
-                    if (factor != 0 && size > (budget - bytes) / factor)
-                        return {ErrorCode::ResourceLimit, "Convex-hull memory budget exceeded"};
-                    size *= factor;
-                }
-                bytes += size;
-                return Status::success();
-            }
-
             using KernelKey = std::array<int, 4>;
             static KernelKey kernelKey(ConvexHullBasis basis, int count, int derivative, int depth)
             { return {static_cast<int>(basis), count, derivative, depth}; }
 
-            static StatusOr<std::shared_ptr<const ConvexHullKernel>> buildKernel(
+            /** @brief Precompute an immutable normalized-power conversion for trusted topology.
+             * @param basis Supported conversion basis. @param source_num_coeffs Source coefficient count.
+             * @param derivative_order Physical derivative order below the source coefficient count.
+             * @param subdivision_depth Binary depth in [0, 16], asserted before shifting.
+             * @return Shared owning kernel; allocation sizes must fit memory and index capacity. */
+            static std::shared_ptr<const ConvexHullKernel> buildKernel(
                 ConvexHullBasis basis,
                 int source_num_coeffs,
                 int derivative_order,
-                int subdivision_depth,
-                std::size_t memory_budget_bytes)
+                int subdivision_depth)
             {
-                if (subdivision_depth >=
-                    std::numeric_limits<int>::digits - 1)
-                    return Status{ErrorCode::ResourceLimit, "Subdivision depth exceeds integer index capacity"};
-
-                const int degree =
-                    source_num_coeffs - derivative_order - 1;
-
+                assert(subdivision_depth >= 0 && subdivision_depth <= 16);
+                const int degree = source_num_coeffs - derivative_order - 1;
                 const int cp = degree + 1;
                 const int leaves = int{1} << subdivision_depth;
-                const auto row_count = checkedProduct(leaves, cp);
-                if (!row_count) return row_count.status();
-                const std::size_t stacked_rows = row_count.value();
-                if (stacked_rows > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-                    return Status{ErrorCode::ResourceLimit, "Convex-hull rows exceed index capacity"};
-                std::size_t kernel_bytes = sizeof(ConvexHullKernel);
-                if (const auto status = addStorage({stacked_rows, static_cast<std::size_t>(cp), 2, sizeof(double)},
-                                                   memory_budget_bytes, kernel_bytes); !status) return status;
-                if (const auto status = addStorage({static_cast<std::size_t>(cp) + leaves, sizeof(double)},
-                                                   memory_budget_bytes, kernel_bytes); !status) return status;
+                const Eigen::Index stacked_rows = Eigen::Index(leaves) * cp;
 
                 auto kernel = std::make_shared<ConvexHullKernel>();
                 kernel->basis = basis;
@@ -274,9 +224,7 @@ namespace SplineTrajectory
                 kernel->derivative_factors.resize(cp);
                 kernel->leaf_begin_fractions.resize(leaves);
 
-                auto basis_result = powerToControlMatrix(basis, degree);
-                if (!basis_result) return basis_result.status();
-                const Eigen::MatrixXd &basis_matrix = basis_result.value();
+                const Eigen::MatrixXd basis_matrix = powerToControlMatrix(basis, degree);
                 Eigen::MatrixXd restriction(cp, cp);
                 std::vector<long double> a_powers(cp, 1.0L);
                 std::vector<long double> h_powers(cp, 1.0L);
@@ -322,12 +270,15 @@ namespace SplineTrajectory
                 return std::shared_ptr<const ConvexHullKernel>(std::move(kernel));
             }
 
-            static StatusOr<std::shared_ptr<const ConvexHullKernel>> acquireKernel(
+            /** @brief Reuse or construct the immutable conversion for a trusted topology.
+             * @param basis Supported conversion basis. @param source_num_coeffs Source coefficient count.
+             * @param derivative_order Physical derivative order. @param subdivision_depth Binary depth in [0, 16].
+             * @return Shared owning kernel; cache access is synchronized and does not retain expired workspaces. */
+            static std::shared_ptr<const ConvexHullKernel> acquireKernel(
                 ConvexHullBasis basis,
                 int source_num_coeffs,
                 int derivative_order,
-                int subdivision_depth,
-                std::size_t memory_budget_bytes)
+                int subdivision_depth)
             {
                 using Cache =
                     std::map<KernelKey,
@@ -343,17 +294,12 @@ namespace SplineTrajectory
                 if (found != cache.end())
                 {
                     if (auto kernel = found->second.lock())
-                    {
-                        if (kernel->memoryBytes() > memory_budget_bytes)
-                            return Status{ErrorCode::ResourceLimit, "Cached convex-hull kernel exceeds memory budget"};
                         return kernel;
-                    }
                 }
                 auto kernel = buildKernel(
                     basis, source_num_coeffs, derivative_order,
-                    subdivision_depth, memory_budget_bytes);
-                if (!kernel) return kernel.status();
-                cache[key] = kernel.value();
+                    subdivision_depth);
+                cache[key] = kernel;
                 return kernel;
             }
 
@@ -376,8 +322,9 @@ namespace SplineTrajectory
      * Callers guarantee valid input polynomials, supported options, finite partials and matching
      * pre-sized input/output shapes, within a representable numerical working range.
      * These preconditions are not checked; controls and gradients are not scanned for overflow.
-     * Operations return Status or StatusOr. Failed configuration leaves no valid numeric result.
-     * Update requires a configured workspace; adjoint state errors leave outputs unchanged.
+     * Configuration and factories trust topology and allocate directly. A configured workspace is invalid until updated.
+     * Update requires a configured workspace; adjoints require updated controls. These state
+     * preconditions are asserted in debug builds; methods return values or void directly.
      * Fixed-topology update/adjoint does not allocate; allocation exceptions during preparation
      * remain standard allocation failures.
      */
@@ -387,6 +334,7 @@ namespace SplineTrajectory
     public:
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using Vector = Eigen::Matrix<double, DIM, 1>;
+        using RowVector = Eigen::Matrix<double, 1, DIM>;
         using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
         struct PieceInfo
@@ -405,9 +353,6 @@ namespace SplineTrajectory
             Eigen::VectorXd durations;
         };
 
-        static constexpr std::size_t kDefaultMemoryBudgetBytes =
-            std::size_t{64} * 1024 * 1024;
-
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
         ConvexHullWorkspace() = default;
@@ -415,18 +360,17 @@ namespace SplineTrajectory
         /** @brief Configure and update an owning hull workspace from one polynomial.
          * @param polynomial Valid source in physical time; values are copied, not borrowed.
          * @param options Conversion basis, physical derivative order and subdivision depth.
-         * @param memory_budget_bytes Maximum kernel plus workspace storage in bytes.
          * @return Independent mutable workspace with a shared immutable conversion kernel.
-         * @note May allocate and synchronize the kernel cache; errors follow configure()/update(). */
+         * @pre Supported options and topology within available memory and index capacity.
+         * @note Allocates and synchronizes the kernel cache; allocation failures propagate normally. */
         template <int MaxCoefficients>
-        static StatusOr<ConvexHullWorkspace> fromPPoly(
+        static ConvexHullWorkspace fromPPoly(
             const PPolyND<DIM, MaxCoefficients> &polynomial,
-            HullOptions options = {},
-            std::size_t memory_budget_bytes = kDefaultMemoryBudgetBytes)
+            HullOptions options = {})
         {
             ConvexHullWorkspace result;
-            if (const auto status = result.configure(polynomial, options, memory_budget_bytes); !status) return status;
-            if (const auto status = result.update(polynomial); !status) return status;
+            result.configure(polynomial, options);
+            result.update(polynomial.breakpoints(), polynomial.coefficients());
             return result;
         }
 
@@ -434,55 +378,25 @@ namespace SplineTrajectory
          * @param num_source_segments Positive source segment count.
          * @param source_num_coeffs Positive source coefficient count per segment.
          * @param options Basis, physical derivative order and binary subdivision depth.
-         * @param memory_budget_bytes Upper bound for kernel plus workspace storage.
-         * @return Success, or ResourceLimit for unrepresentable sizes or an exceeded budget.
+         * @note Topology sizes must fit supported indices and available memory.
          * @pre Positive counts, a supported basis, 0 <= derivative_order < source_num_coeffs,
-         *      nonnegative subdivision depth, and MINVO degree <= 7. Inputs are not checked.
+         *      subdivision depth in [0, 16], and MINVO degree <= 7; resulting row counts fit int indices.
          * @note Successful configuration leaves isConfigured() true and isValid() false. */
-        Status configure(int num_source_segments, int source_num_coeffs, HullOptions options = {},
-                       std::size_t memory_budget_bytes = kDefaultMemoryBudgetBytes)
+        void configure(int num_source_segments, int source_num_coeffs, HullOptions options = {})
         {
-            // A failed configuration is unconfigured; allocated buffers remain reusable.
+            // Topology is caller-validated; configuration owns all allocation and cache lookup.
             initialized_ = false;
-            kernel_.reset();
-            num_source_segments_ = 0;
-            auto acquired = detail::HullKernelFactory::acquireKernel(options.basis, source_num_coeffs,
-                options.derivative_order, options.subdivision_depth, memory_budget_bytes);
-            if (!acquired) return acquired.status();
-            const auto &new_kernel = acquired.value();
-            auto row_count = detail::HullKernelFactory::checkedProduct(num_source_segments,
-                static_cast<std::size_t>(new_kernel->stacked_power_to_control.rows()));
-            auto source_count = detail::HullKernelFactory::checkedProduct(num_source_segments, source_num_coeffs);
-            if (!row_count) return row_count.status();
-            if (!source_count) return source_count.status();
-            const std::size_t rows = row_count.value();
-            if (rows > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-                source_count.value() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-                return {ErrorCode::ResourceLimit, "Convex-hull topology exceeds index capacity"};
-
-            // Account for persistent buffers before allocating or publishing the topology.
-            std::size_t bytes = new_kernel->memoryBytes();
-            const std::size_t cp = new_kernel->degree + 1;
-            const std::size_t segments = num_source_segments;
-            for (const auto factors : {std::array<std::size_t, 3>{rows, DIM, sizeof(double)},
-                    {source_count.value(), DIM, sizeof(double)}, {segments, cp, sizeof(double)},
-                    {cp, 2 * DIM, sizeof(double)}, {segments, 1, sizeof(double)},
-                    {segments, static_cast<std::size_t>(new_kernel->leaves_per_segment), sizeof(PieceInfo)}})
-                if (const auto status = detail::HullKernelFactory::addStorage(
-                        {factors[0], factors[1], factors[2]}, memory_budget_bytes, bytes); !status) return status;
-
-            initialized_ = false;
+            kernel_ = detail::HullKernelFactory::acquireKernel(options.basis, source_num_coeffs,
+                options.derivative_order, options.subdivision_depth);
             num_source_segments_ = num_source_segments;
-            kernel_ = new_kernel;
-
-            controls_.resize(static_cast<Eigen::Index>(rows), DIM);
-            source_coefficients_.resize(
-                num_source_segments_ * kernel_->source_num_coeffs, DIM);
+            const int cp = kernel_->degree + 1;
+            const Eigen::Index rows = Eigen::Index(num_source_segments_) * kernel_->stacked_power_to_control.rows();
+            controls_.resize(rows, DIM);
             source_durations_.resize(num_source_segments_);
-            duration_powers_.resize(num_source_segments_, kernel_->degree + 1);
-            normalized_derivative_.resize(kernel_->degree + 1, DIM);
-            normalized_gradient_.resize(kernel_->degree + 1, DIM);
-            pieces_.resize(num_source_segments_ * kernel_->leaves_per_segment);
+            duration_powers_.resize(num_source_segments_, cp);
+            normalized_derivative_.resize(Eigen::Index(num_source_segments_) * cp, DIM);
+            normalized_gradient_.resize(cp, DIM);
+            pieces_.resize(static_cast<std::size_t>(num_source_segments_) * kernel_->leaves_per_segment);
 
             // Segment ownership and normalized intervals depend only on the configured topology.
             for (int segment = 0; segment < num_source_segments_; ++segment)
@@ -493,21 +407,18 @@ namespace SplineTrajectory
                                       static_cast<double>(leaf + 1) / kernel_->leaves_per_segment,
                                       0.0, 0.0};
                 }
-            return Status::success();
         }
 
         /** @brief Update numeric data with fixed topology, without allocation or locking.
          * @param polynomial Valid source matching the configured topology; data are copied.
-         * @pre The caller guarantees the source validity and matching topology; no input checks.
-         * @return Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The workspace is configured; the caller guarantees source validity and matching topology.
          * @note Requires exclusive workspace access, as does backwardAdd(). */
         template <int MaxCoefficients>
-        Status update(const PPolyND<DIM, MaxCoefficients> &polynomial)
+        void update(const PPolyND<DIM, MaxCoefficients> &polynomial)
         {
             initialized_ = false;
-            if (!kernel_) return {ErrorCode::InvalidState, "Configure the convex-hull workspace before updating"};
+            assert(isConfigured());
             update(polynomial.breakpoints(), polynomial.coefficients());
-            return Status::success();
         }
 
         /** @brief True after topology configuration, even before the first numeric update. */
@@ -527,14 +438,12 @@ namespace SplineTrajectory
         /** @brief Configure storage; may allocate and synchronize the shared kernel cache.
          * @param polynomial Valid source; only its topology is read during this call.
          * @param options Supported basis, derivative order and subdivision depth.
-         * @param memory_budget_bytes Upper bound for kernel plus workspace storage.
-         * @return Success, or ResourceLimit for unrepresentable sizes or an exceeded budget.
+         * @note Topology sizes must fit supported indices and available memory.
          * @note Requires exclusive workspace access; the source is neither retained nor changed. */
         template <int MaxCoefficients>
-        Status configure(const PPolyND<DIM, MaxCoefficients> &polynomial, HullOptions options = {},
-                       std::size_t memory_budget_bytes = kDefaultMemoryBudgetBytes)
+        void configure(const PPolyND<DIM, MaxCoefficients> &polynomial, HullOptions options = {})
         {
-            return configure(polynomial.numSegments(), polynomial.coefficientCount(), options, memory_budget_bytes);
+            configure(polynomial.numSegments(), polynomial.coefficientCount(), options);
         }
         ConvexHullBasis basis() const { return kernel_ ? kernel_->basis : ConvexHullBasis::Bezier; }
         int derivativeOrder() const { return kernel_ ? kernel_->derivative_order : 0; }
@@ -567,11 +476,11 @@ namespace SplineTrajectory
         /** @brief Allocate and return source coefficient and independent-duration partials.
          * @param control_gradients Finite partials matching the piece-major rows of controls().
          * @return Owned gradients; durations holds local physical-time coefficients fixed.
-         *  Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The workspace contains updated controls.
          * @note Requires exclusive workspace access. Pass both outputs to the spline adjoint. */
-        StatusOr<BackwardResult> backward(const CoefficientMatrix &control_gradients)
+        BackwardResult backward(const CoefficientMatrix &control_gradients)
         {
-            if (!isValid()) return Status{ErrorCode::InvalidState, "Cannot backpropagate an invalid workspace"};
+            assert(isValid());
             BackwardResult result;
             result.coefficients = CoefficientMatrix::Zero(
                 num_source_segments_ * kernel_->source_num_coeffs, DIM);
@@ -584,23 +493,22 @@ namespace SplineTrajectory
          * @param control_gradients Finite partials matching the piece-major rows of controls().
          * @param[out] coefficient_gradients Source coefficient-shaped output in caller-owned storage.
          * @param[out] duration_gradients One independent physical-duration partial per source segment.
-         * @return Success, or an invalid-state failure; discard outputs on failure.
-         * @note The caller supplies matching shapes. Inputs/outputs must not alias each other or
+         * @pre The workspace contains updated controls and the caller supplies matching shapes.
+         * @note Inputs/outputs must not alias each other or
          *       workspace storage. Requires exclusive workspace and output access. */
-        Status backwardInto(const CoefficientMatrix &control_gradients,
+        void backwardInto(const CoefficientMatrix &control_gradients,
                           CoefficientMatrix &coefficient_gradients,
                           Eigen::VectorXd &duration_gradients)
         {
-            if (!isValid()) return Status{ErrorCode::InvalidState, "Cannot backpropagate an invalid workspace"};
+            assert(isValid());
 
             coefficient_gradients.setZero();
             duration_gradients.setZero();
             accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
-            return Status::success();
         }
 
         /**
-         * @brief Allocation-free additive adjoint after configure().
+         * @brief Allocation-free additive adjoint after updating a configured workspace.
          *
          * The destination gradients must already have the exact topology. They
          * are accumulated rather than cleared, allowing several hull costs and
@@ -608,17 +516,16 @@ namespace SplineTrajectory
          * @param control_gradients Finite partials matching the piece-major rows of controls().
          * @param[in,out] coefficient_gradients Source local-power partials, accumulated in place.
          * @param[in,out] duration_gradients Independent time partials at fixed source coefficients.
-         * @return Success, or an invalid-state failure; discard outputs on failure.
-         * @note The caller supplies matching shapes. Inputs/outputs must not alias each other or
+         * @pre The workspace contains updated controls and the caller supplies matching shapes.
+         * @note Inputs/outputs must not alias each other or
          *       workspace storage. Mutates scratch storage; requires exclusive workspace/output access.
          */
-        Status backwardAdd(const CoefficientMatrix &control_gradients,
+        void backwardAdd(const CoefficientMatrix &control_gradients,
                          Eigen::Ref<CoefficientMatrix> coefficient_gradients,
                          Eigen::Ref<Eigen::VectorXd> duration_gradients)
         {
-            if (!isValid()) return Status{ErrorCode::InvalidState, "Cannot backpropagate an invalid workspace"};
+            assert(isValid());
             accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
-            return Status::success();
         }
 
         /**
@@ -629,15 +536,16 @@ namespace SplineTrajectory
          * @param[in,out] source_duration_gradients Finite accumulated partials, one per source segment.
          * @param[in,out] source_start_time_gradient Finite accumulated common-start partial, per second.
          * @pre Caller guarantees matching shapes and exclusive output access.
-         * @return Success, or an invalid-state failure. */
-        Status backwardPieceTimesAdd(
+         * @pre The workspace contains updated controls and piece times. */
+        void backwardPieceTimesAdd(
             const Eigen::Ref<const Eigen::VectorXd> &piece_start_gradients,
             const Eigen::Ref<const Eigen::VectorXd> &piece_duration_gradients,
             Eigen::Ref<Eigen::VectorXd> source_duration_gradients,
             double &source_start_time_gradient) const
         {
-            if (!isValid()) return {ErrorCode::InvalidState, "Piece-time adjoint requires a valid hull"};
+            assert(isValid());
 
+            const double inv_leaves = 1.0 / kernel_->leaves_per_segment;
             double later_start_sum = 0.0;
             for (int segment = num_source_segments_ - 1;
                  segment >= 0; --segment)
@@ -654,23 +562,21 @@ namespace SplineTrajectory
                     local_duration_gradient +=
                         kernel_->leaf_begin_fractions(leaf) *
                             start_gradient +
-                        piece_duration_gradients(piece) /
-                            static_cast<double>(kernel_->leaves_per_segment);
+                        piece_duration_gradients(piece) * inv_leaves;
                 }
                 source_duration_gradients(segment) +=
                     later_start_sum + local_duration_gradient;
                 later_start_sum += this_start_sum;
             }
             source_start_time_gradient += later_start_sum;
-            return Status::success();
         }
 
         /**
          * @brief Matrix B such that control = B * normalized_ascending_power.
          * @param basis Supported Bezier or MINVO basis.
          * @param degree Nonnegative polynomial degree; MINVO requires degree <= 7.
-         * @return Conversion matrix, or a resource failure during construction. */
-        static StatusOr<Eigen::MatrixXd> powerToControlMatrix(ConvexHullBasis basis, int degree)
+         * @return Owned conversion matrix; degree and allocation size are caller preconditions. */
+        static Eigen::MatrixXd powerToControlMatrix(ConvexHullBasis basis, int degree)
         { return detail::HullKernelFactory::powerToControlMatrix(basis, degree); }
 
     private:
@@ -678,7 +584,6 @@ namespace SplineTrajectory
         bool initialized_{false};
 
         CoefficientMatrix controls_;
-        CoefficientMatrix source_coefficients_;
         Eigen::VectorXd source_durations_;
         Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> duration_powers_;
         CoefficientMatrix normalized_gradient_;
@@ -721,14 +626,10 @@ namespace SplineTrajectory
 
                     if (normalized_power > 0)
                     {
-                        const auto source_coefficient =
-                            source_coefficients_.row(
-                                segment * kernel_->source_num_coeffs + k);
                         duration_gradients(segment) +=
-                            (static_cast<double>(normalized_power) *
-                             scale / duration) *
-                            normalized_gradient_.row(normalized_power)
-                                .dot(source_coefficient);
+                            (static_cast<double>(normalized_power) / duration) *
+                            normalized_gradient_.row(normalized_power).dot(
+                                normalized_derivative_.row(segment * cp + normalized_power));
                     }
                 }
             }
@@ -736,13 +637,12 @@ namespace SplineTrajectory
 
         /** @brief Refresh hull controls and adjoint caches at the configured topology.
          * @param breakpoints Strictly increasing physical times, one per segment boundary.
-         * @param coefficients Borrowed local-power coefficients; copied into workspace storage.
+         * @param coefficients Borrowed local-power coefficients; normalized derivatives are retained for the adjoint.
          * @pre The workspace is configured and the source matches its topology and numerical range.
          * @note Requires exclusive workspace access; fixed-topology updates do not allocate. */
         void update(const std::vector<double> &breakpoints,
                     const CoefficientMatrix &coefficients)
         {
-            source_coefficients_ = coefficients;
             const int cp = controlsPerPiece();
             for (int segment = 0; segment < num_source_segments_;
                  ++segment)
@@ -756,71 +656,41 @@ namespace SplineTrajectory
                         duration_powers_(segment, power - 1) *
                         duration;
 
-                // A constant derivative has the same control in every subdivided piece.
-                // In 3D, bypass normalization scratch and the paired accumulation below.
-                if (DIM == 3 && cp == 1)
-                {
-                    const int first_row = segment * kernel_->leaves_per_segment * cp;
-                    const Vector control = kernel_->derivative_factors(0) *
-                        source_coefficients_.row(segment * kernel_->source_num_coeffs +
-                                                 kernel_->derivative_order).transpose();
+                // Cache the normalized derivative once for both controls and the time adjoint.
+                auto normalized = normalized_derivative_.middleRows(segment * cp, cp);
+                for (int power = 0; power < cp; ++power)
+                    normalized.row(power) = kernel_->derivative_factors(power) *
+                        duration_powers_(segment, power) *
+                        coefficients.row(segment * kernel_->source_num_coeffs + power + kernel_->derivative_order);
 
-                    for (int row = 0; row < kernel_->leaves_per_segment; ++row)
-                        controls_.row(first_row + row) = control.transpose();
+                // Accumulate two adjacent controls in registers. This small, dimension-independent
+                // block avoids packed-matrix overhead and preserves each control's summation order.
+                const auto &transform = kernel_->stacked_power_to_control;
+                const int control_count = kernel_->leaves_per_segment * cp;
+                const int first_row = segment * control_count;
+                int row = 0;
+                for (; row + 1 < control_count; row += 2)
+                {
+                    Eigen::Matrix<double, 2, DIM> pair = Eigen::Matrix<double, 2, DIM>::Zero();
+                    for (int power = 0; power < cp; ++power)
+                        pair.noalias() += transform.template block<2, 1>(row, power) * normalized.row(power);
+                    controls_.template middleRows<2>(first_row + row) = pair;
                 }
-                else
+                if (row < control_count)
                 {
-                    // Express the physical derivative in each segment's normalized time.
-                    for (int power = 0; power <= kernel_->degree; ++power)
-                    {
-                        const int source_power =
-                            power + kernel_->derivative_order;
-                        normalized_derivative_.row(power) =
-                            kernel_->derivative_factors(power) *
-                            duration_powers_(segment, power) *
-                            source_coefficients_.row(
-                                segment * kernel_->source_num_coeffs +
-                                source_power);
-                    }
-
-                    const int first_row = segment * kernel_->leaves_per_segment * cp;
-                    int row = 0;
-                    // Pair 3D controls along contiguous transform columns: each axis uses
-                    // a full two-double packet, keeping the original power summation order.
-                    if constexpr (DIM == 3)
-                    {
-                        const auto &transform = kernel_->stacked_power_to_control;
-                        const int control_count = static_cast<int>(transform.rows());
-                        using ControlPair = Eigen::Matrix<double, 2, DIM>;
-                        for (; row + 1 < control_count; row += 2)
-                        {
-                            ControlPair control_pair = ControlPair::Zero();
-                            for (int power = 0; power < cp; ++power)
-                                control_pair.noalias() += transform.template block<2, 1>(row, power) *
-                                    normalized_derivative_.row(power);
-
-                            controls_.template middleRows<2>(first_row + row) = control_pair;
-                        }
-                    }
-
-                    // Other dimensions and an odd final control use the scalar-row path.
-                    for (; row < kernel_->leaves_per_segment * cp; ++row)
-                    {
-                        Vector control = Vector::Zero();
-                        for (int power = 0; power < cp; ++power)
-                            control.noalias() += kernel_->stacked_power_to_control(row, power) *
-                                normalized_derivative_.row(power).transpose();
-
-                        controls_.row(first_row + row) = control.transpose();
-                    }
+                    RowVector control = RowVector::Zero();
+                    for (int power = 0; power < cp; ++power)
+                        control += transform(row, power) * normalized.row(power);
+                    controls_.row(first_row + row) = control;
                 }
 
+                const double piece_duration = duration / kernel_->leaves_per_segment;
                 for (int leaf = 0; leaf < kernel_->leaves_per_segment;
                      ++leaf)
                 {
                     auto &piece = pieces_[segment * kernel_->leaves_per_segment + leaf];
                     piece.start_time = breakpoints[segment] + piece.source_fraction_begin * duration;
-                    piece.duration = duration / static_cast<double>(kernel_->leaves_per_segment);
+                    piece.duration = piece_duration;
                 }
             }
             initialized_ = true;
@@ -830,10 +700,10 @@ namespace SplineTrajectory
     /** @brief Create an owning Bezier hull for one polynomial or its physical derivative.
      * @param polynomial Valid source; copied values do not borrow its lifetime.
      * @param derivative_order Physical derivative order, between zero and the source degree.
-     * @param subdivision_depth Nonnegative binary subdivision depth.
-     * @return Configured, updated workspace; uses the default memory budget and may allocate. */
+     * @param subdivision_depth Binary subdivision depth in [0, 16].
+     * @return Configured, updated workspace; may allocate; topology and allocation size are caller preconditions. */
     template <int DIM, int MaxCoefficients>
-    inline StatusOr<ConvexHullWorkspace<DIM>>
+    inline ConvexHullWorkspace<DIM>
     toBezier(const PPolyND<DIM, MaxCoefficients> &polynomial,
              int derivative_order = 0,
              int subdivision_depth = 0)
@@ -845,10 +715,10 @@ namespace SplineTrajectory
     /** @brief Create an owning MINVO hull for a polynomial or derivative of degree zero through seven.
      * @param polynomial Valid source; copied values do not borrow its lifetime.
      * @param derivative_order Physical derivative order, between zero and the source degree.
-     * @param subdivision_depth Nonnegative binary subdivision depth.
-     * @return Configured, updated workspace; uses the default memory budget and may allocate. */
+     * @param subdivision_depth Binary subdivision depth in [0, 16].
+     * @return Configured, updated workspace; may allocate; topology and allocation size are caller preconditions. */
     template <int DIM, int MaxCoefficients>
-    inline StatusOr<ConvexHullWorkspace<DIM>>
+    inline ConvexHullWorkspace<DIM>
     toMINVO(const PPolyND<DIM, MaxCoefficients> &polynomial,
             int derivative_order = 0,
             int subdivision_depth = 0)

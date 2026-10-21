@@ -195,10 +195,11 @@ namespace SplineTrajectory
      *       Callers guarantee finite inputs, valid orders/indices and matching input/output shapes.
      *       Knots must be strictly increasing, with at least one piece; coefficient count and total
      *       rows must fit capacity and int indices. These input preconditions are not checked.
-     *       Queries return StatusOr; output-reference queries return Status. State failures leave
-     *       outputs unchanged. Query and coefficient-transform arithmetic is not scanned for overflow;
+     *       Owning queries return values; output-reference queries return void. Querying requires an
+     *       initialized polynomial, asserted at entry. Query and coefficient-transform arithmetic is not scanned for overflow;
      *       callers guarantee a representable working range, including any extrapolation.
-     *       Samplers borrow immutable sources; source mutation invalidates them. Allocation
+     *       Borrowed samplers/segments require an initialized immutable source and return values directly.
+     *       Source mutation invalidates these views. Allocation
      *       failures and external callback exceptions are not translated into library statuses. */
     template <int DIM, int MaxCoefficients = Eigen::Dynamic>
     class PPolyND
@@ -251,13 +252,14 @@ namespace SplineTrajectory
         }
         static constexpr DerivativeFactorTable kStaticDerivativeFactorTable_ = makeStaticDerivativeFactorTable();
 
+        /** @brief Compute a falling factorial for an in-range derivative.
+         * @param n Nonnegative monomial power. @param k Derivative order in [0, n].
+         * @return n!/(n-k)!; callers establish the index bounds before entering this helper. */
         inline double derivativeFactor(int n, int k) const
         {
-            if (k < 0 || k > n)
-                return 0.0;
             if constexpr (kHasFixedCapacity && kCapacity <= kStaticFactorMaxOrder)
                 return kStaticDerivativeFactorTable_[n][k];
-            if (n < kStaticFactorMaxOrder && num_coeffs_ <= kStaticFactorMaxOrder)
+            if (n < kStaticFactorMaxOrder)
                 return kStaticDerivativeFactorTable_[n][k];
             double factor = 1.0;
             for (int i = 0; i < k; ++i) factor *= n - i;
@@ -269,18 +271,32 @@ namespace SplineTrajectory
          * @param t Local physical time in seconds, measured from the piece's left endpoint.
          * @param derivative_order Physical derivative order; out-of-degree orders produce zero.
          * @return Derivative in the caller's coordinates; the source must remain unmodified. */
+        template<int Count>
         inline Vector evaluateSegmentHorner(int segment_idx, double t, int derivative_order) const
         {
-            if (derivative_order >= num_coeffs_)
+            const int count = Count == Eigen::Dynamic ? num_coeffs_ : Count;
+            if (derivative_order >= count)
                 return Vector::Zero();
 
-            const int base_row = segment_idx * num_coeffs_;
-            Vector result = derivativeFactor(num_coeffs_ - 1, derivative_order) *
-                                coefficients_.row(base_row + num_coeffs_ - 1).transpose();
-            for (int k = num_coeffs_ - 2; k >= derivative_order; --k)
+            const int base_row = segment_idx * count;
+            Vector result = derivativeFactor(count - 1, derivative_order) *
+                                coefficients_.row(base_row + count - 1).transpose();
+            for (int k = count - 2; k >= derivative_order; --k)
                 result = result * t + derivativeFactor(k, derivative_order) *
                                      coefficients_.row(base_row + k).transpose();
             return result;
+        }
+
+        /** @brief Select a fixed Horner bound only when actual degree fills the static capacity.
+         * @param segment_idx Valid piece index. @param t Local physical seconds.
+         * @param derivative_order Nonnegative physical derivative order.
+         * @return Owned derivative; reduced-degree and dynamic polynomials use their actual count. */
+        inline Vector evaluateSegmentHorner(int segment_idx, double t, int derivative_order) const
+        {
+            if constexpr (kHasFixedCapacity)
+                if (num_coeffs_ == kCapacity)
+                    return evaluateSegmentHorner<kCapacity>(segment_idx, t, derivative_order);
+            return evaluateSegmentHorner<Eigen::Dynamic>(segment_idx, t, derivative_order);
         }
 
         /** @brief Evaluate all requested derivatives of an already located piece.
@@ -374,9 +390,10 @@ namespace SplineTrajectory
              * @param derivative_order Supported order in [0, MAX_DERIVATIVE].
              * @return Owned vector in the source coordinates, or zero above the source degree.
              * @note Requires a prepared piece. The sampler and source remain unmodified. */
+            template<int Count>
             Vector evaluateCached(double local_time, int derivative_order) const
             {
-                const int count = source_->num_coeffs_ - derivative_order;
+                const int count = (Count == Eigen::Dynamic ? source_->num_coeffs_ : Count) - derivative_order;
                 if (count <= 0) return Vector::Zero();
                 Vector value = coefficients_[derivative_order].row(count - 1).transpose();
                 for (int k = count - 2; k >= 0; --k)
@@ -384,16 +401,30 @@ namespace SplineTrajectory
                 return value;
             }
 
+            /** @brief Use a static loop bound for full-capacity pieces and actual count otherwise.
+             * @param local_time Seconds relative to the cached piece.
+             * @param derivative_order Order in [0, MAX_DERIVATIVE].
+             * @return Owned derivative; requires a prepared immutable source piece. */
+            Vector evaluateCached(double local_time, int derivative_order) const
+            {
+                if constexpr (kHasFixedCapacity)
+                    if (source_->num_coeffs_ == kCapacity)
+                        return evaluateCached<kCapacity>(local_time, derivative_order);
+                return evaluateCached<Eigen::Dynamic>(local_time, derivative_order);
+            }
+
             public:
             using Sample = Derivatives<MAX_DERIVATIVE>;
             using Batch = DerivativeBatch<MAX_DERIVATIVE>;
 
             /** @brief Bind an independent sampler without changing or warming the source.
-             * @param source Borrowed immutable polynomial; must outlive this sampler.
+             * @param source Initialized immutable polynomial; must outlive this sampler.
+             * @pre Source validity is asserted here; subsequent queries rely on this lifetime contract.
              * @note Dynamic-capacity polynomials allocate piece storage here; fixed-capacity
              *       ones do not. Evaluation reuses this storage without allocating. */
             explicit Sampler(const PPolyND &source) : source_(&source)
             {
+                assert(source.isValid() && "Sampler requires an initialized, immutable source");
                 if constexpr (!kHasFixedCapacity)
                     for (int d = 0; d <= MAX_DERIVATIVE && d < source.num_coeffs_; ++d)
                         coefficients_[d].resize(source.num_coeffs_ - d, DIM);
@@ -404,13 +435,11 @@ namespace SplineTrajectory
             /** @brief Evaluate one physical derivative using this sampler's cursor and cache.
              * @param t Time on the source axis, in seconds; outside times extrapolate.
              * @param derivative_order Requested order in [0, MAX_DERIVATIVE].
-             * @return Owned vector or invalid-state failure; derivatives above the source degree are zero.
-             *  Success, or an invalid-state failure; discard outputs on failure.
+             * @return Owned vector; derivatives above the source degree are zero.
              * @note Interior knots use the right piece. Requires exclusive access to this
              *       sampler and an unmodified source; no allocation occurs. */
-            StatusOr<Vector> evaluate(double t, int derivative_order)
+            Vector evaluate(double t, int derivative_order)
             {
-                if (!source_->isValid()) return Status{ErrorCode::InvalidState, "Polynomial is not initialized"};
                 const double local_time = prepareQuery(t);
                 return evaluateCached(local_time, derivative_order);
             }
@@ -418,20 +447,19 @@ namespace SplineTrajectory
             /** @brief Evaluate a named derivative, defaulting to position.
              * @param t Time on the source axis, in seconds.
              * @param type Supported physical derivative; defaults to position.
-             * @return Owned vector with evaluate(t, int)'s value, lifetime and error contract. */
-            StatusOr<Vector> evaluate(double t, Deriv type = Deriv::Pos)
+             * @return Owned vector with evaluate(t, int)'s value and lifetime contract. */
+            Vector evaluate(double t, Deriv type = Deriv::Pos)
             {
                 return evaluate(t, static_cast<int>(type));
             }
 
             /** @brief Evaluate physical derivatives 0..MAX_DERIVATIVE with one piece lookup.
              * @param t Time on the source axis, in seconds; outside times extrapolate.
-             * @return Owned derivative array or invalid-state failure.
+             * @return Owned derivative array, with zero entries above degree.
              * @note Updates only this sampler's cursor/cache. Above-degree derivatives are zero;
              *       source lifetime, exclusive sampler access and knot rules match evaluate(). */
-            StatusOr<Sample> evaluateDerivatives(double t)
+            Sample evaluateDerivatives(double t)
             {
-                if (!source_->isValid()) return Status{ErrorCode::InvalidState, "Polynomial is not initialized"};
                 Sample values;
                 const double local_time = prepareQuery(t);
                 for (int d = 0; d <= MAX_DERIVATIVE; ++d)
@@ -443,27 +471,28 @@ namespace SplineTrajectory
              * @param times Query times on the source axis, in seconds, in any order.
              * @param[out] output Caller-owned matrix with times.size() rows and DIM columns.
              * @param derivative_order Supported physical derivative order; defaults to position.
-             * @return Success, or an invalid-state failure; discard outputs on failure.
              * @note No allocation or source mutation occurs. Per-query values follow evaluate();
              *       requires exclusive sampler/output access. Cursor state survives this call. */
-            Status evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output,
+            void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output,
                                 int derivative_order = 0)
             {
-                if (!source_->isValid()) return {ErrorCode::InvalidState, "Polynomial is not initialized"};
+                if (derivative_order >= source_->num_coeffs_)
+                {
+                    output.setZero();
+                    return;
+                }
                 for (std::size_t i = 0; i < times.size(); ++i)
                 {
                     const double local_time = prepareQuery(times[i]);
                     output.row(static_cast<Eigen::Index>(i)) = evaluateCached(local_time, derivative_order).transpose();
                 }
-                return Status::success();
             }
 
             /** @brief Write a named derivative using the same batch contract as the integer overload.
              * @param times Query times on the source axis, in seconds.
              * @param[out] output Pre-sized caller-owned result matrix; storage is reused.
-             * @param type Supported physical derivative; the caller guarantees the order is supported.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-            Status evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output, Deriv type)
+             * @param type Supported physical derivative; the caller guarantees the order is supported. */
+            void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output, Deriv type)
             {
                 return evaluateInto(times, output, static_cast<int>(type));
             }
@@ -472,20 +501,19 @@ namespace SplineTrajectory
              * @param times Query times on the source axis, in seconds, in any order.
              * @param derivative_order Requested order in [0, MAX_DERIVATIVE].
              * @return Owning matrix with one row per time; values follow evaluate().
-             *  Success, or an invalid-state failure; discard outputs on failure.
              * @note Updates this sampler's cursor/cache while leaving its source unmodified. */
-            StatusOr<CoefficientMatrix> evaluate(const std::vector<double> &times, int derivative_order)
+            CoefficientMatrix evaluate(const std::vector<double> &times, int derivative_order)
             {
                 CoefficientMatrix output(static_cast<Eigen::Index>(times.size()), DIM);
-                if (const auto status = evaluateInto(times, output, derivative_order); !status) return status;
+                evaluateInto(times, output, derivative_order);
                 return output;
             }
 
             /** @brief Allocate a batch for a named derivative, defaulting to position.
              * @param times Query times on the source axis, in seconds.
              * @param type Supported physical derivative; defaults to position.
-             * @return Owning result matrix with the integer overload's value and error contract. */
-            StatusOr<CoefficientMatrix> evaluate(const std::vector<double> &times, Deriv type = Deriv::Pos)
+             * @return Owning result matrix with the integer overload's value and lifetime contract. */
+            CoefficientMatrix evaluate(const std::vector<double> &times, Deriv type = Deriv::Pos)
             {
                 return evaluate(times, static_cast<int>(type));
             }
@@ -494,29 +522,26 @@ namespace SplineTrajectory
              * @param times Query times on the source axis, in seconds, in any order.
              * @param[out] output Matrices indexed by derivative order; each must have times.size()
              *        rows and DIM columns. Matrices must not alias source coefficient storage.
-             * @return Success, or an invalid-state failure; discard outputs on failure.
              * @note No allocation occurs. Per-query values follow evaluateDerivatives(); only
              *       this sampler's cursor/cache and the caller's output change. */
-            Status evaluateDerivativesInto(const std::vector<double> &times, Batch &output)
+            void evaluateDerivativesInto(const std::vector<double> &times, Batch &output)
             {
-                if (!source_->isValid()) return {ErrorCode::InvalidState, "Polynomial is not initialized"};
                 for (std::size_t i = 0; i < times.size(); ++i)
                 {
                     const double local_time = prepareQuery(times[i]);
                     for (int d = 0; d <= MAX_DERIVATIVE; ++d)
                         output[d].row(static_cast<Eigen::Index>(i)) = evaluateCached(local_time, d).transpose();
                 }
-                return Status::success();
             }
 
             /** @brief Allocate a batch of every supported physical derivative.
              * @param times Query times on the source axis, in seconds, in any order.
              * @return Owning matrices indexed by derivative order, with one row per time.
              * @note Delegates to evaluateDerivativesInto(); the sampler's cursor is retained. */
-            StatusOr<Batch> evaluateDerivatives(const std::vector<double> &times)
+            Batch evaluateDerivatives(const std::vector<double> &times)
             {
                 Batch output = makeDerivativeBatch<MAX_DERIVATIVE>(times);
-                if (const auto status = evaluateDerivativesInto(times, output); !status) return status;
+                evaluateDerivativesInto(times, output);
                 return output;
             }
         };
@@ -537,7 +562,11 @@ namespace SplineTrajectory
             const PPolyND *parent_;
             int idx_;
 
-            Segment(const PPolyND *parent, int idx) : parent_(parent), idx_(idx) {}
+            /** @brief Bind a piece of an initialized immutable source.
+             * @param parent Non-null borrowed source, alive and unchanged for this view's lifetime.
+             * @param idx Valid piece index; construction checks source initialization only. */
+            Segment(const PPolyND *parent, int idx) : parent_(parent), idx_(idx)
+            { assert(parent->isValid()); }
 
         public:
             EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -554,9 +583,9 @@ namespace SplineTrajectory
             int index() const { return idx_; }
 
             /** @brief Evaluate in seconds relative to this piece's start; extrapolation is allowed.
-             * @return Derivative or invalid-state failure; derivatives above degree are zero.
-             *  Success, or an invalid-state failure; discard outputs on failure. */
-            StatusOr<Vector> evaluateLocal(double t, Deriv type = Deriv::Pos) const
+             * @param t Local physical seconds. @param type Requested physical derivative.
+             * @return Derivative; derivatives above degree are zero. */
+            Vector evaluateLocal(double t, Deriv type = Deriv::Pos) const
             {
                 return evaluateLocal(t, static_cast<int>(type));
             }
@@ -564,12 +593,11 @@ namespace SplineTrajectory
             /** @brief Evaluate a derivative on this borrowed piece without locating a segment.
              * @param t Local physical seconds from this piece's start; extrapolation is allowed.
              * @param derivative_order Nonnegative physical derivative order.
-             * @return Owned vector, or invalid-state failure if the source is not initialized.
+             * @return Owned vector; the view requires a valid, unchanged source.
              * @pre The source remains alive and unchanged; arithmetic is representable.
              * @note Const queries are reentrant and do not allocate. */
-            StatusOr<Vector> evaluateLocal(double t, int derivative_order) const
+            Vector evaluateLocal(double t, int derivative_order) const
             {
-                if (!parent_->isValid()) return Status{ErrorCode::InvalidState, "Polynomial is not initialized"};
                 return parent_->evaluateSegmentHorner(idx_, t, derivative_order);
             }
 
@@ -649,13 +677,16 @@ namespace SplineTrajectory
         PPolyND() = default;
 
         /** @brief Copy N+1 knots and N*coefficient_count ascending-power coefficient rows.
+         * @param breakpoints Strictly increasing physical times in seconds.
+         * @param coefficients Piece-major ascending-power rows in the caller's coordinate frame.
+         * @param coefficient_count Positive coefficient count within the declared capacity.
          * @pre Inputs satisfy update()'s finite-value, shape and capacity contract; not checked.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<PPolyND> create(const std::vector<double> &breakpoints,
+         * @return Independent owning polynomial; allocation failures propagate normally. */
+        static PPolyND create(const std::vector<double> &breakpoints,
                                       const CoefficientMatrix &coefficients, int coefficient_count)
         {
             PPolyND result;
-            if (const auto status = result.update(breakpoints, coefficients, coefficient_count); !status) return status;
+            result.update(breakpoints, coefficients, coefficient_count);
             return result;
         }
 
@@ -694,11 +725,11 @@ namespace SplineTrajectory
         }
 
         Segment operator[](int) const && = delete;
-        StatusOr<Segment> at(int) const && = delete;
+        Segment at(int) const && = delete;
         /** @brief Borrow a segment; source mutation invalidates the returned view.
          * @param idx Valid index in [0, numSegments()); not checked.
          * @return Successful borrowed segment. The source must outlive the view. */
-        StatusOr<Segment> at(int idx) const &
+        Segment at(int idx) const &
         {
             return Segment(this, idx);
         }
@@ -706,11 +737,11 @@ namespace SplineTrajectory
         /** @brief Query the trajectory time axis in seconds, extrapolating outside its domain.
          * @param t Physical query time in seconds on the trajectory axis.
          * @param derivative_order Nonnegative physical derivative order.
-         * @return Physical derivative or invalid-state failure; derivatives above degree are zero.
-         *  Success, or an invalid-state failure; discard outputs on failure. */
-        StatusOr<Vector> evaluate(double t, int derivative_order) const
+         * @return Owned physical derivative; derivatives above degree are zero.
+         * @pre The polynomial is initialized and query inputs satisfy the caller contract. */
+        Vector evaluate(double t, int derivative_order) const
         {
-            if (!is_initialized_) return Status{ErrorCode::InvalidState, "Polynomial is not initialized"};
+            assert(is_initialized_);
             int segment = -1;
             return evaluateWithHint(t, derivative_order, segment);
         }
@@ -718,21 +749,22 @@ namespace SplineTrajectory
         /** @brief Evaluate a named physical derivative, defaulting to position.
          * @param t Time on the trajectory axis, in seconds; outside times extrapolate.
          * @param type Physical derivative; defaults to position.
-         * @return Owned vector with the integer overload's value and error contract; no shared writes. */
-        StatusOr<Vector> evaluate(double t, Deriv type = Deriv::Pos) const
+         * @return Owned vector with the integer overload's value and lifetime contract; no shared writes. */
+        Vector evaluate(double t, Deriv type = Deriv::Pos) const
         {
             return evaluate(t, static_cast<int>(type));
         }
 
         /** @brief Evaluate derivatives 0..MAX_DERIVATIVE with one segment lookup and no shared writes.
          * @param t Time on this spline's axis; endpoints use the adjacent end piece, interior knots use the right piece.
-         * @return Fixed-size derivative array or invalid-state failure. Outside times extrapolate the end piece.
+         * @return Owned derivative array. Outside times extrapolate the end piece.
+         * @pre The polynomial is initialized and query times are finite.
          * @note Const calls are reentrant; update requires exclusive ownership. No heap allocation occurs during evaluation. */
         template <int MAX_DERIVATIVE>
-        StatusOr<Derivatives<MAX_DERIVATIVE>> evaluateDerivatives(double t) const
+        Derivatives<MAX_DERIVATIVE> evaluateDerivatives(double t) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            if (!is_initialized_) return Status{ErrorCode::InvalidState, "Polynomial is not initialized"};
+            assert(is_initialized_);
             const int segment = findSegment(t);
             auto values = evaluateSegmentDerivatives<MAX_DERIVATIVE>(segment, t - breakpoints_[segment]);
             return values;
@@ -742,30 +774,34 @@ namespace SplineTrajectory
          * @param times Query times on the trajectory axis.
          * @param[out] output Matrix with times.size() rows and DIM columns.
          * @param derivative_order Nonnegative physical derivative order.
-         * @return Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The polynomial is initialized; inputs and pre-sized outputs satisfy the caller contract.
          * @note Query order is unrestricted; no order scan or input reordering occurs. Each
          *       query checks the current and next piece before falling back to a regular lookup.
          *       The cursor is local to this call and never stored in the polynomial.
          *       Times must be finite; values follow the single-query evaluate() contract. */
-        Status evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output,
+        void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output,
                             int derivative_order = 0) const
         {
-            if (!is_initialized_) return {ErrorCode::InvalidState, "Polynomial is not initialized"};
+            assert(is_initialized_);
+            if (derivative_order >= num_coeffs_)
+            {
+                output.setZero();
+                return;
+            }
             int segment = -1;
             for (std::size_t i = 0; i < times.size(); ++i)
             {
                 output.row(static_cast<Eigen::Index>(i)) =
                     evaluateWithHint(times[i], derivative_order, segment).transpose();
             }
-            return Status::success();
         }
 
         /** @brief Write a named derivative using the same batch contract as the integer overload.
          * @param times Query times on the trajectory axis, in seconds.
          * @param[out] output Pre-sized caller-owned result matrix; storage is reused.
          * @param type Physical derivative; order and output shape are caller preconditions.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output, Deriv type) const
+         * @pre The polynomial is initialized; inputs and pre-sized outputs satisfy the caller contract. */
+        void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output, Deriv type) const
         {
             return evaluateInto(times, output, static_cast<int>(type));
         }
@@ -774,20 +810,19 @@ namespace SplineTrajectory
          * @param times Query times on the trajectory axis, in seconds, in any order.
          * @param derivative_order Nonnegative physical derivative order.
          * @return Owning matrix with one row per query time and DIM columns.
-         *  Success, or an invalid-state failure; discard outputs on failure.
          * @note Delegates to evaluateInto(); no query state is retained in the polynomial. */
-        StatusOr<CoefficientMatrix> evaluate(const std::vector<double> &times, int derivative_order) const
+        CoefficientMatrix evaluate(const std::vector<double> &times, int derivative_order) const
         {
             CoefficientMatrix output(static_cast<Eigen::Index>(times.size()), DIM);
-            if (const auto status = evaluateInto(times, output, derivative_order); !status) return status;
+            evaluateInto(times, output, derivative_order);
             return output;
         }
 
         /** @brief Allocate a batch for a named derivative, defaulting to position.
          * @param times Query times on the trajectory axis, in seconds.
          * @param type Physical derivative; defaults to position.
-         * @return Owning result matrix with the integer overload's value and error contract. */
-        StatusOr<CoefficientMatrix> evaluate(const std::vector<double> &times, Deriv type = Deriv::Pos) const
+         * @return Owning result matrix with the integer overload's value and lifetime contract. */
+        CoefficientMatrix evaluate(const std::vector<double> &times, Deriv type = Deriv::Pos) const
         {
             return evaluate(times, static_cast<int>(type));
         }
@@ -797,17 +832,17 @@ namespace SplineTrajectory
          * @param times Query times on the trajectory axis, in seconds, in any order.
          * @param[out] output Matrices indexed by derivative order; each must have times.size()
          *        rows and DIM columns. Output must not alias source coefficient storage.
-         * @return Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The polynomial is initialized; inputs and pre-sized outputs satisfy the caller contract.
          * @note No allocation, order scan or source mutation occurs. A call-local cursor checks
          *       the current and next piece before a regular lookup, for queries in any order.
-         *       An uninitialized source returns failure, above-degree derivatives return zero, and outside
+         *       Requires an initialized source; above-degree derivatives return zero, and outside
          *       queries extrapolate. Independent calls with separate outputs are reentrant. */
         template <int MAX_DERIVATIVE>
-        Status evaluateDerivativesInto(const std::vector<double> &times,
+        void evaluateDerivativesInto(const std::vector<double> &times,
                                        DerivativeBatch<MAX_DERIVATIVE> &output) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            if (!is_initialized_) return {ErrorCode::InvalidState, "Polynomial is not initialized"};
+            assert(is_initialized_);
             int segment = -1;
             for (std::size_t i = 0; i < times.size(); ++i)
             {
@@ -817,7 +852,6 @@ namespace SplineTrajectory
                     output[d].row(static_cast<Eigen::Index>(i)) =
                         evaluateSegmentHorner(segment, local_time, d).transpose();
             }
-            return Status::success();
         }
 
         /** @brief Allocate a batch of physical derivatives 0..MAX_DERIVATIVE.
@@ -826,11 +860,11 @@ namespace SplineTrajectory
          * @return Owning matrices indexed by derivative order, with one row per query time.
          * @note Delegates to evaluateDerivativesInto(); source data remains unmodified. */
         template <int MAX_DERIVATIVE>
-        StatusOr<DerivativeBatch<MAX_DERIVATIVE>> evaluateDerivatives(const std::vector<double> &times) const
+        DerivativeBatch<MAX_DERIVATIVE> evaluateDerivatives(const std::vector<double> &times) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
             auto output = makeDerivativeBatch<MAX_DERIVATIVE>(times);
-            if (const auto status = evaluateDerivativesInto<MAX_DERIVATIVE>(times, output); !status) return status;
+            evaluateDerivativesInto<MAX_DERIVATIVE>(times, output);
             return output;
         }
 
@@ -876,8 +910,8 @@ namespace SplineTrajectory
          * @param coefficients Finite piece-major ascending-power coefficients, (knots - 1) * count rows.
          * @param num_coefficients Positive count within static capacity; total rows fit int indices.
          * @pre Inputs satisfy the class contract; no input scan is performed. Requires exclusive access.
-         * @return Success after copying the supplied data into owning storage. */
-        Status update(const std::vector<double> &breakpoints, const CoefficientMatrix &coefficients, int num_coefficients)
+         * @note Allocation failures propagate normally. */
+        void update(const std::vector<double> &breakpoints, const CoefficientMatrix &coefficients, int num_coefficients)
         {
             is_initialized_ = false;
             breakpoints_ = breakpoints;
@@ -885,7 +919,6 @@ namespace SplineTrajectory
             num_coeffs_ = num_coefficients;
             num_segments_ = static_cast<int>(breakpoints.size()) - 1;
             is_initialized_ = true;
-            return Status::success();
         }
 
         bool isValid() const { return is_initialized_; }
@@ -1023,8 +1056,10 @@ namespace SplineTrajectory
         }
 
         /** @brief Construct an owning zero polynomial; coefficient count must fit the capacity.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<PPolyND> zero(const std::vector<double> &breakpoints, int num_coefficients = 1)
+         * @param breakpoints Caller-validated physical knots in seconds.
+         * @param num_coefficients Positive number of ascending-power coefficients per piece.
+         * @return Independent owning polynomial; allocation failures propagate normally. */
+        static PPolyND zero(const std::vector<double> &breakpoints, int num_coefficients = 1)
         {
             int num_segments = static_cast<int>(breakpoints.size()) - 1;
             CoefficientMatrix zero_coeffs = CoefficientMatrix::Zero(num_segments * num_coefficients, DIM);
@@ -1032,8 +1067,10 @@ namespace SplineTrajectory
         }
 
         /** @brief Create an owning constant polynomial from caller-validated knots and value.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        static StatusOr<PPolyND> constant(const std::vector<double> &breakpoints, const Vector &constant_value)
+         * @param breakpoints Strictly increasing physical knots in seconds.
+         * @param constant_value Finite value in the caller's coordinate frame.
+         * @return Independent owning polynomial; allocation failures propagate normally. */
+        static PPolyND constant(const std::vector<double> &breakpoints, const Vector &constant_value)
         {
             int num_segments = static_cast<int>(breakpoints.size()) - 1;
             CoefficientMatrix coeffs = CoefficientMatrix::Zero(num_segments, DIM);
@@ -1137,8 +1174,6 @@ namespace SplineTrajectory
     {
         using Vector = Eigen::Matrix<double, DIM, 1>;
         Vector p = Vector::Zero(), v = Vector::Zero(), a = Vector::Zero(), j = Vector::Zero();
-        /** @brief Validate computed partials. @return True when every component is finite. */
-        bool allFinite() const { return detail::allFinite(p) && detail::allFinite(v) && detail::allFinite(a) && detail::allFinite(j); }
     };
 
     /** @brief Start and end boundary adjoints in the same coordinate frame. */
@@ -1146,8 +1181,6 @@ namespace SplineTrajectory
     struct BoundaryGradientPair
     {
         BoundaryGradient<DIM> start, end;
-        /** @brief Validate computed boundary partials. @return True when both endpoints are finite. */
-        bool allFinite() const { return start.allFinite() && end.allFinite(); }
     };
 
     /** @brief Total derivatives with respect to interpolation data, in physical coordinates. */
@@ -1159,15 +1192,12 @@ namespace SplineTrajectory
         CoefficientMatrix inner_points;
         Eigen::VectorXd durations;
         BoundaryGradient<DIM> start, end;
-        /** @brief Validate the complete physical gradient. @return True when all components are finite. */
-        bool allFinite() const { return detail::allFinite(inner_points) && detail::allFinite(durations) && start.allFinite() && end.allFinite(); }
-        /** @brief Allocate output storage for a topology; does not initialize values.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status resetTopology(int segments)
+        /** @brief Allocate output storage for a topology without initializing values.
+         * @param segments Positive segment count; output storage is exclusively owned. */
+        void resetTopology(int segments)
         {
             inner_points.resize(std::max(0, segments - 1), DIM);
             durations.resize(segments);
-            return Status::success();
         }
         void setZero()
         {
@@ -1190,20 +1220,7 @@ namespace SplineTrajectory
                 inner_points.row(knot - 1) += partial;
         }
 
-        /** @brief Accumulate one coordinate of a position partial without forming a vector.
-         * @param knot Waypoint index in [0, N], with N given by the prepared durations size.
-         * @param coordinate Spatial coordinate index in [0, DIM).
-         * @param partial Physical position partial in the caller's coordinates.
-         * @note Requires a prepared N-segment topology and exclusive access to this output. */
-        void addWaypoint(int knot, int coordinate, double partial)
-        {
-            if (knot == 0)
-                start.p(coordinate) += partial;
-            else if (knot == durations.size())
-                end.p(coordinate) += partial;
-            else
-                inner_points(knot - 1, coordinate) += partial;
-        }
+
     };
 
     namespace detail
@@ -1221,19 +1238,32 @@ namespace SplineTrajectory
                 durations[i] = knots[i + 1] - knots[i];
         }
 
+        /** @brief Store one gradient expression using the caller's overwrite or additive contract.
+         * @tparam Add True to accumulate, false to overwrite; resolved at compile time.
+         * @param[in,out] destination Scalar or Eigen output with the required shape.
+         * @param value Evaluated in the caller's physical gradient units.
+         * @note Requires non-aliasing inputs and exclusive output access; never resizes storage. */
+        template<bool Add, class Destination, class Value>
+        inline void storeGradient(Destination &&destination, const Value &value)
+        {
+            if constexpr (Add) destination += value;
+            else destination = value;
+        }
+
         /** @brief Compute interior position gradients from the highest-derivative jump at each knot.
+         * @tparam Add Select accumulation or overwrite at compile time.
          * @tparam Scale Signed multiplier of the right-minus-left highest power coefficient.
          * @param polynomial Valid minimum-derivative spline in physical time; borrowed for this call.
-         * @param[out] gradient Interior waypoint gradients in the caller's coordinates; storage is reused.
+         * @param[in,out] gradient Pre-sized interior waypoint gradients in the caller's coordinates.
+         * @param weight Multiplier of the energy contribution.
          * @pre The spline is valid.
          * @note Requires the per-order energy multiplier and exclusive access to gradient.
          *       A single segment has no interior waypoints and produces an empty matrix. */
-        template <int Scale, int DIM, int CoefficientCount>
+        template <int Scale, bool Add = false, int DIM, int CoefficientCount>
         inline void computeEnergyWaypointGradient(const PPolyND<DIM, CoefficientCount> &polynomial,
-                                           typename PPolyND<DIM>::CoefficientMatrix &gradient)
+                                           typename PPolyND<DIM>::CoefficientMatrix &gradient, double weight)
         {
             const int segments = polynomial.numSegments();
-            gradient.resize(segments - 1, DIM);
 
             // Integration by parts leaves only the highest-derivative jump at each interior knot.
             const auto &coefficients = polynomial.coefficients();
@@ -1243,9 +1273,9 @@ namespace SplineTrajectory
                 const auto right = coefficients.row(knot * CoefficientCount + CoefficientCount - 1);
                 // Keep each order's original subtraction direction and positive multiplication.
                 if constexpr (Scale > 0)
-                    gradient.row(knot - 1) = static_cast<double>(Scale) * (right - left);
+                    storeGradient<Add>(gradient.row(knot - 1), (weight * static_cast<double>(Scale)) * (right - left));
                 else
-                    gradient.row(knot - 1) = static_cast<double>(-Scale) * (left - right);
+                    storeGradient<Add>(gradient.row(knot - 1), (weight * static_cast<double>(-Scale)) * (left - right));
             }
         }
 
@@ -1570,6 +1600,8 @@ namespace SplineTrajectory
      *       Updates return status and invalidate the polynomial on numerical failure; factories return StatusOr.
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
+     *       Energy and adjoint queries require successful construction and return plain values or void.
+     *       Reference gradient outputs must be pre-sized; resetTopology(N) prepares full gradients.
      *       Adjoint inputs must be finite with N*kCoefficientCount coefficient rows and N time partials.
      *       All public overloads use this single contract; callers perform input validation and
      *       guarantee a representable working range. Coefficients, energy and gradients are not
@@ -1761,16 +1793,15 @@ namespace SplineTrajectory
         }
 
         /** @brief Integrate the squared minimum physical derivative.
-         * @return Energy in physical units, or an invalid-state failure. */
-        StatusOr<double> energy() const
+         * @return Energy in physical units; requires a successfully constructed spline. */
+        double energy() const
         {
-            if (!trajectory_.isValid())
-                return Status{ErrorCode::InvalidState, "Energy requires a valid spline"};
+            assert(trajectory_.isValid());
 
             double total_energy = 0.0;
             for (int i = 0; i < num_segments_; ++i)
             {
-                const double T = time_powers_[i].h;
+                const double T = time_segments_[i];
 
                 const double T2 = T * T;
                 const double T3 = T2 * T;
@@ -1792,16 +1823,15 @@ namespace SplineTrajectory
          * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 4) × DIM.
          *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
          * @note This computes only the direct partial derivative, not the full gradient.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status energyCoefficientPartials(CoefficientMatrix &gdC) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            gdC.resize(num_segments_ * 4, DIM);
+            assert(trajectory_.isValid());
             gdC.setZero();
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                const double T = time_powers_[i].h;
+                const double T = time_segments_[i];
                 double T2 = T * T;
                 double T3 = T2 * T;
 
@@ -1812,15 +1842,13 @@ namespace SplineTrajectory
 
                 gdC.row(i * 4 + 3) = 12.0 * c2 * T2 + 24.0 * c3 * T3;
             }
-
-            return Status::success();
         }
 
         /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
-        StatusOr<CoefficientMatrix> energyCoefficientPartials() const
+        CoefficientMatrix energyCoefficientPartials() const
         {
-            CoefficientMatrix gdC;
-            if (const auto status = energyCoefficientPartials(gdC); !status) return status;
+            CoefficientMatrix gdC(num_segments_ * kCoefficientCount, DIM);
+            energyCoefficientPartials(gdC);
             return gdC;
         }
 
@@ -1830,15 +1858,14 @@ namespace SplineTrajectory
          * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
          * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status energyDurationPartials(Eigen::VectorXd &gdT) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            gdT.resize(num_segments_);
+            assert(trajectory_.isValid());
 
             for (int i = 0; i < num_segments_; ++i)
             {
-                const double T = time_powers_[i].h;
+                const double T = time_segments_[i];
 
                 const RowVector c2 = trajectory_.coefficients_.row(i * 4 + 2);
                 const RowVector c3 = trajectory_.coefficients_.row(i * 4 + 3);
@@ -1847,15 +1874,13 @@ namespace SplineTrajectory
 
                 gdT(i) = acc_end.squaredNorm();
             }
-
-            return Status::success();
         }
 
         /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
-        StatusOr<Eigen::VectorXd> energyDurationPartials() const
+        Eigen::VectorXd energyDurationPartials() const
         {
-            Eigen::VectorXd gdT;
-            if (const auto status = energyDurationPartials(gdT); !status) return status;
+            Eigen::VectorXd gdT(num_segments_);
+            energyDurationPartials(gdT);
             return gdT;
         }
 
@@ -1864,20 +1889,18 @@ namespace SplineTrajectory
          *
          * @param[out] grad Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status energyDurationGradient(Eigen::VectorXd &grad) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyDurationGradient(Eigen::VectorXd &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            computeEnergyDurationGradient(grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            computeEnergyDurationGradient<false>(grad, 1.0);
         }
 
         /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
-        StatusOr<Eigen::VectorXd> energyDurationGradient() const
+        Eigen::VectorXd energyDurationGradient() const
         {
-            Eigen::VectorXd grad;
-            if (const auto status = energyDurationGradient(grad); !status) return status;
+            Eigen::VectorXd grad(num_segments_);
+            energyDurationGradient(grad);
             return grad;
         }
 
@@ -1885,20 +1908,18 @@ namespace SplineTrajectory
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
          * @param[out] grad Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status energyWaypointGradient(CoefficientMatrix &grad) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyWaypointGradient(CoefficientMatrix &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            detail::computeEnergyWaypointGradient<12>(trajectory_, grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<12>(trajectory_, grad, 1.0);
         }
 
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
-        StatusOr<CoefficientMatrix> energyWaypointGradient() const
+        CoefficientMatrix energyWaypointGradient() const
         {
-            CoefficientMatrix grad;
-            if (const auto status = energyWaypointGradient(grad); !status) return status;
+            CoefficientMatrix grad(num_segments_ - 1, DIM);
+            energyWaypointGradient(grad);
             return grad;
         }
 
@@ -1906,26 +1927,24 @@ namespace SplineTrajectory
          * @brief Compute energy gradients w.r.t. boundary position and velocity.
          * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
          *        physical-time derivative convention (seconds); acceleration and jerk are zero.
-         * @return Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The spline is valid and reference outputs already have the required shapes.
          * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
-        Status energyBoundaryGradient(BoundaryGradients &grad) const
+        void energyBoundaryGradient(BoundaryGradients &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            computeEnergyBoundaryGradient(grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            computeEnergyBoundaryGradient<false>(grad.start, grad.end, 1.0);
         }
 
         /** @brief Return energy gradients w.r.t. boundary position and velocity.
          * @return Owned start/end gradients using physical seconds and the caller's coordinates;
          *         acceleration and jerk gradients are zero.
-         *  Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
-        StatusOr<BoundaryGradients> energyBoundaryGradient() const
+        BoundaryGradients energyBoundaryGradient() const
         {
             BoundaryGradients res;
-            if (const auto status = energyBoundaryGradient(res); !status) return status;
+            energyBoundaryGradient(res);
             return res;
         }
 
@@ -1937,30 +1956,39 @@ namespace SplineTrajectory
          *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity)
          */
-        StatusOr<Gradients> energyGradient() const
+        Gradients energyGradient() const
         {
             Gradients res;
-            if (const auto status = energyGradient(res); !status) return status;
+            res.resetTopology(num_segments_);
+            energyGradient(res);
             return res;
         }
 
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused.
+         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
          * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
-         * @return Success, or an invalid-state failure. */
-        Status energyGradient(Gradients &grads) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyGradient(Gradients &grads) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            detail::computeEnergyWaypointGradient<12>(trajectory_, grads.inner_points);
-            computeEnergyDurationGradient(grads.durations);
-            BoundaryGradients boundary;
-            computeEnergyBoundaryGradient(boundary);
-            grads.start = boundary.start;
-            grads.end = boundary.end;
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<12>(trajectory_, grads.inner_points, 1.0);
+            computeEnergyDurationGradient<false>(grads.durations, 1.0);
+            computeEnergyBoundaryGradient<false>(grads.start, grads.end, 1.0);
+        }
 
-            return Status::success();
+        /** @brief Add weighted minimum-derivative energy gradients to existing physical partials.
+         * @param[in,out] grads Prepared, initialized gradients matching this spline's topology.
+         * @param weight Energy multiplier; uses the same physical units as energy().
+         * @pre The latest construction succeeded and arithmetic is representable.
+         * @note No allocation or resizing; requires exclusive output access and no spline mutation. */
+        void energyGradientAdd(Gradients &grads, double weight = 1.0) const
+        {
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<12, true>(trajectory_, grads.inner_points, weight);
+            computeEnergyDurationGradient<true>(grads.durations, weight);
+            computeEnergyBoundaryGradient<true>(grads.start, grads.end, weight);
         }
 
         /**
@@ -1973,12 +2001,13 @@ namespace SplineTrajectory
          *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity)
          */
-        StatusOr<Gradients> backward(const CoefficientMatrix &partialGradByCoeffs,
+        Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
+            res.resetTopology(num_segments_);
 
-            if (const auto status = backward(partialGradByCoeffs, partialGradByTimes, res); !status) return status;
+            backward(partialGradByCoeffs, partialGradByTimes, res);
 
             return res;
         }
@@ -1988,16 +2017,15 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused.
+         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
          * @pre Input partials are finite and match the constructed spline; no input scan is performed.
          * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status backward(const CoefficientMatrix &partialGradByCoeffs,
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void backward(const CoefficientMatrix &partialGradByCoeffs,
                       const Eigen::VectorXd &partialGradByTimes,
                       Gradients &grads)
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Adjoint requires a valid spline"};
-            (void)grads.resetTopology(num_segments_);
+            assert(trajectory_.isValid());
             detail::initializeGradients(partialGradByTimes, grads);
             adjoint_.setZero();
 
@@ -2007,18 +2035,16 @@ namespace SplineTrajectory
             // A fully clamped segment has no free knot derivatives to correct.
             if (num_segments_ > 1)
                 accumulateAdjoint(grads);
-
-            return Status::success();
         }
 
     private:
-        /** @brief Compute one energy-gradient component for a valid spline.
-         * @param[out] grad Overwritten physical gradient; existing storage is reused.
-         * @pre The spline is valid; the caller validates the computed output before publication. */
-        void computeEnergyDurationGradient(Eigen::VectorXd &grad) const
+        /** @brief Write duration terms from the endpoint energy identity.
+         * @tparam Add Select accumulation or overwrite at compile time.
+         * @param[in,out] grad Pre-sized duration partials in physical seconds.
+         * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
+        template<bool Add>
+        void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
         {
-            grad.resize(num_segments_);
-
             for (int i = 0; i < num_segments_; ++i)
             {
                 const RowVector c1 = trajectory_.coefficients_.row(i * 4 + 1);
@@ -2028,23 +2054,30 @@ namespace SplineTrajectory
                 double term_acc = 4.0 * c2.squaredNorm();
                 double term_jv = 12.0 * c1.dot(c3);
 
-                grad(i) = -term_acc + term_jv;
+                detail::storeGradient<Add>(grad(i), weight * (-term_acc + term_jv));
             }
         }
 
-        /** @brief Compute one energy-gradient component for a valid spline.
-         * @param[out] grad Overwritten physical gradient; existing storage is reused.
-         * @pre The spline is valid; the caller validates the computed output before publication. */
-        void computeEnergyBoundaryGradient(BoundaryGradients &grad) const
+        /** @brief Write integration-by-parts terms at the two clamped endpoints.
+         * @tparam Add Select accumulation or overwrite at compile time.
+         * @param[in,out] start Start endpoint partials in physical coordinates.
+         * @param[in,out] end End endpoint partials in physical coordinates.
+         * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
+        template<bool Add>
+        void computeEnergyBoundaryGradient(BoundaryGradient &start, BoundaryGradient &end, double weight) const
         {
-            BoundaryGradients res;
+            if constexpr (!Add)
+            {
+                start.a.setZero(); end.a.setZero();
+                start.j.setZero(); end.j.setZero();
+            }
 
             // Evaluate the start-boundary terms at local time zero.
             const RowVector c2_first = trajectory_.coefficients_.row(2);
             const RowVector c3_first = trajectory_.coefficients_.row(3);
 
-            res.start.p = 12.0 * c3_first.transpose();
-            res.start.v = -4.0 * c2_first.transpose();
+            detail::storeGradient<Add>(start.p, weight * (12.0 * c3_first.transpose()));
+            detail::storeGradient<Add>(start.v, weight * (-4.0 * c2_first.transpose()));
 
             // Evaluate the end-boundary terms at the final segment's physical duration.
             int last_idx = num_segments_ - 1;
@@ -2056,11 +2089,8 @@ namespace SplineTrajectory
             RowVector acc_end = 2.0 * c2_last + 6.0 * c3_last * T;
             RowVector jerk_end = 6.0 * c3_last;
 
-            res.end.p = -2.0 * jerk_end.transpose();
-            res.end.v = 2.0 * acc_end.transpose();
-
-            // Publish the complete result, including zero unconstrained derivatives.
-            grad = res;
+            detail::storeGradient<Add>(end.p, weight * (-2.0 * jerk_end.transpose()));
+            detail::storeGradient<Add>(end.v, weight * (2.0 * acc_end.transpose()));
         }
 
         // Construction: prepare caches, solve knot derivatives, publish coefficients.
@@ -2152,16 +2182,13 @@ namespace SplineTrajectory
                 upper_multipliers_(knot - 1) = inverse;
                 inverse_pivots_(knot - 1) = (0.5 * time_powers_[knot].h) * inverse;
 
-                for (int coordinate = 0; coordinate < DIM; ++coordinate)
-                {
-                    double rhs = 3.0 * (duration_ratio * segment_slopes_(knot - 1, coordinate) +
-                                          segment_slopes_(knot, coordinate));
-                    // The preceding row is either clamped or already forward-substituted.
-                    rhs -= duration_ratio * derivatives_(knot - 1, coordinate);
-                    if (knot + 1 == num_segments_)
-                        rhs -= derivatives_(num_segments_, coordinate);
-                    derivatives_(knot, coordinate) = inverse * rhs;
-                }
+                RowVector rhs = 3.0 * (duration_ratio * segment_slopes_.row(knot - 1) +
+                                      segment_slopes_.row(knot));
+                // The preceding row is either clamped or already forward-substituted.
+                rhs -= duration_ratio * derivatives_.row(knot - 1);
+                if (knot + 1 == num_segments_)
+                    rhs -= derivatives_.row(num_segments_);
+                derivatives_.row(knot) = inverse * rhs;
             }
             backSubstitute(derivatives_);
         }
@@ -2277,6 +2304,8 @@ namespace SplineTrajectory
      *       Updates return status and invalidate the polynomial on numerical failure; factories return StatusOr.
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
+     *       Energy and adjoint queries require successful construction and return plain values or void.
+     *       Reference gradient outputs must be pre-sized; resetTopology(N) prepares full gradients.
      *       Adjoint inputs must be finite with N*kCoefficientCount coefficient rows and N time partials.
      *       All public overloads use this single contract; callers perform input validation and
      *       guarantee a representable working range. Coefficients, energy and gradients are not
@@ -2474,11 +2503,10 @@ namespace SplineTrajectory
         }
 
         /** @brief Integrate the squared minimum physical derivative.
-         * @return Energy in physical units, or an invalid-state failure. */
-        StatusOr<double> energy() const
+         * @return Energy in physical units; requires a successfully constructed spline. */
+        double energy() const
         {
-            if (!trajectory_.isValid())
-                return Status{ErrorCode::InvalidState, "Energy requires a valid spline"};
+            assert(trajectory_.isValid());
 
             double total_energy = 0.0;
             for (int i = 0; i < num_segments_; ++i)
@@ -2511,11 +2539,10 @@ namespace SplineTrajectory
          * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 6) × DIM.
          *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
          * @note This computes only the direct partial derivative, not the full gradient.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status energyCoefficientPartials(CoefficientMatrix &gdC) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            gdC.resize(num_segments_ * 6, DIM);
+            assert(trajectory_.isValid());
             gdC.setZero();
 
             for (int i = 0; i < num_segments_; ++i)
@@ -2542,15 +2569,13 @@ namespace SplineTrajectory
                                      720.0 * c4 * T4 +
                                      1440.0 * c5 * T5;
             }
-
-            return Status::success();
         }
 
         /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
-        StatusOr<CoefficientMatrix> energyCoefficientPartials() const
+        CoefficientMatrix energyCoefficientPartials() const
         {
-            CoefficientMatrix gdC;
-            if (const auto status = energyCoefficientPartials(gdC); !status) return status;
+            CoefficientMatrix gdC(num_segments_ * kCoefficientCount, DIM);
+            energyCoefficientPartials(gdC);
             return gdC;
         }
 
@@ -2560,11 +2585,10 @@ namespace SplineTrajectory
          * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
          * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status energyDurationPartials(Eigen::VectorXd &gdT) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            gdT.resize(num_segments_);
+            assert(trajectory_.isValid());
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -2578,15 +2602,13 @@ namespace SplineTrajectory
 
                 gdT(i) = jerk_end.squaredNorm();
             }
-
-            return Status::success();
         }
 
         /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
-        StatusOr<Eigen::VectorXd> energyDurationPartials() const
+        Eigen::VectorXd energyDurationPartials() const
         {
-            Eigen::VectorXd gdT;
-            if (const auto status = energyDurationPartials(gdT); !status) return status;
+            Eigen::VectorXd gdT(num_segments_);
+            energyDurationPartials(gdT);
             return gdT;
         }
 
@@ -2595,20 +2617,18 @@ namespace SplineTrajectory
          *
          * @param[out] grad Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status energyDurationGradient(Eigen::VectorXd &grad) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyDurationGradient(Eigen::VectorXd &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            computeEnergyDurationGradient(grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            computeEnergyDurationGradient<false>(grad, 1.0);
         }
 
         /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
-        StatusOr<Eigen::VectorXd> energyDurationGradient() const
+        Eigen::VectorXd energyDurationGradient() const
         {
-            Eigen::VectorXd grad;
-            if (const auto status = energyDurationGradient(grad); !status) return status;
+            Eigen::VectorXd grad(num_segments_);
+            energyDurationGradient(grad);
             return grad;
         }
 
@@ -2616,20 +2636,18 @@ namespace SplineTrajectory
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
          * @param[out] grad Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status energyWaypointGradient(CoefficientMatrix &grad) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyWaypointGradient(CoefficientMatrix &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            detail::computeEnergyWaypointGradient<-240>(trajectory_, grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<-240>(trajectory_, grad, 1.0);
         }
 
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
-        StatusOr<CoefficientMatrix> energyWaypointGradient() const
+        CoefficientMatrix energyWaypointGradient() const
         {
-            CoefficientMatrix grad;
-            if (const auto status = energyWaypointGradient(grad); !status) return status;
+            CoefficientMatrix grad(num_segments_ - 1, DIM);
+            energyWaypointGradient(grad);
             return grad;
         }
 
@@ -2637,26 +2655,24 @@ namespace SplineTrajectory
          * @brief Compute energy gradients w.r.t. boundary position, velocity and acceleration.
          * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
          *        physical-time derivative convention (seconds); jerk gradients are zero.
-         * @return Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The spline is valid and reference outputs already have the required shapes.
          * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
-        Status energyBoundaryGradient(BoundaryGradients &grad) const
+        void energyBoundaryGradient(BoundaryGradients &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            computeEnergyBoundaryGradient(grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            computeEnergyBoundaryGradient<false>(grad.start, grad.end, 1.0);
         }
 
         /** @brief Return energy gradients w.r.t. boundary position, velocity and acceleration.
          * @return Owned start/end gradients using physical seconds and the caller's coordinates;
          *         jerk gradients are zero.
-         *  Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
-        StatusOr<BoundaryGradients> energyBoundaryGradient() const
+        BoundaryGradients energyBoundaryGradient() const
         {
             BoundaryGradients res;
-            if (const auto status = energyBoundaryGradient(res); !status) return status;
+            energyBoundaryGradient(res);
             return res;
         }
 
@@ -2668,30 +2684,39 @@ namespace SplineTrajectory
          *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
          */
-        StatusOr<Gradients> energyGradient() const
+        Gradients energyGradient() const
         {
             Gradients res;
-            if (const auto status = energyGradient(res); !status) return status;
+            res.resetTopology(num_segments_);
+            energyGradient(res);
             return res;
         }
 
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused.
+         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
          * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
-         * @return Success, or an invalid-state failure. */
-        Status energyGradient(Gradients &grads) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyGradient(Gradients &grads) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            detail::computeEnergyWaypointGradient<-240>(trajectory_, grads.inner_points);
-            computeEnergyDurationGradient(grads.durations);
-            BoundaryGradients boundary;
-            computeEnergyBoundaryGradient(boundary);
-            grads.start = boundary.start;
-            grads.end = boundary.end;
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<-240>(trajectory_, grads.inner_points, 1.0);
+            computeEnergyDurationGradient<false>(grads.durations, 1.0);
+            computeEnergyBoundaryGradient<false>(grads.start, grads.end, 1.0);
+        }
 
-            return Status::success();
+        /** @brief Add weighted minimum-derivative energy gradients to existing physical partials.
+         * @param[in,out] grads Prepared, initialized gradients matching this spline's topology.
+         * @param weight Energy multiplier; uses the same physical units as energy().
+         * @pre The latest construction succeeded and arithmetic is representable.
+         * @note No allocation or resizing; requires exclusive output access and no spline mutation. */
+        void energyGradientAdd(Gradients &grads, double weight = 1.0) const
+        {
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<-240, true>(trajectory_, grads.inner_points, weight);
+            computeEnergyDurationGradient<true>(grads.durations, weight);
+            computeEnergyBoundaryGradient<true>(grads.start, grads.end, weight);
         }
 
         /**
@@ -2704,12 +2729,13 @@ namespace SplineTrajectory
          *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
          */
-        StatusOr<Gradients> backward(const CoefficientMatrix &partialGradByCoeffs,
+        Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
+            res.resetTopology(num_segments_);
 
-            if (const auto status = backward(partialGradByCoeffs, partialGradByTimes, res); !status) return status;
+            backward(partialGradByCoeffs, partialGradByTimes, res);
 
             return res;
         }
@@ -2719,16 +2745,15 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused.
+         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
          * @pre Input partials are finite and match the constructed spline; no input scan is performed.
          * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status backward(const CoefficientMatrix &partialGradByCoeffs,
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void backward(const CoefficientMatrix &partialGradByCoeffs,
                       const Eigen::VectorXd &partialGradByTimes,
                       Gradients &grads)
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Adjoint requires a valid spline"};
-            (void)grads.resetTopology(num_segments_);
+            assert(trajectory_.isValid());
             detail::initializeGradients(partialGradByTimes, grads);
             adjoint_.setZero();
 
@@ -2738,18 +2763,16 @@ namespace SplineTrajectory
             // A fully clamped segment has no free knot derivatives to correct.
             if (num_segments_ > 1)
                 accumulateAdjoint(grads);
-
-            return Status::success();
         }
 
     private:
-        /** @brief Compute one energy-gradient component for a valid spline.
-         * @param[out] grad Overwritten physical gradient; existing storage is reused.
-         * @pre The spline is valid; the caller validates the computed output before publication. */
-        void computeEnergyDurationGradient(Eigen::VectorXd &grad) const
+        /** @brief Write duration terms from the endpoint energy identity.
+         * @tparam Add Select accumulation or overwrite at compile time.
+         * @param[in,out] grad Pre-sized duration partials in physical seconds.
+         * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
+        template<bool Add>
+        void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
         {
-            grad.resize(num_segments_);
-
             for (int i = 0; i < num_segments_; ++i)
             {
                 const RowVector c1 = trajectory_.coefficients_.row(i * 6 + 1);
@@ -2762,25 +2785,31 @@ namespace SplineTrajectory
                 double term_sa = 96.0 * c2.dot(c4);
                 double term_cv = 240.0 * c1.dot(c5);
 
-                grad(i) = -term_jerk + term_sa - term_cv;
+                detail::storeGradient<Add>(grad(i), weight * (-term_jerk + term_sa - term_cv));
             }
         }
 
-        /** @brief Compute one energy-gradient component for a valid spline.
-         * @param[out] grad Overwritten physical gradient; existing storage is reused.
-         * @pre The spline is valid; the caller validates the computed output before publication. */
-        void computeEnergyBoundaryGradient(BoundaryGradients &grad) const
+        /** @brief Write integration-by-parts terms at the two clamped endpoints.
+         * @tparam Add Select accumulation or overwrite at compile time.
+         * @param[in,out] start Start endpoint partials in physical coordinates.
+         * @param[in,out] end End endpoint partials in physical coordinates.
+         * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
+        template<bool Add>
+        void computeEnergyBoundaryGradient(BoundaryGradient &start, BoundaryGradient &end, double weight) const
         {
-            BoundaryGradients res;
+            if constexpr (!Add)
+            {
+                start.j.setZero(); end.j.setZero();
+            }
 
             // Evaluate the start-boundary terms at local time zero.
             const RowVector c3_first = trajectory_.coefficients_.row(3);
             const RowVector c4_first = trajectory_.coefficients_.row(4);
             const RowVector c5_first = trajectory_.coefficients_.row(5);
 
-            res.start.p = -240.0 * c5_first.transpose();
-            res.start.v = 48.0 * c4_first.transpose();
-            res.start.a = -12.0 * c3_first.transpose();
+            detail::storeGradient<Add>(start.p, weight * (-240.0 * c5_first.transpose()));
+            detail::storeGradient<Add>(start.v, weight * (48.0 * c4_first.transpose()));
+            detail::storeGradient<Add>(start.a, weight * (-12.0 * c3_first.transpose()));
 
             // Evaluate the end-boundary terms at the final segment's physical duration.
             int last_idx = num_segments_ - 1;
@@ -2795,12 +2824,9 @@ namespace SplineTrajectory
             RowVector snap_end = 24.0 * c4_last + 120.0 * c5_last * T;
             RowVector crackle_end = 120.0 * c5_last;
 
-            res.end.p = 2.0 * crackle_end.transpose();
-            res.end.v = -2.0 * snap_end.transpose();
-            res.end.a = 2.0 * jerk_end.transpose();
-
-            // Publish the complete result, including zero unconstrained derivatives.
-            grad = res;
+            detail::storeGradient<Add>(end.p, weight * (2.0 * crackle_end.transpose()));
+            detail::storeGradient<Add>(end.v, weight * (-2.0 * snap_end.transpose()));
+            detail::storeGradient<Add>(end.a, weight * (2.0 * jerk_end.transpose()));
         }
 
         // Construction: prepare caches, solve knot derivatives, publish coefficients.
@@ -2835,8 +2861,6 @@ namespace SplineTrajectory
                 resizeWorkspace();
 
             // Boundary values change independently of the segment count.
-            if (num_segments_ == 1)
-                return;
             derivatives_.row(0) = boundary_.start_velocity.transpose();
             derivatives_.row(num_segments_ * 2 + 0) = boundary_.end_velocity.transpose();
             derivatives_.row(1) = boundary_.start_acceleration.transpose();
@@ -2849,17 +2873,8 @@ namespace SplineTrajectory
         void resizeWorkspace()
         {
             adjoint_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
-            // A single segment is fully specified by its boundary states.
-            if (num_segments_ == 1)
-            {
-                derivatives_.resize(0, DIM);
-                factors_.clear();
-            }
-            else
-            {
-                derivatives_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
-                factors_.resize(num_segments_ - 1);
-            }
+            derivatives_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
+            factors_.resize(num_segments_ - 1);
             time_powers_.resize(num_segments_);
         }
 
@@ -2897,27 +2912,24 @@ namespace SplineTrajectory
             previous(1, 0) = -24.0 * left.h2_inv;
             previous(1, 1) = -3.0 * left.h_inv;
 
-            for (int coordinate = 0; coordinate < DIM; ++coordinate)
+            const RowVector delta_left = spatial_points_.row(knot) - spatial_points_.row(knot - 1);
+            const RowVector delta_right = spatial_points_.row(knot + 1) - spatial_points_.row(knot);
+            RowVector rhs0 = 360.0 * left.h4_inv * delta_left + 360.0 * right.h4_inv * delta_right;
+            RowVector rhs1 = -60.0 * left.h3_inv * delta_left + 60.0 * right.h3_inv * delta_right;
+            if (knot == 1)
             {
-                const double delta_left = spatial_points_(knot, coordinate) - spatial_points_(knot - 1, coordinate);
-                const double delta_right = spatial_points_(knot + 1, coordinate) - spatial_points_(knot, coordinate);
-                double rhs0 = 360.0 * left.h4_inv * delta_left + 360.0 * right.h4_inv * delta_right;
-                double rhs1 = -60.0 * left.h3_inv * delta_left + 60.0 * right.h3_inv * delta_right;
-                if (knot == 1)
-                {
-                    rhs0 -= previous(0, 0) * derivatives_(0, coordinate) + previous(0, 1) * derivatives_(1, coordinate);
-                    rhs1 -= previous(1, 0) * derivatives_(0, coordinate) + previous(1, 1) * derivatives_(1, coordinate);
-                }
-                if (knot + 1 == num_segments_)
-                {
-                    rhs0 -= 168.0 * right.h3_inv * derivatives_(num_segments_ * 2, coordinate)
-                        - 24.0 * right.h2_inv * derivatives_(num_segments_ * 2 + 1, coordinate);
-                    rhs1 -= 24.0 * right.h2_inv * derivatives_(num_segments_ * 2, coordinate)
-                        - 3.0 * right.h_inv * derivatives_(num_segments_ * 2 + 1, coordinate);
-                }
-                derivatives_(knot * 2, coordinate) = rhs0;
-                derivatives_(knot * 2 + 1, coordinate) = rhs1;
+                rhs0 -= previous(0, 0) * derivatives_.row(0) + previous(0, 1) * derivatives_.row(1);
+                rhs1 -= previous(1, 0) * derivatives_.row(0) + previous(1, 1) * derivatives_.row(1);
             }
+            if (knot + 1 == num_segments_)
+            {
+                rhs0 -= 168.0 * right.h3_inv * derivatives_.row(num_segments_ * 2)
+                    - 24.0 * right.h2_inv * derivatives_.row(num_segments_ * 2 + 1);
+                rhs1 -= 24.0 * right.h2_inv * derivatives_.row(num_segments_ * 2)
+                    - 3.0 * right.h_inv * derivatives_.row(num_segments_ * 2 + 1);
+            }
+            derivatives_.row(knot * 2) = rhs0;
+            derivatives_.row(knot * 2 + 1) = rhs1;
         }
 
         /** @brief Factor and solve the block system in linear time.
@@ -2959,15 +2971,10 @@ namespace SplineTrajectory
                 const int left_row = i * kDerivativesPerKnot;
                 const int right_row = left_row + kDerivativesPerKnot;
                 const RowVector position = spatial_points_.row(i);
-                // Single-segment curves have no free knot derivatives or primal workspace.
-                const RowVector velocity = num_segments_ == 1 ? RowVector(boundary_.start_velocity.transpose()) :
-                    RowVector(derivatives_.row(left_row));
-                const RowVector acceleration = num_segments_ == 1 ? RowVector(boundary_.start_acceleration.transpose()) :
-                    RowVector(derivatives_.row(left_row + 1));
-                const RowVector end_velocity = num_segments_ == 1 ? RowVector(boundary_.end_velocity.transpose()) :
-                    RowVector(derivatives_.row(right_row));
-                const RowVector end_acceleration = num_segments_ == 1 ? RowVector(boundary_.end_acceleration.transpose()) :
-                    RowVector(derivatives_.row(right_row + 1));
+                const RowVector velocity = derivatives_.row(left_row);
+                const RowVector acceleration = derivatives_.row(left_row + 1);
+                const RowVector end_velocity = derivatives_.row(right_row);
+                const RowVector end_acceleration = derivatives_.row(right_row + 1);
                 const RowVector quadratic = 0.5 * acceleration;
 
                 // Match the right endpoint after subtracting the left-end Taylor polynomial.
@@ -3009,14 +3016,10 @@ namespace SplineTrajectory
                 const int right_row = left_row + kDerivativesPerKnot;
 
                 // Reuse solved states; a fully clamped segment reads its inputs directly.
-                const RowVector left_velocity = num_segments_ == 1 ? RowVector(boundary_.start_velocity.transpose()) :
-                    RowVector(derivatives_.row(left_row));
-                const RowVector left_acceleration = num_segments_ == 1 ? RowVector(boundary_.start_acceleration.transpose()) :
-                    RowVector(derivatives_.row(left_row + 1));
-                const RowVector right_velocity = num_segments_ == 1 ? RowVector(boundary_.end_velocity.transpose()) :
-                    RowVector(derivatives_.row(right_row));
-                const RowVector right_acceleration = num_segments_ == 1 ? RowVector(boundary_.end_acceleration.transpose()) :
-                    RowVector(derivatives_.row(right_row + 1));
+                const RowVector left_velocity = derivatives_.row(left_row);
+                const RowVector left_acceleration = derivatives_.row(left_row + 1);
+                const RowVector right_velocity = derivatives_.row(right_row);
+                const RowVector right_acceleration = derivatives_.row(right_row + 1);
 
                 // Apply the same Hermite map across coordinates, sharing the time multipliers.
                 const RowVector g3 = coefficient_partials.row(coefficient_row + 3);
@@ -3146,6 +3149,8 @@ namespace SplineTrajectory
      *       Updates return status and invalidate the polynomial on numerical failure; factories return StatusOr.
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
+     *       Energy and adjoint queries require successful construction and return plain values or void.
+     *       Reference gradient outputs must be pre-sized; resetTopology(N) prepares full gradients.
      *       Adjoint inputs must be finite with N*kCoefficientCount coefficient rows and N time partials.
      *       All public overloads use this single contract; callers perform input validation and
      *       guarantee a representable working range. Coefficients, energy and gradients are not
@@ -3345,11 +3350,10 @@ namespace SplineTrajectory
         }
 
         /** @brief Integrate the squared minimum physical derivative.
-         * @return Energy in physical units, or an invalid-state failure. */
-        StatusOr<double> energy() const
+         * @return Energy in physical units; requires a successfully constructed spline. */
+        double energy() const
         {
-            if (!trajectory_.isValid())
-                return Status{ErrorCode::InvalidState, "Energy requires a valid spline"};
+            assert(trajectory_.isValid());
 
             double total_energy = 0.0;
             for (int i = 0; i < num_segments_; ++i)
@@ -3389,11 +3393,10 @@ namespace SplineTrajectory
          * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 8) × DIM.
          *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
          * @note This computes only the direct partial derivative, not the full gradient.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status energyCoefficientPartials(CoefficientMatrix &gdC) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            gdC.resize(num_segments_ * 8, DIM);
+            assert(trajectory_.isValid());
             gdC.setZero();
 
             for (int i = 0; i < num_segments_; ++i)
@@ -3431,15 +3434,13 @@ namespace SplineTrajectory
                                      100800.0 * c6 * T6 +
                                      201600.0 * c7 * T7;
             }
-
-            return Status::success();
         }
 
         /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
-        StatusOr<CoefficientMatrix> energyCoefficientPartials() const
+        CoefficientMatrix energyCoefficientPartials() const
         {
-            CoefficientMatrix gdC;
-            if (const auto status = energyCoefficientPartials(gdC); !status) return status;
+            CoefficientMatrix gdC(num_segments_ * kCoefficientCount, DIM);
+            energyCoefficientPartials(gdC);
             return gdC;
         }
 
@@ -3449,11 +3450,10 @@ namespace SplineTrajectory
          * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
          * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status energyDurationPartials(Eigen::VectorXd &gdT) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            gdT.resize(num_segments_);
+            assert(trajectory_.isValid());
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -3468,15 +3468,13 @@ namespace SplineTrajectory
 
                 gdT(i) = snap_end.squaredNorm();
             }
-
-            return Status::success();
         }
 
         /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
-        StatusOr<Eigen::VectorXd> energyDurationPartials() const
+        Eigen::VectorXd energyDurationPartials() const
         {
-            Eigen::VectorXd gdT;
-            if (const auto status = energyDurationPartials(gdT); !status) return status;
+            Eigen::VectorXd gdT(num_segments_);
+            energyDurationPartials(gdT);
             return gdT;
         }
 
@@ -3485,20 +3483,18 @@ namespace SplineTrajectory
          *
          * @param[out] grad Full gradient dE/dT, size num_segments.
          *         Includes both direct and indirect dependencies via chain rule.
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status energyDurationGradient(Eigen::VectorXd &grad) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyDurationGradient(Eigen::VectorXd &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            computeEnergyDurationGradient(grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            computeEnergyDurationGradient<false>(grad, 1.0);
         }
 
         /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
-        StatusOr<Eigen::VectorXd> energyDurationGradient() const
+        Eigen::VectorXd energyDurationGradient() const
         {
-            Eigen::VectorXd grad;
-            if (const auto status = energyDurationGradient(grad); !status) return status;
+            Eigen::VectorXd grad(num_segments_);
+            energyDurationGradient(grad);
             return grad;
         }
 
@@ -3506,20 +3502,18 @@ namespace SplineTrajectory
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
          * @param[out] grad Full gradient dE/dP for inner points only.
          *         Size (N-1) × DIM (excludes boundary points P0 and PN).
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status energyWaypointGradient(CoefficientMatrix &grad) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyWaypointGradient(CoefficientMatrix &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            detail::computeEnergyWaypointGradient<10080>(trajectory_, grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<10080>(trajectory_, grad, 1.0);
         }
 
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
-        StatusOr<CoefficientMatrix> energyWaypointGradient() const
+        CoefficientMatrix energyWaypointGradient() const
         {
-            CoefficientMatrix grad;
-            if (const auto status = energyWaypointGradient(grad); !status) return status;
+            CoefficientMatrix grad(num_segments_ - 1, DIM);
+            energyWaypointGradient(grad);
             return grad;
         }
 
@@ -3527,25 +3521,23 @@ namespace SplineTrajectory
          * @brief Compute energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
          * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
          *        physical-time derivative convention (seconds).
-         * @return Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The spline is valid and reference outputs already have the required shapes.
          * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
-        Status energyBoundaryGradient(BoundaryGradients &grad) const
+        void energyBoundaryGradient(BoundaryGradients &grad) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            computeEnergyBoundaryGradient(grad);
-
-            return Status::success();
+            assert(trajectory_.isValid());
+            computeEnergyBoundaryGradient<false>(grad.start, grad.end, 1.0);
         }
 
         /** @brief Return energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
          * @return Owned start/end gradients using physical seconds and the caller's coordinates.
-         *  Success, or an invalid-state failure; discard outputs on failure.
+         * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
-        StatusOr<BoundaryGradients> energyBoundaryGradient() const
+        BoundaryGradients energyBoundaryGradient() const
         {
             BoundaryGradients res;
-            if (const auto status = energyBoundaryGradient(res); !status) return status;
+            energyBoundaryGradient(res);
             return res;
         }
 
@@ -3557,30 +3549,39 @@ namespace SplineTrajectory
          *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
          */
-        StatusOr<Gradients> energyGradient() const
+        Gradients energyGradient() const
         {
             Gradients res;
-            if (const auto status = energyGradient(res); !status) return status;
+            res.resetTopology(num_segments_);
+            energyGradient(res);
             return res;
         }
 
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused.
+         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
          * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
-         * @return Success, or an invalid-state failure. */
-        Status energyGradient(Gradients &grads) const
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void energyGradient(Gradients &grads) const
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Energy gradients require a valid spline"};
-            detail::computeEnergyWaypointGradient<10080>(trajectory_, grads.inner_points);
-            computeEnergyDurationGradient(grads.durations);
-            BoundaryGradients boundary;
-            computeEnergyBoundaryGradient(boundary);
-            grads.start = boundary.start;
-            grads.end = boundary.end;
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<10080>(trajectory_, grads.inner_points, 1.0);
+            computeEnergyDurationGradient<false>(grads.durations, 1.0);
+            computeEnergyBoundaryGradient<false>(grads.start, grads.end, 1.0);
+        }
 
-            return Status::success();
+        /** @brief Add weighted minimum-derivative energy gradients to existing physical partials.
+         * @param[in,out] grads Prepared, initialized gradients matching this spline's topology.
+         * @param weight Energy multiplier; uses the same physical units as energy().
+         * @pre The latest construction succeeded and arithmetic is representable.
+         * @note No allocation or resizing; requires exclusive output access and no spline mutation. */
+        void energyGradientAdd(Gradients &grads, double weight = 1.0) const
+        {
+            assert(trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<10080, true>(trajectory_, grads.inner_points, weight);
+            computeEnergyDurationGradient<true>(grads.durations, weight);
+            computeEnergyBoundaryGradient<true>(grads.start, grads.end, weight);
         }
 
         /**
@@ -3593,12 +3594,13 @@ namespace SplineTrajectory
          *       - durations: gradient w.r.t. physical segment durations, size N
          *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
          */
-        StatusOr<Gradients> backward(const CoefficientMatrix &partialGradByCoeffs,
+        Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
+            res.resetTopology(num_segments_);
 
-            if (const auto status = backward(partialGradByCoeffs, partialGradByTimes, res); !status) return status;
+            backward(partialGradByCoeffs, partialGradByTimes, res);
 
             return res;
         }
@@ -3608,16 +3610,15 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param[out] grads Overwritten physical gradients; correctly sized buffers are reused.
+         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
          * @pre Input partials are finite and match the constructed spline; no input scan is performed.
          * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
-         * @return Success, or invalid-state failure; inputs satisfy the class contract. */
-        Status backward(const CoefficientMatrix &partialGradByCoeffs,
+         * @pre The spline is valid and reference outputs already have the required shapes. */
+        void backward(const CoefficientMatrix &partialGradByCoeffs,
                       const Eigen::VectorXd &partialGradByTimes,
                       Gradients &grads)
         {
-            if (!trajectory_.isValid()) return {ErrorCode::InvalidState, "Adjoint requires a valid spline"};
-            (void)grads.resetTopology(num_segments_);
+            assert(trajectory_.isValid());
             detail::initializeGradients(partialGradByTimes, grads);
             adjoint_.setZero();
 
@@ -3627,18 +3628,16 @@ namespace SplineTrajectory
             // A fully clamped segment has no free knot derivatives to correct.
             if (num_segments_ > 1)
                 accumulateAdjoint(grads);
-
-            return Status::success();
         }
 
     private:
-        /** @brief Compute one energy-gradient component for a valid spline.
-         * @param[out] grad Overwritten physical gradient; existing storage is reused.
-         * @pre The spline is valid; the caller validates the computed output before publication. */
-        void computeEnergyDurationGradient(Eigen::VectorXd &grad) const
+        /** @brief Write duration terms from the endpoint energy identity.
+         * @tparam Add Select accumulation or overwrite at compile time.
+         * @param[in,out] grad Pre-sized duration partials in physical seconds.
+         * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
+        template<bool Add>
+        void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
         {
-            grad.resize(num_segments_);
-
             for (int i = 0; i < num_segments_; ++i)
             {
 
@@ -3656,27 +3655,28 @@ namespace SplineTrajectory
                 double term_pa = 2880.0 * c2.dot(c6);
                 double term_dv = 10080.0 * c1.dot(c7);
 
-                grad(i) = -term_snap + term_cj - term_pa + term_dv;
+                detail::storeGradient<Add>(grad(i), weight * (-term_snap + term_cj - term_pa + term_dv));
             }
         }
 
-        /** @brief Compute one energy-gradient component for a valid spline.
-         * @param[out] grad Overwritten physical gradient; existing storage is reused.
-         * @pre The spline is valid; the caller validates the computed output before publication. */
-        void computeEnergyBoundaryGradient(BoundaryGradients &grad) const
+        /** @brief Write integration-by-parts terms at the two clamped endpoints.
+         * @tparam Add Select accumulation or overwrite at compile time.
+         * @param[in,out] start Start endpoint partials in physical coordinates.
+         * @param[in,out] end End endpoint partials in physical coordinates.
+         * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
+        template<bool Add>
+        void computeEnergyBoundaryGradient(BoundaryGradient &start, BoundaryGradient &end, double weight) const
         {
-            BoundaryGradients res;
-
             // Evaluate the start-boundary terms at local time zero.
             const RowVector c4_first = trajectory_.coefficients_.row(4);
             const RowVector c5_first = trajectory_.coefficients_.row(5);
             const RowVector c6_first = trajectory_.coefficients_.row(6);
             const RowVector c7_first = trajectory_.coefficients_.row(7);
 
-            res.start.p = 10080.0 * c7_first.transpose();
-            res.start.v = -1440.0 * c6_first.transpose();
-            res.start.a = 240.0 * c5_first.transpose();
-            res.start.j = -48.0 * c4_first.transpose();
+            detail::storeGradient<Add>(start.p, weight * (10080.0 * c7_first.transpose()));
+            detail::storeGradient<Add>(start.v, weight * (-1440.0 * c6_first.transpose()));
+            detail::storeGradient<Add>(start.a, weight * (240.0 * c5_first.transpose()));
+            detail::storeGradient<Add>(start.j, weight * (-48.0 * c4_first.transpose()));
 
             // Evaluate the end-boundary terms at the final segment's physical duration.
             int last_idx = num_segments_ - 1;
@@ -3695,13 +3695,10 @@ namespace SplineTrajectory
             RowVector pop_end = 720.0 * c6_last + 5040.0 * c7_last * T;
             RowVector d7_end = 5040.0 * c7_last;
 
-            res.end.p = -2.0 * d7_end.transpose();
-            res.end.v = 2.0 * pop_end.transpose();
-            res.end.a = -2.0 * crackle_end.transpose();
-            res.end.j = 2.0 * snap_end.transpose();
-
-            // Publish the complete result, including zero unconstrained derivatives.
-            grad = res;
+            detail::storeGradient<Add>(end.p, weight * (-2.0 * d7_end.transpose()));
+            detail::storeGradient<Add>(end.v, weight * (2.0 * pop_end.transpose()));
+            detail::storeGradient<Add>(end.a, weight * (-2.0 * crackle_end.transpose()));
+            detail::storeGradient<Add>(end.j, weight * (2.0 * snap_end.transpose()));
         }
 
         // Construction: prepare caches, solve knot derivatives, publish coefficients.
@@ -3736,8 +3733,6 @@ namespace SplineTrajectory
                 resizeWorkspace();
 
             // Boundary values change independently of the segment count.
-            if (num_segments_ == 1)
-                return;
             derivatives_.row(0) = boundary_.start_velocity.transpose();
             derivatives_.row(num_segments_ * 3 + 0) = boundary_.end_velocity.transpose();
             derivatives_.row(1) = boundary_.start_acceleration.transpose();
@@ -3752,17 +3747,8 @@ namespace SplineTrajectory
         void resizeWorkspace()
         {
             adjoint_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
-            // A single segment is fully specified by its boundary states.
-            if (num_segments_ == 1)
-            {
-                derivatives_.resize(0, DIM);
-                factors_.clear();
-            }
-            else
-            {
-                derivatives_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
-                factors_.resize(num_segments_ - 1);
-            }
+            derivatives_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
+            factors_.resize(num_segments_ - 1);
             time_powers_.resize(num_segments_);
         }
 
@@ -3810,41 +3796,38 @@ namespace SplineTrajectory
             previous(2, 1) = 60.0 * left.h2_inv;
             previous(2, 2) = 4.0 * left.h_inv;
 
-            for (int coordinate = 0; coordinate < DIM; ++coordinate)
+            const RowVector delta_left = spatial_points_.row(knot) - spatial_points_.row(knot - 1);
+            const RowVector delta_right = spatial_points_.row(knot + 1) - spatial_points_.row(knot);
+            RowVector rhs0 = 50400.0 * left.h6_inv * delta_left + 50400.0 * right.h6_inv * delta_right;
+            RowVector rhs1 = -10080.0 * left.h5_inv * delta_left + 10080.0 * right.h5_inv * delta_right;
+            RowVector rhs2 = 840.0 * left.h4_inv * delta_left + 840.0 * right.h4_inv * delta_right;
+            if (knot == 1)
             {
-                const double delta_left = spatial_points_(knot, coordinate) - spatial_points_(knot - 1, coordinate);
-                const double delta_right = spatial_points_(knot + 1, coordinate) - spatial_points_(knot, coordinate);
-                double rhs0 = 50400.0 * left.h6_inv * delta_left + 50400.0 * right.h6_inv * delta_right;
-                double rhs1 = -10080.0 * left.h5_inv * delta_left + 10080.0 * right.h5_inv * delta_right;
-                double rhs2 = 840.0 * left.h4_inv * delta_left + 840.0 * right.h4_inv * delta_right;
-                if (knot == 1)
-                {
-                    rhs0 -= previous(0, 0) * derivatives_(0, coordinate)
-                        + previous(0, 1) * derivatives_(1, coordinate)
-                        + previous(0, 2) * derivatives_(2, coordinate);
-                    rhs1 -= previous(1, 0) * derivatives_(0, coordinate)
-                        + previous(1, 1) * derivatives_(1, coordinate)
-                        + previous(1, 2) * derivatives_(2, coordinate);
-                    rhs2 -= previous(2, 0) * derivatives_(0, coordinate)
-                        + previous(2, 1) * derivatives_(1, coordinate)
-                        + previous(2, 2) * derivatives_(2, coordinate);
-                }
-                if (knot + 1 == num_segments_)
-                {
-                    rhs0 -= 24480.0 * right.h5_inv * derivatives_(num_segments_ * 3, coordinate)
-                        - 4680.0 * right.h4_inv * derivatives_(num_segments_ * 3 + 1, coordinate)
-                        + 360.0 * right.h3_inv * derivatives_(num_segments_ * 3 + 2, coordinate);
-                    rhs1 -= 4680.0 * right.h4_inv * derivatives_(num_segments_ * 3, coordinate)
-                        - 840.0 * right.h3_inv * derivatives_(num_segments_ * 3 + 1, coordinate)
-                        + 60.0 * right.h2_inv * derivatives_(num_segments_ * 3 + 2, coordinate);
-                    rhs2 -= 360.0 * right.h3_inv * derivatives_(num_segments_ * 3, coordinate)
-                        - 60.0 * right.h2_inv * derivatives_(num_segments_ * 3 + 1, coordinate)
-                        + 4.0 * right.h_inv * derivatives_(num_segments_ * 3 + 2, coordinate);
-                }
-                derivatives_(knot * 3, coordinate) = rhs0;
-                derivatives_(knot * 3 + 1, coordinate) = rhs1;
-                derivatives_(knot * 3 + 2, coordinate) = rhs2;
+                rhs0 -= previous(0, 0) * derivatives_.row(0)
+                    + previous(0, 1) * derivatives_.row(1)
+                    + previous(0, 2) * derivatives_.row(2);
+                rhs1 -= previous(1, 0) * derivatives_.row(0)
+                    + previous(1, 1) * derivatives_.row(1)
+                    + previous(1, 2) * derivatives_.row(2);
+                rhs2 -= previous(2, 0) * derivatives_.row(0)
+                    + previous(2, 1) * derivatives_.row(1)
+                    + previous(2, 2) * derivatives_.row(2);
             }
+            if (knot + 1 == num_segments_)
+            {
+                rhs0 -= 24480.0 * right.h5_inv * derivatives_.row(num_segments_ * 3)
+                    - 4680.0 * right.h4_inv * derivatives_.row(num_segments_ * 3 + 1)
+                    + 360.0 * right.h3_inv * derivatives_.row(num_segments_ * 3 + 2);
+                rhs1 -= 4680.0 * right.h4_inv * derivatives_.row(num_segments_ * 3)
+                    - 840.0 * right.h3_inv * derivatives_.row(num_segments_ * 3 + 1)
+                    + 60.0 * right.h2_inv * derivatives_.row(num_segments_ * 3 + 2);
+                rhs2 -= 360.0 * right.h3_inv * derivatives_.row(num_segments_ * 3)
+                    - 60.0 * right.h2_inv * derivatives_.row(num_segments_ * 3 + 1)
+                    + 4.0 * right.h_inv * derivatives_.row(num_segments_ * 3 + 2);
+            }
+            derivatives_.row(knot * 3) = rhs0;
+            derivatives_.row(knot * 3 + 1) = rhs1;
+            derivatives_.row(knot * 3 + 2) = rhs2;
         }
 
         /** @brief Factor and solve the block system in linear time.
@@ -3888,19 +3871,12 @@ namespace SplineTrajectory
                 const int right_row = left_row + kDerivativesPerKnot;
                 const RowVector position = spatial_points_.row(i);
 
-                // Single-segment curves have no free knot derivatives or primal workspace.
-                const RowVector velocity = num_segments_ == 1 ? RowVector(boundary_.start_velocity.transpose()) :
-                    RowVector(derivatives_.row(left_row));
-                const RowVector acceleration = num_segments_ == 1 ? RowVector(boundary_.start_acceleration.transpose()) :
-                    RowVector(derivatives_.row(left_row + 1));
-                const RowVector jerk = num_segments_ == 1 ? RowVector(boundary_.start_jerk.transpose()) :
-                    RowVector(derivatives_.row(left_row + 2));
-                const RowVector end_velocity = num_segments_ == 1 ? RowVector(boundary_.end_velocity.transpose()) :
-                    RowVector(derivatives_.row(right_row));
-                const RowVector end_acceleration = num_segments_ == 1 ? RowVector(boundary_.end_acceleration.transpose()) :
-                    RowVector(derivatives_.row(right_row + 1));
-                const RowVector end_jerk = num_segments_ == 1 ? RowVector(boundary_.end_jerk.transpose()) :
-                    RowVector(derivatives_.row(right_row + 2));
+                const RowVector velocity = derivatives_.row(left_row);
+                const RowVector acceleration = derivatives_.row(left_row + 1);
+                const RowVector jerk = derivatives_.row(left_row + 2);
+                const RowVector end_velocity = derivatives_.row(right_row);
+                const RowVector end_acceleration = derivatives_.row(right_row + 1);
+                const RowVector end_jerk = derivatives_.row(right_row + 2);
                 const RowVector quadratic = 0.5 * acceleration;
                 const RowVector cubic = (1.0 / 6.0) * jerk;
                 const double duration2 = tp.h * tp.h;
@@ -3952,19 +3928,13 @@ namespace SplineTrajectory
                 const int left_row = i * kDerivativesPerKnot;
                 const int right_row = left_row + kDerivativesPerKnot;
 
-                // Borrow contiguous derivative rows; a fully clamped segment reads its boundary inputs.
-                const Eigen::Map<const RowVector> left_velocity(num_segments_ == 1 ? boundary_.start_velocity.data() :
-                    derivatives_.row(left_row).data());
-                const Eigen::Map<const RowVector> left_acceleration(num_segments_ == 1 ? boundary_.start_acceleration.data() :
-                    derivatives_.row(left_row + 1).data());
-                const Eigen::Map<const RowVector> left_jerk(num_segments_ == 1 ? boundary_.start_jerk.data() :
-                    derivatives_.row(left_row + 2).data());
-                const Eigen::Map<const RowVector> right_velocity(num_segments_ == 1 ? boundary_.end_velocity.data() :
-                    derivatives_.row(right_row).data());
-                const Eigen::Map<const RowVector> right_acceleration(num_segments_ == 1 ? boundary_.end_acceleration.data() :
-                    derivatives_.row(right_row + 1).data());
-                const Eigen::Map<const RowVector> right_jerk(num_segments_ == 1 ? boundary_.end_jerk.data() :
-                    derivatives_.row(right_row + 2).data());
+                // Borrow the same contiguous endpoint rows for every segment count.
+                const auto left_velocity = derivatives_.row(left_row);
+                const auto left_acceleration = derivatives_.row(left_row + 1);
+                const auto left_jerk = derivatives_.row(left_row + 2);
+                const auto right_velocity = derivatives_.row(right_row);
+                const auto right_acceleration = derivatives_.row(right_row + 1);
+                const auto right_jerk = derivatives_.row(right_row + 2);
 
                 // Apply the same Hermite map across coordinates, sharing the time multipliers.
                 const RowVector g4 = coefficient_partials.row(coefficient_row + 4);

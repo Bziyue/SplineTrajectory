@@ -284,16 +284,16 @@ struct HullCost
     SplineTrajectory::ConvexHullWorkspace<3> workspace;
     Matrix control_gradient;
     explicit HullCost(const Spline::Polynomial &polynomial)
-        : workspace(SplineTrajectory::toBezier(polynomial).value())
+        : workspace(SplineTrajectory::toBezier(polynomial))
     { control_gradient.resize(workspace.controls().rows(), 3); }
 
     template<class Curve>
     SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Curve> &state,
                       SplineTrajectory::CoefficientGradient<Curve> &gradient)
     {
-        if (const auto status = workspace.update(state.polynomial); !status) return {std::numeric_limits<double>::infinity(), status};
+        workspace.update(state.polynomial);
         control_gradient = 0.01 * workspace.controls();
-        if (const auto status = workspace.backwardAdd(control_gradient, gradient.coefficients, gradient.durations); !status) return {std::numeric_limits<double>::infinity(), status};
+        workspace.backwardAdd(control_gradient, gradient.coefficients, gradient.durations);
         return {0.005 * workspace.controls().squaredNorm(), SplineTrajectory::Status::success()};
     }
 };

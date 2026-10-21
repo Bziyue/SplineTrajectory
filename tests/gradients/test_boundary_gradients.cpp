@@ -34,11 +34,11 @@ void testCubicGradients() {
 
     auto spline = SplineType::create(times, points, 0.0, bc).value();
 
-    auto gdC = spline.energyCoefficientPartials().value();
-    auto gdT = spline.energyDurationPartials().value();
+    auto gdC = spline.energyCoefficientPartials();
+    auto gdT = spline.energyDurationPartials();
 
-    auto grads = spline.backward(gdC, gdT).value();
-    auto bc_grads = spline.energyBoundaryGradient().value();
+    auto grads = spline.backward(gdC, gdT);
+    auto bc_grads = spline.energyBoundaryGradient();
 
     double eps = 1e-6;
 
@@ -48,12 +48,12 @@ void testCubicGradients() {
         // J(x + eps)
         target_val_ref = original + eps;
         if (const auto status = spline.update(times, points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        double cost_p = spline.energy().value();
+        double cost_p = spline.energy();
 
         // J(x - eps)
         target_val_ref = original - eps;
         if (const auto status = spline.update(times, points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        double cost_m = spline.energy().value();
+        double cost_m = spline.energy();
 
         // Central Difference
         double num_grad = (cost_p - cost_m) / (2.0 * eps);
@@ -109,8 +109,8 @@ void testCubicGradients() {
 
     // Start Boundary (t=0)
     // Vel (n=1) -> Acc (m=2): Grad_Vel / Acc = -2
-    auto start_acc = traj.evaluate(0.0, Deriv::Acc).value();
-    auto start_jerk = traj.evaluate(0.0, Deriv::Jerk).value();
+    auto start_acc = traj.evaluate(0.0, Deriv::Acc);
+    auto start_jerk = traj.evaluate(0.0, Deriv::Jerk);
 
     std::cout << "\n[Start Boundary t=0]" << std::endl;
     std::cout << "Grad_V / Acc:  " << (grads.start.v.array() / start_acc.array()).transpose()
@@ -120,8 +120,8 @@ void testCubicGradients() {
 
     // End Boundary (t=T)
     double T = spline.endTime();
-    auto end_acc = traj.evaluate(T, Deriv::Acc).value();
-    auto end_jerk = traj.evaluate(T, Deriv::Jerk).value();
+    auto end_acc = traj.evaluate(T, Deriv::Acc);
+    auto end_jerk = traj.evaluate(T, Deriv::Jerk);
 
     std::cout << "\n[End Boundary t=T]" << std::endl;
     std::cout << "Grad_V / Acc:  " << (grads.end.v.array() / end_acc.array()).transpose()
@@ -150,11 +150,11 @@ void testQuinticGradients() {
 
     auto spline = SplineType::create(times, points, 0.0, bc).value();
 
-    auto gdC = spline.energyCoefficientPartials().value();
-    auto gdT = spline.energyDurationPartials().value();
+    auto gdC = spline.energyCoefficientPartials();
+    auto gdT = spline.energyDurationPartials();
 
-    auto grads = spline.backward(gdC, gdT).value();
-    auto bc_grads = spline.energyBoundaryGradient().value();
+    auto grads = spline.backward(gdC, gdT);
+    auto bc_grads = spline.energyBoundaryGradient();
 
     double eps = 1e-6;
 
@@ -164,12 +164,12 @@ void testQuinticGradients() {
         // J(x + eps)
         target_val_ref = original + eps;
         if (const auto status = spline.update(times, points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        double cost_p = spline.energy().value();
+        double cost_p = spline.energy();
 
         // J(x - eps)
         target_val_ref = original - eps;
         if (const auto status = spline.update(times, points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        double cost_m = spline.energy().value();
+        double cost_m = spline.energy();
 
         // Central Difference
         double num_grad = (cost_p - cost_m) / (2.0 * eps);
@@ -230,9 +230,9 @@ void testQuinticGradients() {
     // Acc (n=2) -> Jerk (m=3): Grad_Acc / Jerk = -2
     // Vel (n=1) -> Snap (m=4): Grad_Vel / Snap = 2
     // Pos (n=0) -> Crackle (m=5): Grad_Pos / Crackle = -2
-    auto start_jerk = traj.evaluate(0.0, Deriv::Jerk).value();
-    auto start_snap = traj.evaluate(0.0, Deriv::Snap).value();
-    auto start_crackle = traj.evaluate(0.0, 5).value();  // 5th derivative
+    auto start_jerk = traj.evaluate(0.0, Deriv::Jerk);
+    auto start_snap = traj.evaluate(0.0, Deriv::Snap);
+    auto start_crackle = traj.evaluate(0.0, 5);  // 5th derivative
 
     std::cout << "\n[Start Boundary t=0]" << std::endl;
     std::cout << "Grad_A / Jerk:    " << (grads.start.a.array() / start_jerk.array()).transpose()
@@ -244,9 +244,9 @@ void testQuinticGradients() {
 
     // End Boundary (t=T)
     double T = spline.endTime();
-    auto end_jerk = traj.evaluate(T, Deriv::Jerk).value();
-    auto end_snap = traj.evaluate(T, Deriv::Snap).value();
-    auto end_crackle = traj.evaluate(T, 5).value();
+    auto end_jerk = traj.evaluate(T, Deriv::Jerk);
+    auto end_snap = traj.evaluate(T, Deriv::Snap);
+    auto end_crackle = traj.evaluate(T, 5);
 
     std::cout << "\n[End Boundary t=T]" << std::endl;
     std::cout << "Grad_A / Jerk:    " << (grads.end.a.array() / end_jerk.array()).transpose()
@@ -280,11 +280,11 @@ void testSepticGradients() {
 
     auto spline = SplineType::create(times, points, 0.0, bc).value();
 
-    auto gdC = spline.energyCoefficientPartials().value();
-    auto gdT = spline.energyDurationPartials().value();
+    auto gdC = spline.energyCoefficientPartials();
+    auto gdT = spline.energyDurationPartials();
 
-    auto grads = spline.backward(gdC, gdT).value();
-    auto bc_grads = spline.energyBoundaryGradient().value();
+    auto grads = spline.backward(gdC, gdT);
+    auto bc_grads = spline.energyBoundaryGradient();
 
     double eps = 1e-6;
 
@@ -292,11 +292,11 @@ void testSepticGradients() {
         double original = target_val_ref;
         target_val_ref = original + eps;
         if (const auto status = spline.update(times, points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        double cost_p = spline.energy().value();
+        double cost_p = spline.energy();
 
         target_val_ref = original - eps;
         if (const auto status = spline.update(times, points, 0.0, bc); !status) { throw std::runtime_error(status.message); }
-        double cost_m = spline.energy().value();
+        double cost_m = spline.energy();
 
         double num_grad = (cost_p - cost_m) / (2.0 * eps);
 
@@ -351,10 +351,10 @@ void testSepticGradients() {
     // Acc (n=2) -> Crackle (m=5): Grad_Acc / Crackle = 2
     // Vel (n=1) -> Pop (m=6): Grad_Vel / Pop = -2
     // Pos (n=0) -> Flick (m=7): Grad_Pos / Flick = 2
-    auto start_snap = traj.evaluate(0.0, Deriv::Snap).value();
-    auto start_crackle = traj.evaluate(0.0, 5).value();   // 5th derivative
-    auto start_pop = traj.evaluate(0.0, 6).value();      // 6th derivative
-    auto start_flick = traj.evaluate(0.0, 7).value();     // 7th derivative
+    auto start_snap = traj.evaluate(0.0, Deriv::Snap);
+    auto start_crackle = traj.evaluate(0.0, 5);   // 5th derivative
+    auto start_pop = traj.evaluate(0.0, 6);      // 6th derivative
+    auto start_flick = traj.evaluate(0.0, 7);     // 7th derivative
 
     std::cout << "\n[Start Boundary t=0]" << std::endl;
     std::cout << "Grad_J / Snap:     " << (grads.start.j.array() / start_snap.array()).transpose()
@@ -368,10 +368,10 @@ void testSepticGradients() {
 
     // End Boundary (t=T)
     double T = spline.endTime();
-    auto end_snap = traj.evaluate(T, Deriv::Snap).value();
-    auto end_crackle = traj.evaluate(T, 5).value();
-    auto end_pop = traj.evaluate(T, 6).value();
-    auto end_flick = traj.evaluate(T, 7).value();
+    auto end_snap = traj.evaluate(T, Deriv::Snap);
+    auto end_crackle = traj.evaluate(T, 5);
+    auto end_pop = traj.evaluate(T, 6);
+    auto end_flick = traj.evaluate(T, 7);
 
     std::cout << "\n[End Boundary t=T]" << std::endl;
     std::cout << "Grad_J / Snap:     " << (grads.end.j.array() / end_snap.array()).transpose()

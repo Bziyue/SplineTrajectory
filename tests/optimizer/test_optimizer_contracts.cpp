@@ -66,7 +66,7 @@ struct ParameterCost
                       SplineTrajectory::ParameterGradient<Spline> &gradient) const
     {
         for (int i = 0; i < state.waypoints.rows(); ++i)
-            if (const auto status = gradient.addWaypoint(i, 0.04 * state.waypoints.row(i).transpose()); !status) { throw std::runtime_error(status.message); }
+            gradient.addWaypoint(i, 0.04 * state.waypoints.row(i).transpose());
         gradient.start.v += 0.02 * state.boundary.start_velocity;
         return {0.02 * state.waypoints.squaredNorm() + 0.01 * state.boundary.start_velocity.squaredNorm(), SplineTrajectory::Status::success()};
     }

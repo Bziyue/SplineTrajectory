@@ -214,7 +214,7 @@ void runEvaluationTests()
 
     // SepticSpline random evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_pos_random = septicSpline.polynomial().evaluate(random_times, Deriv::Pos).value();
+    auto ss_pos_random = septicSpline.polynomial().evaluate(random_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_pos_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -230,7 +230,7 @@ void runEvaluationTests()
 
     // SepticSpline random evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_vel_random = septicSpline.polynomial().evaluate(random_times, Deriv::Vel).value();
+    auto ss_vel_random = septicSpline.polynomial().evaluate(random_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_vel_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -246,7 +246,7 @@ void runEvaluationTests()
 
     // SepticSpline random evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_acc_random = septicSpline.polynomial().evaluate(random_times, Deriv::Acc).value();
+    auto ss_acc_random = septicSpline.polynomial().evaluate(random_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_random_acc_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -280,7 +280,7 @@ void runEvaluationTests()
 
     // SepticSpline normal batch evaluation - Position
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_pos_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Pos).value();
+    auto ss_pos_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Pos);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_pos_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -296,7 +296,7 @@ void runEvaluationTests()
 
     // SepticSpline batch evaluation - Velocity
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_vel_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Vel).value();
+    auto ss_vel_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Vel);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_vel_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -312,7 +312,7 @@ void runEvaluationTests()
 
     // SepticSpline batch evaluation - Acceleration
     t0 = std::chrono::high_resolution_clock::now();
-    auto ss_acc_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Acc).value();
+    auto ss_acc_batch_normal = septicSpline.polynomial().evaluate(uniform_times, Deriv::Acc);
     t1 = std::chrono::high_resolution_clock::now();
     double ss_batch_acc_normal_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -348,9 +348,9 @@ void runEvaluationTests()
         ms_acc_consistency[i] = minSnapTraj.getAcc(consistency_times[i]);
     }
 
-    auto ss_pos_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Pos).value();
-    auto ss_vel_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Vel).value();
-    auto ss_acc_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Acc).value();
+    auto ss_pos_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Pos);
+    auto ss_vel_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Vel);
+    auto ss_acc_consistency = septicSpline.polynomial().evaluate(consistency_times, Deriv::Acc);
 
     double pos_max_error = calculateMaxError(ms_pos_consistency, ss_pos_consistency);
     double vel_max_error = calculateMaxError(ms_vel_consistency, ss_vel_consistency);
@@ -363,7 +363,7 @@ void runEvaluationTests()
 
     // energy consistency
     double ms_energy = snapOpt.getObjective();
-    double ss_energy = septicSpline.energy().value();
+    double ss_energy = septicSpline.energy();
     bool energy_consistent = std::abs(ms_energy - ss_energy) < 1e-6;
 
     // Check if results are consistent (within reasonable tolerance)

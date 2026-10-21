@@ -11,46 +11,45 @@ and segment durations. The included MINVO data covers polynomial degrees 0–7.
 
 auto position = SplineTrajectory::toBezier(spline.polynomial(), 0, 2);
 auto velocity = SplineTrajectory::toMINVO(spline.polynomial(), 1, 1);
-if (!position) return position.status();
-if (!velocity) return velocity.status();
-// Access position.value() / velocity.value() only after success.
+// Factories return owning workspaces directly; use position.controls(), velocity.controls().
 ```
 
 The arguments after the polynomial are derivative order and binary subdivision depth.
 Depth `d` creates `2^d` pieces per original segment. Controls are stored piece by piece;
 `pieceInfo(i).source_segment` maps a subdivided piece back to its source corridor.
-For a selectable basis or explicit memory budget, use
-`ConvexHullWorkspace<3>::fromPPoly(polynomial, HullOptions{basis, derivative, depth}, budget_bytes)`.
-Factories return `StatusOr`; configuration/update/Into/Add return `Status`.
+For a selectable basis, use
+`ConvexHullWorkspace<3>::fromPPoly(polynomial, HullOptions{basis, derivative, depth})`.
+Factories return workspaces directly; configuration, update and Into/Add methods return `void`.
+Update requires a configured workspace; adjoints require updated controls. These call-order
+preconditions are asserted in debug builds. The memory-budget argument and byte-accounting API are removed.
 The options match `configure()`; the positional basis/order/depth factory signature is replaced.
 
 ```cpp
 SplineTrajectory::ConvexHullWorkspace<3> hull;
-if (auto status = hull.configure(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 0, 2}); !status)
-    return status;
+hull.configure(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 0, 2});
 // Repeat with the same topology:
-if (auto status = hull.update(spline.polynomial()); !status) return status;
-if (auto status = hull.backwardAdd(control_partials, coefficient_partials, duration_partials); !status)
-    return status;
+hull.update(spline.polynomial());
+hull.backwardAdd(control_partials, coefficient_partials, duration_partials);
 ```
 
 `configure()` prepares storage and shared conversion data. `update()` and `backwardAdd()` reuse
 that storage. The immutable conversion kernel can be shared; each concurrent evaluation needs
-its own mutable workspace. The workspace retains the source values needed by its adjoint.
+its own mutable workspace. The workspace caches each segment's normalized derivative for its adjoint, without copying
+the full source coefficient matrix. Forward conversion accumulates adjacent controls in a small register block for every dimension.
 Fixed piece indices and normalized intervals are prepared by `configure()`; `update()` refreshes
 controls and physical times. Numeric results are usable only after a successful update.
 
 The adjoint has three output forms:
 
-- `backward(control_partials)` allocates and returns `StatusOr<BackwardResult>`.
+- `backward(control_partials)` allocates and returns `BackwardResult`.
 - `backwardInto(control_partials, coefficient_partials, duration_partials)` overwrites pre-sized outputs.
 - `backwardAdd(control_partials, coefficient_partials, duration_partials)` adds to pre-sized outputs.
 
 `Into` and `Add` never resize or allocate. Callers provide finite input partials and matching
-pre-sized outputs; shapes and input values are not checked. Invalid workspace state leaves
-both outputs unchanged. Callers guarantee representable conversion and adjoint arithmetic;
-controls and accumulated gradients are not scanned for overflow. Configuration retains index
-capacity and memory-budget checks. Input and output buffers must not alias each other or
+pre-sized outputs and an updated workspace; shapes and input values are not checked. Callers guarantee representable conversion and adjoint arithmetic;
+controls and accumulated gradients are not scanned for overflow. Configuration assumes supported
+counts and sizes fitting available memory and int indices; subdivision depth must be in [0, 16]
+(asserted in debug builds). Allocation failures propagate normally. Input and output buffers must not alias each other or
 workspace storage. The former resizing three-argument `backward()` is replaced by
 `backwardInto()`; size its outputs before calling, or use the allocating result overload.
 

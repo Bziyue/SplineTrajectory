@@ -15,12 +15,12 @@ int main()
     for (int i = 0; i <= 10; ++i)
     {
         const double time = trajectory.duration() * i / 10.0;
-        const auto state = sampler.evaluateDerivatives(time).value();
+        const auto state = sampler.evaluateDerivatives(time);
         std::cout << "t=" << time << " p=" << state[0].transpose()
                   << " v=" << state[1].transpose() << " a=" << state[2].transpose() << '\n';
     }
-    const auto gradient = spline.energyGradient().value();
-    std::cout << "energy=" << spline.energy().value()
+    const auto gradient = spline.energyGradient();
+    std::cout << "energy=" << spline.energy()
               << " duration gradient=" << gradient.durations.transpose() << '\n';
     return 0;
 }

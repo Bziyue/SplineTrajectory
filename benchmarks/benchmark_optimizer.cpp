@@ -112,6 +112,7 @@ public:
 #else
         if (const auto status = spline.update(times, points, 0.0, problem.boundary); !status) { throw std::runtime_error(status.message); }
 #endif
+        spline_gradients.resetTopology(n); energy_gradients.resetTopology(n);
         coeff_grad.resize(n * count, 3); time_grad.resize(n); physical_time_grad.resize(n);
         inner.resize(3, n - 1); point_grad.resize(3, n - 1);
     }
@@ -119,7 +120,7 @@ public:
     Eigen::VectorXd initialGuess() const
     {
         Eigen::VectorXd x(pieces + 3*(pieces-1));
-        for (int i=0;i<pieces;++i) x(i)=SplineTrajectory::QuadInvTimeMap{}.toTau(times[i]).value();
+        for (int i=0;i<pieces;++i) x(i)=SplineTrajectory::QuadInvTimeMap{}.toTau(times[i]);
         for (int i=1;i<pieces;++i) x.segment<3>(pieces+3*(i-1))=points.row(i).transpose();
         return x;
     }
@@ -131,7 +132,7 @@ public:
         return optimizer.evaluate(x, gradient, objective).cost;
 #else
         SplineTrajectory::QuadInvTimeMap time_map;
-        for (int i = 0; i < pieces; ++i) times[i] = time_map.toTime(x(i)).value();
+        for (int i = 0; i < pieces; ++i) times[i] = time_map.toTime(x(i));
         for (int i = 1; i < pieces; ++i)
         {
             points.row(i) = x.segment<3>(pieces + 3*(i-1)).transpose();
@@ -179,13 +180,13 @@ public:
         coeff_grad += energy_weight * gc; time_grad += energy_weight * gt; cost += energy_weight * energy;
         minco.propogateGrad(coeff_grad, time_grad, point_grad, physical_time_grad);
 #else
-        if (const auto status = spline.backward(coeff_grad, time_grad, spline_gradients); !status) { throw std::runtime_error(status.message); }
-        if (const auto status = spline.energyGradient(energy_gradients); !status) { throw std::runtime_error(status.message); } cost += energy_weight*spline.energy().value();
+        spline.backward(coeff_grad, time_grad, spline_gradients);
+        spline.energyGradient(energy_gradients); cost += energy_weight*spline.energy();
         physical_time_grad = spline_gradients.durations + energy_weight*energy_gradients.durations;
         point_grad = (spline_gradients.inner_points + energy_weight*energy_gradients.inner_points).transpose();
 #endif
         gradient.resize(x.size());
-        for(int i=0;i<pieces;++i) gradient(i)=time_map.backward(x(i),times[i],physical_time_grad(i)).value();
+        for(int i=0;i<pieces;++i) gradient(i)=time_map.backward(x(i),times[i],physical_time_grad(i));
         for(int i=1;i<pieces;++i) gradient.segment<3>(pieces+3*(i-1))=point_grad.col(i-1);
         return cost;
 #endif

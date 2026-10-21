@@ -160,7 +160,7 @@ $$
 
 `backward()` 返回：
 
-- `coefficients`：和输入 `PPolyND::getCoefficients()` 同形状；
+- `coefficients`：和输入 `PPolyND::coefficients()` 同形状；
 - `durations`：每个原始段一个 $\partial L/\partial T_s$。
 
 对于 MINCO spline，可直接继续传播：
@@ -169,8 +169,7 @@ $$
 auto hull = SplineTrajectory::toBezier(spline.polynomial(), 1, 2);
 auto partial = hull.backward(control_gradients);
 
-QuinticSplineND<3>::Gradients parameters;
-spline.backward(partial.coefficients, partial.durations, parameters);
+auto parameters = spline.backward(partial.coefficients, partial.durations);
 ```
 
 这样控制点代价最终会传播到内部航点、边界状态和时间变量。
@@ -242,7 +241,7 @@ struct ProblemObjective {
 };
 
 // HullCost's callable interface:
-double operator()(const SplineTrajectory::ParameterView<Spline>& state,
+SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline>& state,
                   SplineTrajectory::CoefficientGradient<Spline>& gradient);
 ```
 

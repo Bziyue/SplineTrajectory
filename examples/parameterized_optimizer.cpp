@@ -118,14 +118,14 @@ struct CoefficientCost
     SplineTrajectory::ConvexHullWorkspace<3> hull;
     Spline::CoefficientMatrix control_gradient;
     explicit CoefficientCost(const Spline::Polynomial &polynomial)
-        : hull(SplineTrajectory::toBezier(polynomial, 0, 1).value())
+        : hull(SplineTrajectory::toBezier(polynomial, 0, 1))
     { control_gradient.resize(hull.controls().rows(), 3); }
     SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline> &state,
                       SplineTrajectory::CoefficientGradient<Spline> &gradient)
     {
-        if (const auto status = hull.update(state.polynomial); !status) return {std::numeric_limits<double>::infinity(), status};
+        hull.update(state.polynomial);
         control_gradient = 0.002 * hull.controls();
-        if (const auto status = hull.backwardAdd(control_gradient, gradient.coefficients, gradient.durations); !status) return {std::numeric_limits<double>::infinity(), status};
+        hull.backwardAdd(control_gradient, gradient.coefficients, gradient.durations);
         return {0.001 * hull.controls().squaredNorm(), SplineTrajectory::Status::success()};
     }
 };

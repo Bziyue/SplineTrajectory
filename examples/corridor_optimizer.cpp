@@ -32,12 +32,12 @@ int main(int argc, char **argv) try
     double violation = 0.0;
     for (int piece = 0; piece < optimizer.polynomial().numSegments(); ++piece)
     {
-        const auto segment = optimizer.polynomial().at(piece).value();
+        const auto segment = optimizer.polynomial().at(piece);
         for (int i = 0; i <= 200; ++i)
         {
             example::Vector scratch = example::Vector::Zero();
             violation = std::max(violation, std::sqrt(objective.integral.boxes[piece].penalty(
-                segment.evaluateLocal(segment.duration() * i / 200.0).value(), 1.0, scratch)));
+                segment.evaluateLocal(segment.duration() * i / 200.0), 1.0, scratch)));
         }
     }
     std::cout << "sampled corridor violation: " << violation << '\n';

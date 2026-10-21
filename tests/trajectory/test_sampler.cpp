@@ -18,14 +18,14 @@ void checkSampler()
         for (int axis = 0; axis < DIM; ++axis)
             coefficients(i, axis) = std::sin(0.17 * (i + 1) * (axis + 1));
     const std::vector<double> knots{2.0, 2.3, 3.2, 3.25, 4.0};
-    const auto poly = Poly::create(knots, coefficients, count).value();
+    const auto poly = Poly::create(knots, coefficients, count);
     auto sample = poly.template makeSampler<5>();
     auto verify = [&](double t) {
         int piece = 0;
         while (piece < 3 && t >= knots[piece + 1]) ++piece;
         const double dt = t - knots[piece];
-        const auto values = sample.evaluateDerivatives(t).value();
-        const auto combined = poly.template evaluateDerivatives<5>(t).value();
+        const auto values = sample.evaluateDerivatives(t);
+        const auto combined = poly.template evaluateDerivatives<5>(t);
         for (int d = 0; d <= 5; ++d)
         {
             typename Poly::Vector expected = Poly::Vector::Zero();
@@ -38,7 +38,7 @@ void checkSampler()
             const double tolerance = 2e-10 * std::max(1.0, expected.norm());
             require((values[d] - expected).norm() <= tolerance, "sequential derivative mismatch");
             require((combined[d] - expected).norm() <= tolerance, "combined derivative mismatch");
-            require((poly.evaluate(t, d).value() - expected).norm() <= tolerance, "random derivative mismatch");
+            require((poly.evaluate(t, d) - expected).norm() <= tolerance, "random derivative mismatch");
         }
     };
     Eigen::internal::set_is_malloc_allowed(false);
@@ -47,20 +47,18 @@ void checkSampler()
     Eigen::internal::set_is_malloc_allowed(true);
 
     // Each worker performs its first query on a never-sampled immutable source.
-    const auto cold = Poly::create(knots, coefficients, count).value();
+    const auto cold = Poly::create(knots, coefficients, count);
     auto worker = [&cold]() {
         auto cursor = cold.template makeSampler<3>();
         double sum = 0;
-        for (int k = 0; k < 1000; ++k) sum += cursor.evaluateDerivatives(2.0 + 0.001 * k).value()[1].sum();
+        for (int k = 0; k < 1000; ++k) sum += cursor.evaluateDerivatives(2.0 + 0.001 * k)[1].sum();
         return sum;
     };
     auto first = std::async(std::launch::async, worker);
     auto second = std::async(std::launch::async, worker);
     require(first.get() == second.get(), "first concurrent reads differ");
 
-    const Poly invalid_poly;
-    auto invalid_sampler = invalid_poly.template makeSampler<3>();
-    require(!invalid_sampler.evaluateDerivatives(0), "invalid source must return failure");
+
 }
 
 int main()

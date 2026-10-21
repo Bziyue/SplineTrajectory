@@ -17,8 +17,6 @@ template<class Spline> void checkSpline()
     Spline curve;
     require(!curve.isValid() && curve.polynomial().numSegments() == 0 && curve.duration() == 0.0,
             "Default spline must be safely inspectable");
-    require(!curve.energy(), "Invalid energy query must not report zero cost");
-    require(!(curve.energyGradient()), "Expected failure status");
     const Matrix points = Matrix::Random(3, Spline::kDimension);
     const std::vector<double> durations{1.2, 1.7};
     if (const auto status = curve.update(durations, points, -2.0); !status) { throw std::runtime_error(status.message); }
@@ -29,12 +27,12 @@ template<class Spline> void checkSpline()
     auto snapshot = curve.copyPolynomial();
     const auto *storage = curve.polynomial().coefficients().data();
     typename Spline::Gradients gradient;
-    if (const auto status = gradient.resetTopology(2); !status) { throw std::runtime_error(status.message); }
+    gradient.resetTopology(2);
     Matrix gc = Matrix::Ones(2 * Spline::kCoefficientCount, Spline::kDimension);
     Eigen::VectorXd gt = Eigen::VectorXd::Zero(2);
     Eigen::internal::set_is_malloc_allowed(false);
     if (const auto status = curve.update(durations, points, -2.0); !status) { throw std::runtime_error(status.message); }
-    if (const auto status = curve.backward(gc, gt, gradient); !status) { throw std::runtime_error(status.message); }
+    curve.backward(gc, gt, gradient);
     Eigen::internal::set_is_malloc_allowed(true);
     require(storage == curve.polynomial().coefficients().data(), "Fixed topology must reuse coefficient storage");
     require(!curve.update(durations, points, 1e308), "Unrepresentable cumulative knots must fail");
@@ -42,16 +40,15 @@ template<class Spline> void checkSpline()
             "Failed updates must not expose previous coefficients");
     require(snapshot.isValid() && snapshot.coefficients().isApprox(moved.polynomial().coefficients()),
             "Owning snapshots survive source updates");
-    require(!(curve.backward(gc, gt, gradient)), "Expected failure status");
     if (const auto status = curve.update(durations, points, 0.0); !status) { throw std::runtime_error(status.message); }
     require(curve.isValid(), "Failure must not poison future updates");
 }
 void checkPolynomial()
 {
     using Poly = PPolyND<2, 6>;
-    auto poly = Poly::constant({2.0, 3.0, 5.0}, Eigen::Vector2d(3.0, 4.0)).value();
+    auto poly = Poly::constant({2.0, 3.0, 5.0}, Eigen::Vector2d(3.0, 4.0));
     require(poly.degree() == 0 && Poly::kMaxCoefficients == 6, "Capacity differs from degree");
-    require(poly.evaluate(2.0, 8).value().isZero() && poly.derivative(8).value().evaluate(2.0).value().isZero(),
+    require(poly.evaluate(2.0, 8).isZero() && poly.derivative(8).value().evaluate(2.0).isZero(),
             "Derivatives above degree must be zero");
     require(!(poly.generateTimeSequence(1e20, 2e20, 1e-10)), "Expected failure status");
     require(poly.generateTimeSequence(3.0, 3.0, 0.1).value() == std::vector<double>{3.0}, "Zero-length interval");
@@ -60,9 +57,9 @@ void checkPolynomial()
             "Generated samples include endpoints");
     Poly::CoefficientMatrix output(times.size(), 2);
     Eigen::internal::set_is_malloc_allowed(false);
-    if (const auto status = poly.evaluateInto(times, output); !status) { throw std::runtime_error(status.message); }
+    poly.evaluateInto(times, output);
     auto sampler = poly.makeSampler<3>();
-    require(sampler.evaluate(3.0).value().isApprox(Eigen::Vector2d(3.0, 4.0)), "No warm-up sampling");
+    require(sampler.evaluate(3.0).isApprox(Eigen::Vector2d(3.0, 4.0)), "No warm-up sampling");
     Eigen::internal::set_is_malloc_allowed(true);
     auto begin = poly.begin(), end = poly.end();
     require(std::distance(begin, end) == 2 && (1 + begin)->index() == 1 && begin[1].index() == 1,
@@ -72,16 +69,16 @@ void checkPolynomial()
     std::advance(begin, 2); begin -= 1; begin += -1;
     require(begin == poly.begin(), "Iterator compound arithmetic");
     auto moved = std::move(poly);
-    require(!poly.isValid() && !poly.evaluate(0.0) && moved.isValid(), "Polynomial move state");
+    require(!poly.isValid() && moved.isValid(), "Polynomial move state");
 }
 template<int DIM> void checkHullDimension()
 {
     using Poly = PPolyND<DIM, 8>;
     typename Poly::CoefficientMatrix coefficients = Poly::CoefficientMatrix::Random(16, DIM);
-    auto polynomial = Poly::create({0.2, 1.4, 2.7}, coefficients, 8).value();
-    auto hull = toMINVO(polynomial, 2, 2).value();
+    auto polynomial = Poly::create({0.2, 1.4, 2.7}, coefficients, 8);
+    auto hull = toMINVO(polynomial, 2, 2);
     typename Poly::CoefficientMatrix weights = Poly::CoefficientMatrix::Random(hull.controls().rows(), DIM);
-    auto partials = hull.backward(weights).value();
+    auto partials = hull.backward(weights);
     const double primal = (hull.controls().array() * weights.array()).sum();
     const double dual = (coefficients.array() * partials.coefficients.array()).sum();
     require(std::abs(primal - dual) < 1e-11 * std::max(1.0, std::abs(primal)),
@@ -91,16 +88,15 @@ void checkHull()
 {
     using Poly1 = PPolyND<1, 4>;
     using Poly3 = PPolyND<3, 4>;
-    auto p1 = Poly1::zero({0.0, 1.0}, 4).value();
-    auto p3 = Poly3::zero({0.0, 1.0}, 4).value();
+    auto p1 = Poly1::zero({0.0, 1.0}, 4);
+    auto p3 = Poly3::zero({0.0, 1.0}, 4);
     ConvexHullWorkspace<1> h1;
     ConvexHullWorkspace<3> h3;
     require(!h1.isConfigured() && !h1.isValid(), "Default hull state");
-    require(!(h1.backward(Poly1::CoefficientMatrix{})), "Expected failure status");
-    if (const auto status = h1.configure(p1); !status) { throw std::runtime_error(status.message); } if (const auto status = h3.configure(p3); !status) { throw std::runtime_error(status.message); }
+    h1.configure(p1); h3.configure(p3);
     require(h1.isConfigured() && !h1.isValid() && h1.matches(p1, {}), "Configured hull state");
     require(h1.kernel() == h3.kernel(), "Identical kernels must be shared across spatial dimensions");
-    if (const auto status = h1.update(p1); !status) { throw std::runtime_error(status.message); }
+    h1.update(p1);
     require(h1.isValid(), "Updated hull state");
     auto moved = std::move(h1);
     require(!h1.isValid() && moved.isValid(), "Moved-from hull validity");

@@ -51,13 +51,13 @@ int main(int argc, char **argv)
         Matrix gc = Matrix::Constant(n * (BENCH_DEGREE + 1), BENCH_DIMENSION, 0.01);
         Eigen::VectorXd gt = Eigen::VectorXd::Constant(n, 0.02);
         Spline::Gradients gradient;
-        if (const auto status = gradient.resetTopology(n); !status) { throw std::runtime_error(status.message); }
+        gradient.resetTopology(n);
         auto backward = [&] {
 #ifdef BENCH_OLD
             spline.propagateGrad(gc, gt, gradient);
             kernel_checksum += gradient.times.sum();
 #else
-            if (const auto status = spline.backward(gc, gt, gradient); !status) { throw std::runtime_error(status.message); }
+            spline.backward(gc, gt, gradient);
             kernel_checksum += gradient.durations.sum();
 #endif
         };
@@ -67,7 +67,7 @@ int main(int argc, char **argv)
 #ifdef BENCH_OLD
         const double energy = spline.getEnergy(), checksum = gradient.times.sum() + gradient.inner_points.sum();
 #else
-        const double energy = spline.energy().value(), checksum = gradient.durations.sum() + gradient.inner_points.sum();
+        const double energy = spline.energy(), checksum = gradient.durations.sum() + gradient.inner_points.sum();
 #endif
         std::cout << BENCH_DEGREE << ',' << BENCH_DIMENSION << ',' << n << ',' << first_us << ','
                   << build << ',' << reverse << ',' << energy << ',' << checksum << ',' << sizeof(Spline) << '\n';

@@ -38,19 +38,28 @@ partials and overwrites physical gradients; `ConvexHullWorkspace::backwardAdd()`
 partials. Distinguish those contracts when combining multiple objectives.
 
 Shared `ErrorCode`, `Status` and `StatusOr<T>` live in `SplineTrajectory.hpp`; no planner types
-are required. Replace fallible data constructors with `Type::create(...)`, check the result,
-then move its value. Repeated `update()` calls return `Status`. Numerical failure invalidates
-the polynomial; state rejection of output-reference operations leaves output unchanged.
-A failure during numeric accumulation may leave partial output: discard it entirely.
+are required. Spline `create()`/`update()` retain explicit failures for unrepresentable knots or
+failed factorization. Polynomial transforms retain explicit state/numerical failures.
+Polynomial queries and hull update/adjoints require initialized/configured objects instead
+of returning call-order errors. Discard partial output after any reported numerical failure.
 
-Value-returning evaluation, energy, gradient, polynomial transform, time-sequence and hull
-factory APIs now return `StatusOr<T>`. Output-reference variants return `Status`; no extra
-result allocation is required. Low-level inputs are caller-validated: finite values, legal orders
-and indices, matching shapes, and valid time/topology constraints are preconditions. No input
-validation or checked/unchecked pair is provided. Callers guarantee representable arithmetic;
-ordinary computed results are not scanned for overflow. Invalid state, unrepresentable time
-knots, factorization failure and resource limits still return errors. Derivatives above degree remain zero; outside times extrapolate.
-`at()` retains `StatusOr<Segment>` but, like `operator[]`, requires an already-valid index.
+Operations that cannot reject caller-validated input now return values directly:
+
+- `PPolyND::create/zero/constant` return `PPolyND`; `update` returns `void`.
+- Polynomial, segment and sampler queries return values; query `Into` overloads return `void`.
+  `at()` returns `Segment`. These views require an initialized source that stays alive and unchanged.
+- Spline energy/gradient/adjoint value overloads return plain values. Reference overloads
+  return `void` and require pre-sized outputs; call `resetTopology(N)` once for full gradients.
+- `energyGradientAdd(output, weight)` adds directly to existing physical gradients.
+- `resetTopology()` and `ParameterGradient::addWaypoint()` return `void`. Unused gradient
+  `allFinite()` helpers and the scalar-coordinate `SplineGradients::addWaypoint()` overload are removed.
+- Built-in time/spatial maps return plain values or `void`; genuinely fallible custom maps
+  may still return `StatusOr`/`Status` on the same statically bound protocol.
+
+Low-level inputs are caller-validated: finite values, legal orders and indices, matching shapes,
+valid topology and representable arithmetic. No checked/unchecked API pair is provided.
+Spline energy/adjoints require successful construction. Derivatives above degree remain zero;
+outside query times extrapolate. Ordinary computed results are not scanned for overflow.
 
 ## Optimizer replacement
 
@@ -106,18 +115,21 @@ objective. Preparation is the allocation boundary. After the solver returns, che
 | --- | --- |
 | `ConvexHullRepresentation<DIM>` alias pair | `ConvexHullWorkspace<DIM>` |
 | Nested `Kernel` / `ConvexHullKernel<DIM>` | Dimension-independent `ConvexHullKernel` |
-| `resetTopology(poly, basis, derivative, depth, budget)` | `configure(poly, HullOptions{basis, derivative, depth}, budget)` |
-| Shape-only topology configuration | `configure(segments, coefficients, HullOptions, budget)` |
+| `resetTopology(poly, basis, derivative, depth, budget)` | `configure(poly, HullOptions{basis, derivative, depth})`; no byte budget |
+| Shape-only topology configuration | `configure(segments, coefficients, HullOptions)` |
 | Manual field-by-field topology matching | `matches(poly, options)` |
 | One initialization flag | `isConfigured()` and `isValid()` |
 | Const `backward()/backwardAdd()` | Non-const operations using exclusive workspace scratch |
-| `fromPPoly(poly, basis, derivative, depth)` | `fromPPoly(poly, HullOptions{basis, derivative, depth}, budget)`; budget is optional |
+| `fromPPoly(poly, basis, derivative, depth)` | `fromPPoly(poly, HullOptions{basis, derivative, depth})`; returns a workspace directly |
 | Resizing `backward(partials, coefficients, durations)` | Pre-size both outputs, then call `backwardInto(partials, coefficients, durations)` |
 
 `toBezier()` and `toMINVO()` retain their convenience arguments. The one-argument `backward()`
 still returns owned gradients; `backwardInto()` overwrites pre-sized outputs and `backwardAdd()`
 accumulates into them. Both require caller-validated matching shapes and never resize. `update()`
-requires a valid source matching the configured topology and a representable numerical range.
+returns `void` and requires a configured workspace and a valid source matching its topology.
+Adjoints require an updated workspace: `backward()` returns `BackwardResult` directly, while
+`backwardInto()`, `backwardAdd()` and `backwardPieceTimesAdd()` return `void`. These state
+preconditions are asserted in debug builds. Callers guarantee representable arithmetic.
 Controls and accumulated gradients are not checked for overflow. The immutable kernel cache is consulted only during configuration; it is shared
 across spatial dimensions. A complete tuple key avoids packed-field collisions.
 
@@ -136,3 +148,6 @@ callbacks together with their callers; no compatibility dispatch is retained.
 codes. `initialGuess()` remains a normal owning return: successful `prepare()` is a precondition,
 checked by assertion. Failed trial evaluation does not invalidate that prepared initial vector.
 Allocation failure and unexpected user exceptions are not translated into expected-failure statuses.
+
+Hull configuration is `void`, and factories and `powerToControlMatrix()` return values directly.
+The caller owns allocation-size limits; subdivision depth is constrained to [0, 16].
