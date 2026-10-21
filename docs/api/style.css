@@ -99,7 +99,11 @@ tr:target, tr.search-hit { background: #fff8e8; }
 .data-flow > a { color: var(--ink); }
 .data-flow > b { font-weight: 400; color: #91a3bd; }
 .data-flow small { display: block; color: var(--muted); font-size: 10px; margin-top: 3px; }
-.equation { text-align: center; font: 16px/1.8 var(--mono); padding: 16px; background: var(--soft); border: 1px solid var(--line); border-radius: 5px; margin: 18px 0; overflow-x: auto; }
+.math { display: inline-block; position: relative; font-size: 1.12em; line-height: 1; white-space: nowrap; }
+.math > .sr-only { top: 0; left: 0; }
+.math > svg { display: inline-block; max-width: none; overflow: visible; }
+.equation { text-align: center; font-size: 20px; line-height: 1.6; padding: 22px 16px; background: var(--soft); border: 1px solid var(--line); border-radius: 5px; margin: 18px 0; overflow-x: auto; }
+.equation .math { font-size: 1em; }
 .example { margin: 22px 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .example summary { padding: 11px 15px; cursor: pointer; font-size: 12px; font-weight: 600; background: #fafbfd; }
 .example summary::marker { color: #6f87ac; }
@@ -123,8 +127,8 @@ tr:target, tr.search-hit { background: #fff8e8; }
 .cubic { color: #ad6c20; }
 .quintic { color: #345fb5; }
 .septic { color: #24866e; }
-.visual svg { display: block; width: 100%; height: auto; margin-top: 17px; overflow: visible; }
-.visual svg text { font: 11px var(--mono); fill: #68798f; }
+.visual > svg { display: block; width: 100%; height: auto; margin-top: 17px; overflow: visible; }
+.visual > svg text { font: 11px var(--mono); fill: #68798f; }
 #curve-plot { cursor: crosshair; touch-action: pan-y; }
 .scrubber { display: flex; align-items: center; gap: 12px; margin: 8px 0 13px; font-size: 12px; }
 .scrubber input { flex: 1; min-width: 50px; accent-color: var(--accent); }
@@ -183,7 +187,7 @@ footer { border-top: 1px solid var(--line); padding: 25px 0 34px; display: flex;
   td:last-child { min-width: 190px; }
   .signature, .example-code { font-size: 11px; padding: 14px; }
   .example-tag { display: none; }
-  .equation { font-size: 13px; white-space: nowrap; }
+  .equation { font-size: 18px; }
   .visual { padding: 12px; }
   .curve-legend { width: 100%; margin: 6px 0 0; gap: 13px; font-size: 10px; }
   .scrubber { flex-wrap: wrap; gap: 7px; }
