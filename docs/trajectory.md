@@ -15,11 +15,12 @@ Spline::CoefficientMatrix points(3, 3);
 points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
 SplineTrajectory::BoundaryConditions<3> boundary;
 boundary.start_velocity = Eigen::Vector3d(0.2, 0, 0);
-Spline spline({1.2, 1.5}, points, 0.0, boundary);
-if (!spline.isValid()) throw std::runtime_error("Invalid spline");
+auto created = Spline::create({1.2, 1.5}, points, 0.0, boundary);
+if (!created) return created.status();
+auto spline = std::move(created).value();
 ```
 
-`update(durations, points, start_time, boundary)` reuses storage for unchanged topology.
+`update(durations, points, start_time, boundary)` returns `Status` and reuses storage for unchanged topology.
 A spline owns its `PPolyND` polynomial. `polynomial()` borrows it; `copyPolynomial()` returns an
 independent snapshot. An update or move invalidates borrowed segments, iterators and samplers.
 
@@ -30,9 +31,12 @@ const auto &poly = spline.polynomial();
 auto position = poly.evaluate(0.5);
 auto state = poly.evaluateDerivatives<2>(0.5);
 auto sampler = poly.makeSampler<3>();
-for (double time : poly.generateTimeSequence(0.01)) {
+auto times = poly.generateTimeSequence(0.01);
+if (!position || !state || !times) { /* Handle the corresponding status. */ }
+for (double time : times.value()) {
     const auto pvaj = sampler.evaluateDerivatives(time);
-    // Consume pvaj[0], pvaj[1], pvaj[2], pvaj[3].
+    if (!pvaj) return pvaj.status();
+    // Consume pvaj.value()[0] through pvaj.value()[3].
 }
 ```
 
@@ -41,16 +45,18 @@ segment's coefficients; backward jumps are supported. Each traversal uses its ow
 No source warm-up is required. `evaluateInto(times, output, derivative)` writes batch samples
 into a caller-owned matrix, one row per time.
 
-Polynomial queries use the trajectory time axis. `poly.at(i).evaluateLocal(t)` uses time from
+Polynomial queries use the trajectory time axis. `poly.at(i).value().evaluateLocal(t)` uses time from
 that segment's start. Interior knots select the right segment; the final knot selects the last.
 Queries outside the trajectory extrapolate the endpoint polynomial.
 
 ## Energy and adjoints
 
 ```cpp
-const double energy = spline.energy();
+auto energy = spline.energy();
 auto gradient = spline.energyGradient();
-// gradient.inner_points, gradient.durations and gradient.boundary
+if (!energy) return energy.status();
+if (!gradient) return gradient.status();
+// energy.value(); gradient.value().inner_points/durations/start/end
 ```
 
 For a custom coefficient-space cost, accumulate coefficient and independent duration partials,
@@ -67,6 +73,13 @@ the interpolation constraints. Use the latter for derivatives of the interpolati
 The compile-time parameter is coefficient capacity, not polynomial degree. Spline traits are
 `kDimension`, `kDegree`, `kCoefficientCount` and `kMinDerivativeOrder`.
 
-Invalid numerical queries return NaNs; derivatives above the polynomial degree are zero.
-Negative derivative orders throw `std::invalid_argument`, and `at()` checks indices.
-Invalid construction clears the polynomial. See [numerical notes](numerical_notes.md) for conditioning.
+Fallible value queries return `StatusOr<T>`; check the result before accessing `.value()`.
+Output-reference operations return `Status`. Callers guarantee finite input values, legal orders
+and indices, positive durations or strictly increasing knots, and matching input/output shapes.
+The low-level APIs do not validate these preconditions. `at()` retains `StatusOr<Segment>` but
+requires the same valid index as `operator[]`. Derivatives above degree remain zero.
+Invalid object state and numerical failure computed from valid inputs still return explicit errors.
+Failed spline construction clears the polynomial. Direct polynomial `update()` copies trusted data.
+Creation uses `create(...)`; borrowed getters retain their documented lifetime/preconditions.
+Batch state failures leave output untouched; a numerical failure can leave a written prefix.
+Discard the entire output on failure; `Status::index` identifies the failed query. See [numerical notes](numerical_notes.md) for conditioning.

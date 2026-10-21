@@ -253,7 +253,7 @@ void runQuinticTest()
     for (int i = 0; i < fit_runs; ++i)
     {
         auto t1 = std::chrono::high_resolution_clock::now();
-        QuinticSpline quintic_spline(time_segments_vec, waypoints, start_time, bc);
+        auto quintic_spline = QuinticSpline::create(time_segments_vec, waypoints, start_time, bc).value();
         auto t2 = std::chrono::high_resolution_clock::now();
         total_quintic_fit_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     }
@@ -315,7 +315,7 @@ void runQuinticTest()
               << total_minco_fit_time_us / fit_runs << " μs (" << num_minco_instances << "个实例)" << std::endl;
 
     // 创建用于查询的样条实例
-    QuinticSpline quintic_spline(time_segments_vec, waypoints, start_time, bc);
+    auto quintic_spline = QuinticSpline::create(time_segments_vec, waypoints, start_time, bc).value();
 
     // 创建用于查询的MINCO实例
     std::vector<minco::MINCO_S3NU> minco_solvers_for_query(num_minco_instances);
@@ -361,14 +361,14 @@ void runQuinticTest()
     }
 
     double dt = 0.01;
-    auto time_seq = quintic_spline.polynomial().generateTimeSequence(dt);
+    auto time_seq = quintic_spline.polynomial().generateTimeSequence(dt).value();
     int num_queries = time_seq.size();
 
     std::cout << "\n2.2) 单点查询性能 (" << num_queries << "个点):" << std::endl;
 
     // 五次样条单点查询性能
     std::function<void(int)> quintic_func = [&](int i)
-    { quintic_spline.polynomial().evaluate(time_seq[i], Deriv::Pos); };
+    { quintic_spline.polynomial().evaluate(time_seq[i], Deriv::Pos).value(); };
     auto perf_quintic = measurePerformance(quintic_func, num_queries);
     printPerformance(perf_quintic, "  - QuinticSpline" + std::to_string(DIM) + "D");
 
@@ -394,11 +394,11 @@ void runQuinticTest()
 
     // 五次样条批量查询
     auto t1 = std::chrono::high_resolution_clock::now();
-    auto quintic_results_position = quintic_spline.polynomial().evaluate(time_seq, Deriv::Pos);
-    auto quintic_results_velocity = quintic_spline.polynomial().evaluate(time_seq, Deriv::Vel);
-    auto quintic_results_acceleration = quintic_spline.polynomial().evaluate(time_seq, Deriv::Acc);
-    auto quintic_results_jerk = quintic_spline.polynomial().evaluate(time_seq, Deriv::Jerk);
-    auto quintic_results_snap = quintic_spline.polynomial().evaluate(time_seq, Deriv::Snap);
+    auto quintic_results_position = quintic_spline.polynomial().evaluate(time_seq, Deriv::Pos).value();
+    auto quintic_results_velocity = quintic_spline.polynomial().evaluate(time_seq, Deriv::Vel).value();
+    auto quintic_results_acceleration = quintic_spline.polynomial().evaluate(time_seq, Deriv::Acc).value();
+    auto quintic_results_jerk = quintic_spline.polynomial().evaluate(time_seq, Deriv::Jerk).value();
+    auto quintic_results_snap = quintic_spline.polynomial().evaluate(time_seq, Deriv::Snap).value();
     auto t2 = std::chrono::high_resolution_clock::now();
     double quintic_batch_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     std::cout << "  - QuinticSpline" << DIM << "D 普通批量查询: " << quintic_batch_us << " μs" << std::endl;
@@ -460,8 +460,8 @@ void runQuinticTest()
 
     std::cout << "\n2.5) PPolyND::derivative() 方法验证 (一阶导数):" << std::endl;
     auto ppoly = quintic_spline.polynomial();
-    auto d_ppoly = ppoly.derivative(1);
-    auto vel_from_d_ppoly = d_ppoly.evaluate(time_seq, 0);
+    auto d_ppoly = ppoly.derivative(1).value();
+    auto vel_from_d_ppoly = d_ppoly.evaluate(time_seq, 0).value();
     double max_diff = 0.0, avg_diff = 0.0;
     if (!time_seq.empty())
     {
@@ -491,7 +491,7 @@ void runQuinticTest()
         std::cout << "\n2.8) 轨迹能量计算一致性测试 (DIM=3):" << std::endl;
 
         // 获取 QuinticSplineND 的能量
-        double quintic_energy = quintic_spline.energy();
+        double quintic_energy = quintic_spline.energy().value();
 
         // 获取 MINCO_S3NU 的能量 (只有第一个实例，因为DIM=3时只有一个MINCO实例)
         double minco_energy = 0.0;

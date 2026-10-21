@@ -56,14 +56,14 @@ int main()
         {
             if(shuffled) {std::mt19937 random(20260912);std::shuffle(times.begin(),times.end(),random);}
             const char *order=shuffled?"random":"sequential";
-            const Poly polynomial(knots,coefficients,8);
-            measure("separate",n,order,times,[&](double t){return State{polynomial.evaluate(t,0),polynomial.evaluate(t,1),polynomial.evaluate(t,2),polynomial.evaluate(t,3)};});
+            const auto polynomial = Poly::create(knots,coefficients,8).value();
+            measure("separate",n,order,times,[&](double t){return State{polynomial.evaluate(t,0).value(),polynomial.evaluate(t,1).value(),polynomial.evaluate(t,2).value(),polynomial.evaluate(t,3).value()};});
 #ifdef BENCH_COMBINED
-            measure("combined",n,order,times,[&](double t){return polynomial.evaluateDerivatives<3>(t);});
+            measure("combined",n,order,times,[&](double t){return polynomial.evaluateDerivatives<3>(t).value();});
 #endif
 #ifdef BENCH_SAMPLER
             auto sampler=polynomial.makeSampler<3>();
-            measure("sampler",n,order,times,[&](double t){return sampler.evaluateDerivatives(t);});
+            measure("sampler",n,order,times,[&](double t){return sampler.evaluateDerivatives(t).value();});
 #endif
             measure("fused",n,order,times,[&](double t){return fused(polynomial,t);});
         }

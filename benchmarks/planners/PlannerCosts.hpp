@@ -80,35 +80,40 @@ struct SpatialMap {
     const ProblemData *problem;
     const Geometry *geometry;
     int dimension(int) const { return problem->usesPolytopeMap()?8:3; }
-    Vector toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x,int index) const {
-        if(!problem->usesPolytopeMap()) return x;
+    SplineTrajectory::StatusOr<Vector> toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x,int index) const {
+        if(!problem->usesPolytopeMap()) return Vector(x);
         Eigen::Matrix<double,8,1> unit=x;
         unit.normalize();
-        return geometry->vertices[index-1].rightCols<7>()*unit.head<7>().cwiseProduct(unit.head<7>())+
-               geometry->vertices[index-1].col(0);
+        const Vector result = geometry->vertices[index-1].rightCols<7>()*unit.head<7>().cwiseProduct(unit.head<7>())+
+                              geometry->vertices[index-1].col(0);
+        if (!result.allFinite())
+            return SplineTrajectory::Status{SplineTrajectory::ErrorCode::NumericalFailure, "Nonfinite spatial map output", index};
+        return result;
     }
-    Eigen::VectorXd toUnconstrained(const Vector &point,int index) const {
-        if(!problem->usesPolytopeMap()) return point;
+    SplineTrajectory::StatusOr<Eigen::VectorXd> toUnconstrained(const Vector &point,int index) const {
+        if(!problem->usesPolytopeMap()) return Eigen::VectorXd(point);
         const auto &box=problem->map_boxes[index-1];
         const Vector ratio=((point-box.head<3>()).array()/box.tail<3>().array()+1)*0.5;
         Eigen::VectorXd result(8);
         for(int corner=0;corner<8;++corner) {
             double weight=1;
             for(int axis=0;axis<3;++axis) weight*=(corner&(1<<axis))?ratio(axis):1-ratio(axis);
-            if(weight<0) throw std::invalid_argument("Initial waypoint outside map box");
+            if(weight<0) return SplineTrajectory::Status{SplineTrajectory::ErrorCode::InvalidInput, "Initial waypoint outside map box", index};
             result(corner?corner-1:7)=std::sqrt(weight);
         }
-        return result;
+        return Eigen::VectorXd(result);
     }
-    void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x,const Vector &gradient,
+    SplineTrajectory::Status backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x,const Vector &gradient,
                       int index,Eigen::Ref<Eigen::VectorXd> output) const {
-        if(!problem->usesPolytopeMap()) { output=gradient; return; }
+        if(!problem->usesPolytopeMap()) { output=gradient; return SplineTrajectory::Status::success(); }
         const double inverse=1/x.norm();
         const Eigen::Matrix<double,8,1> unit=x*inverse;
         output.head<7>()=(geometry->vertices[index-1].rightCols<7>().transpose()*gradient).array()*unit.head<7>().array()*2;
         output(7)=0;
         const double projection=unit.dot(output);
         output=(output-unit*projection)*inverse;
+
+        return SplineTrajectory::Status::success();
     }
 };
 struct Parameterization { TimeMap time; SpatialMap space; SplineTrajectory::NoAuxiliaryMap auxiliary; };
@@ -116,23 +121,23 @@ using Optimizer = SplineTrajectory::SplineOptimizer<Spline,Parameterization>;
 
 struct DurationCost {
     double weight;
-    double operator()(const std::vector<double> &times,Eigen::Ref<Eigen::VectorXd> gradient) const {
+    SplineTrajectory::EvaluationResult operator()(const std::vector<double> &times,Eigen::Ref<Eigen::VectorXd> gradient) const {
         gradient.array()+=weight;
-        return weight*std::accumulate(times.begin(),times.end(),0.0);
+        return {weight*std::accumulate(times.begin(),times.end(),0.0), SplineTrajectory::Status::success()};
     }
 };
 /** @brief Add the native cubic penalty on mapped coordinate norms without overwriting physical gradients. */
 struct DomainCost {
     const ProblemData &problem;
-    double operator()(const SplineTrajectory::DecisionView &view,Eigen::Ref<Eigen::VectorXd> gradient) const {
-        if(!problem.usesPolytopeMap()) return 0;
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::DecisionView &view,Eigen::Ref<Eigen::VectorXd> gradient) const {
+        if(!problem.usesPolytopeMap()) return {0, SplineTrajectory::Status::success()};
         double cost=0;
         for(const auto &variable:view.layout.waypoints) {
             const auto q=view.variables.segment(variable.offset,variable.dof);
             const double violation=q.squaredNorm()-1;
             if(violation>0) { cost+=violation*violation*violation; gradient.segment(variable.offset,variable.dof)+=6*violation*violation*q; }
         }
-        return cost;
+        return {cost, SplineTrajectory::Status::success()};
     }
 };
 
@@ -146,7 +151,7 @@ struct IntegralCost {
     IntegralCost(const ProblemData &p,const Geometry &g):problem(p),geometry(g) {
         flatmap.reset(p.physical[0],p.physical[1],p.physical[2],p.physical[3],p.physical[4],p.physical[5]);
     }
-    double operator()(const SplineTrajectory::IntegralPointInfo &info,const State &state,Partials &out) {
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &info,const State &state,Partials &out) {
         double cost=0;
         Vector gp=Vector::Zero(),gv=Vector::Zero(),ga=Vector::Zero(),gj=Vector::Zero();
 #if PLANNER_GCOPTER
@@ -221,7 +226,7 @@ struct IntegralCost {
                              out.p,out.v,out.a,out.j,yaw_gradient,yaw_rate_gradient);
 #endif
         } else { out.p=gp; out.v=gv; out.a=ga; out.j=gj; }
-        return cost;
+        return {cost, SplineTrajectory::Status::success()};
     }
 };
 

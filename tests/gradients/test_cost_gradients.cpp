@@ -169,12 +169,12 @@ void test_cubic()
     bc.start_velocity.setConstant(0.15);
     bc.end_velocity.setConstant(-0.05);
 
-    Spline sp(T, P, 0.0, bc);
+    auto sp = Spline::create(T, P, 0.0, bc).value();
 
     Mat dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.backward(dLdC, dLdT);
+    auto g = sp.backward(dLdC, dLdT).value();
 
     minco::MINCO_S2NU minco_s2;
     build_minco_s2(T, P, bc, minco_s2);
@@ -189,7 +189,7 @@ void test_cubic()
     auto eval_loss = [&](const std::vector<double> &TT,
                          const Mat &PP,
                          const SplineTrajectory::BoundaryConditions<DIM> &bcc) {
-        Spline tmp(TT, PP, 0.0, bcc);
+        auto tmp = Spline::create(TT, PP, 0.0, bcc).value();
         return loss_from_spline(tmp, alpha_time);
     };
 
@@ -311,12 +311,12 @@ void test_quintic()
     bc.start_acceleration.setConstant(0.05);
     bc.end_acceleration.setConstant(-0.03);
 
-    Spline sp(T, Pvec, 0.0, bc);
+    auto sp = Spline::create(T, Pvec, 0.0, bc).value();
 
     Mat dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.backward(dLdC, dLdT);
+    auto g = sp.backward(dLdC, dLdT).value();
 
     minco::MINCO_S3NU minco_s3;
     build_minco_s3(T, Pvec, bc, minco_s3);
@@ -331,7 +331,7 @@ void test_quintic()
     auto eval_loss = [&](const std::vector<double> &TT,
                          const Mat &PP,
                          const SplineTrajectory::BoundaryConditions<DIM> &bcc) {
-        Spline tmp(TT, PP, 0.0, bcc);
+        auto tmp = Spline::create(TT, PP, 0.0, bcc).value();
         return loss_from_spline(tmp, alpha_time);
     };
 
@@ -472,12 +472,12 @@ void test_septic()
     bc.start_jerk.setConstant(0.015);
     bc.end_jerk.setConstant(-0.01);
 
-    Spline sp(T, Pvec, 0.0, bc);
+    auto sp = Spline::create(T, Pvec, 0.0, bc).value();
 
     typename Spline::CoefficientMatrix dLdC;
     Eigen::VectorXd dLdT;
     make_partials(sp, alpha_time, dLdC, dLdT);
-    auto g = sp.backward(dLdC, dLdT);
+    auto g = sp.backward(dLdC, dLdT).value();
 
     minco::MINCO_S4NU minco_s4;
     build_minco_s4(T, Pvec, bc, minco_s4);
@@ -492,7 +492,7 @@ void test_septic()
     auto eval_loss = [&](const std::vector<double> &TT,
                          const Mat &PP,
                          const SplineTrajectory::BoundaryConditions<DIM> &bcc) {
-        Spline tmp(TT, PP, 0.0, bcc);
+        auto tmp = Spline::create(TT, PP, 0.0, bcc).value();
         return loss_from_spline(tmp, alpha_time);
     };
 

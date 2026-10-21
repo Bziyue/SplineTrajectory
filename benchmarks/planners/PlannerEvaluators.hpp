@@ -1,3 +1,4 @@
+#include <stdexcept>
 #pragma once
 #include "PlannerCosts.hpp"
 #if PLANNER_GCOPTER
@@ -33,7 +34,7 @@ inline Eigen::VectorXd initialGuess(const ProblemData &p,const Geometry &geometr
     int offset=p.segments;
     for(int i=1;i<p.segments;++i) {
         const int dimension=map.dimension(i);
-        x.segment(offset,dimension)=map.toUnconstrained(p.waypoints.row(i).transpose(),i);
+        x.segment(offset,dimension)=map.toUnconstrained(p.waypoints.row(i).transpose(),i).value();
         offset+=dimension;
     }
     return x;
@@ -68,7 +69,7 @@ class DirectEvaluator {
         if constexpr (UseSpline) {
             for(int i=0;i<problem_.segments;++i) spline_times_[i]=times_(i);
             all_points_.middleRows(1,problem_.segments-1)=points_.transpose();
-            kernel_.update(spline_times_,all_points_,0.0,boundary_);
+            if (const auto status = kernel_.update(spline_times_,all_points_,0.0,boundary_); !status) { throw std::runtime_error(status.message); }
         } else kernel_.setParameters(points_,times_);
     }
     const auto &coefficientsView() const {
@@ -85,8 +86,8 @@ public:
         flatmap_.reset(p.physical[0],p.physical[1],p.physical[2],p.physical[3],p.physical[4],p.physical[5]);
         if constexpr(UseSpline) {
             all_points_=p.waypoints; spline_times_=p.durations; boundary_=splineProblem(p).boundary;
-            spline_gradients_.resetTopology(n);
-            kernel_.update(spline_times_,all_points_,0.0,boundary_);
+            if (const auto status = spline_gradients_.resetTopology(n); !status) { throw std::runtime_error(status.message); }
+            if (const auto status = kernel_.update(spline_times_,all_points_,0.0,boundary_); !status) { throw std::runtime_error(status.message); }
         } else {
             Eigen::Matrix<double,3,coefficients/2> head,tail;
             head.col(0)=p.waypoints.row(0).transpose(); tail.col(0)=p.waypoints.row(n).transpose();
@@ -100,8 +101,8 @@ public:
         double energy;
         if constexpr(UseSpline) {
             if(!kernel_.isValid()) { gradient.setZero(); return std::numeric_limits<double>::infinity(); }
-            energy=kernel_.energy();
-            kernel_.energyCoefficientPartials(partial_coefficients_); kernel_.energyDurationPartials(partial_times_);
+            energy=kernel_.energy().value();
+            if (const auto status = kernel_.energyCoefficientPartials(partial_coefficients_); !status) { throw std::runtime_error(status.message); } if (const auto status = kernel_.energyDurationPartials(partial_times_); !status) { throw std::runtime_error(status.message); }
         } else {
             kernel_.getEnergy(energy);
             kernel_.getEnergyPartialGradByCoeffs(partial_coefficients_); kernel_.getEnergyPartialGradByTimes(partial_times_);
@@ -118,7 +119,7 @@ public:
             flatmap_,cost,partial_times_,partial_coefficients_,penalty_log_,PositionPenalty{problem_});
 #endif
         if constexpr(UseSpline) {
-            kernel_.backward(partial_coefficients_,partial_times_,spline_gradients_);
+            if (const auto status = kernel_.backward(partial_coefficients_,partial_times_,spline_gradients_); !status) { throw std::runtime_error(status.message); }
             gradient_points_=spline_gradients_.inner_points.transpose(); gradient_times_=spline_gradients_.durations;
         } else kernel_.propogateGrad(partial_coefficients_,partial_times_,gradient_points_,gradient_times_);
         cost+=problem_.time_weight*times_.sum(); gradient_times_.array()+=problem_.time_weight;
@@ -141,7 +142,7 @@ public:
         else {
             std::vector<double> knots(problem_.segments+1,0.0);
             for(int i=0;i<problem_.segments;++i) knots[i+1]=knots[i]+times_(i);
-            return typename Spline::Polynomial(knots,coefficientsView(),coefficients);
+            return Spline::Polynomial::create(knots,coefficientsView(),coefficients).value();
         }
     }
 };
@@ -160,7 +161,7 @@ public:
         if(!prepared) throw std::runtime_error(prepared.message);
     }
     double evaluate(const Eigen::VectorXd &x,Eigen::VectorXd &gradient) {
-        return optimizer_.costAndGradient(x,gradient,objective_);
+        return optimizer_.evaluate(x,gradient,objective_).cost;
     }
     void accept(const Eigen::VectorXd &x) {
         const auto status=optimizer_.updateAccepted(x);

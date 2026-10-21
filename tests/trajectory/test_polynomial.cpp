@@ -71,7 +71,7 @@ int main() {
 
     target_seg_coeffs = coeffs.block<NUM_COEFFS, DIM>(target_seg_idx * NUM_COEFFS, 0);
 
-    PPoly traj(breakpoints, coeffs, NUM_COEFFS);
+    auto traj = PPoly::create(breakpoints, coeffs, NUM_COEFFS).value();
 
     if (traj.isValid() && traj.numSegments() == NUM_SEGS && traj.coefficientCount() == NUM_COEFFS) {
         std::cout << "Generated Spline: " << NUM_SEGS << " segments, Total Duration: " << traj.duration() << "s" << std::endl;
@@ -120,15 +120,15 @@ int main() {
         Eigen::Vector3d ones(1, 1, 1);
 
         Eigen::Vector3d expected_pos = (0.5 + std::pow(0.5, 5)) * ones;
-        assertVectorEq(seg.evaluateLocal(dt, Deriv::Pos), expected_pos, "Quintic Pos");
+        assertVectorEq(seg.evaluateLocal(dt, Deriv::Pos).value(), expected_pos, "Quintic Pos");
 
         Eigen::Vector3d expected_vel = (1.0 + 5.0 * std::pow(0.5, 4)) * ones;
-        assertVectorEq(seg.evaluateLocal(dt, Deriv::Vel), expected_vel, "Quintic Vel");
+        assertVectorEq(seg.evaluateLocal(dt, Deriv::Vel).value(), expected_vel, "Quintic Vel");
 
         Eigen::Vector3d expected_crackle = 120.0 * ones;
-        assertVectorEq(seg.evaluateLocal(dt, Deriv::Crackle), expected_crackle, "Quintic Crackle (5th deriv)");
+        assertVectorEq(seg.evaluateLocal(dt, Deriv::Crackle).value(), expected_crackle, "Quintic Crackle (5th deriv)");
 
-        assertVectorEq(seg.evaluateLocal(dt, Deriv::Pop), Eigen::Vector3d::Zero(), "Quintic Pop (6th deriv - zero)");
+        assertVectorEq(seg.evaluateLocal(dt, Deriv::Pop).value(), Eigen::Vector3d::Zero(), "Quintic Pop (6th deriv - zero)");
 
         printPass("Quintic Derivative Evaluation (up to 6th order)");
     }
@@ -145,12 +145,11 @@ int main() {
             printFail("Random Access", "Indices wrong");
         }
 
-        try {
-            (void)traj.at(NUM_SEGS);
-            printFail("Exception", "traj.at(36) did not throw");
-        } catch (const std::out_of_range& e) {
-            printPass("Exception Handling (out_of_range)");
-        }
+        const auto segment = traj.at(NUM_SEGS - 1);
+        if (segment && segment.value().index() == last_seg.index())
+            printPass("Segment access");
+        else
+            printFail("Segment access", "at() and operator[] differ");
     }
 
     {
@@ -158,7 +157,7 @@ int main() {
         double seg_start_t = breakpoints[target_seg_idx];
         double global_t = seg_start_t + 0.5;
 
-        Eigen::Vector3d global_val = traj.evaluate(global_t, Deriv::Crackle);
+        Eigen::Vector3d global_val = traj.evaluate(global_t, Deriv::Crackle).value();
 
         assertVectorEq(global_val, Eigen::Vector3d(120, 120, 120), "Global Evaluate Crackle");
 
@@ -169,9 +168,9 @@ int main() {
         auto sampler = traj.makeSampler<3>();
         for (double t = traj.startTime(); t <= traj.endTime(); t += 0.01)
         {
-            const auto values = sampler.evaluateDerivatives(t);
+            const auto values = sampler.evaluateDerivatives(t).value();
             for (int derivative = 0; derivative <= 3; ++derivative)
-                if (!values[derivative].isApprox(traj.evaluate(t, derivative), 1e-12))
+                if (!values[derivative].isApprox(traj.evaluate(t, derivative).value(), 1e-12))
                     throw std::runtime_error("Sequential sampling differs from direct evaluation");
         }
         printPass("Sequential derivative sampling");

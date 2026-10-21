@@ -27,12 +27,12 @@ SplineTrajectory::SplineProblem<Curve> makeProblem()
 
 struct DurationCost
 {
-    double operator()(const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> gradient) const
+    SplineTrajectory::EvaluationResult operator()(const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> gradient) const
     {
         double cost = 0.0;
         for (double duration : times) cost += duration;
         gradient.array() += 1.0;
-        return cost;
+        return {cost, SplineTrajectory::Status::success()};
     }
 };
 
@@ -42,10 +42,12 @@ struct ScalingSpatialMap
     double scale;
     mutable int inverse_calls = 0;
     int dimension(int) const { return 3; }
-    Eigen::Vector3d toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const { return scale * x; }
-    Eigen::Vector3d toUnconstrained(const Eigen::Vector3d &point, int) const { ++inverse_calls; return point / scale; }
-    void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &, const Eigen::Vector3d &gradient,
-                      int, Eigen::Ref<Eigen::VectorXd> output) const { output = scale * gradient; }
+    SplineTrajectory::StatusOr<Eigen::Vector3d> toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const { return Eigen::Vector3d(scale * x); }
+    SplineTrajectory::StatusOr<Eigen::Vector3d> toUnconstrained(const Eigen::Vector3d &point, int) const { ++inverse_calls; return Eigen::Vector3d(point / scale); }
+    SplineTrajectory::Status backwardInto(const Eigen::Ref<const Eigen::VectorXd> &, const Eigen::Vector3d &gradient,
+                      int, Eigen::Ref<Eigen::VectorXd> output) const { output = scale * gradient;
+        return SplineTrajectory::Status::success();
+    }
 };
 
 struct Parameterization
@@ -140,13 +142,13 @@ struct RecordingIntegral
     static constexpr int kDerivativeOrder = 0;
     int begins = 0, calls = 0;
     void beginEvaluation() { ++begins; calls = 0; }
-    double operator()(const SplineTrajectory::IntegralPointInfo &,
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &,
                       const SplineTrajectory::SampleState<3> &state,
                       SplineTrajectory::SampleGradient<3> &gradient)
     {
         ++calls;
         gradient.p += 0.002 * state.p;
-        return 0.001 * state.p.squaredNorm();
+        return {0.001 * state.p.squaredNorm(), SplineTrajectory::Status::success()};
     }
 };
 
@@ -188,7 +190,7 @@ struct PolytopeSpatialMap
         if (index >= 1 && index <= 3) value(index - 1) = 1.0;
         return value;
     }
-    Eigen::Vector3d toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const
+    SplineTrajectory::StatusOr<Eigen::Vector3d> toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const
     {
         const double shift = x.maxCoeff();
         double sum = 0.0;
@@ -199,25 +201,29 @@ struct PolytopeSpatialMap
             sum += weight;
             point += weight * vertex(i);
         }
-        return point / sum;
+        return Eigen::Vector3d(point / sum);
     }
-    Eigen::VectorXd toUnconstrained(const Eigen::Vector3d &point, int index) const
+    SplineTrajectory::StatusOr<Eigen::VectorXd> toUnconstrained(const Eigen::Vector3d &point, int index) const
     {
         Eigen::VectorXd x(dimension(index));
         const double origin_weight = (1.0 - point.sum()) / (x.size() - 3);
         x.setConstant(std::log(origin_weight));
         for (int i = 1; i <= 3; ++i) x(i) = std::log(point(i - 1));
-        return x;
+        return Eigen::VectorXd(x);
     }
-    void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x, const Eigen::Vector3d &gradient,
+    SplineTrajectory::Status backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x, const Eigen::Vector3d &gradient,
                       int index, Eigen::Ref<Eigen::VectorXd> output) const
     {
-        const Eigen::Vector3d point = toPhysical(x, index);
+        const auto mapped = toPhysical(x, index);
+        if (!mapped) return mapped.status();
+        const Eigen::Vector3d &point = mapped.value();
         const double shift = x.maxCoeff();
         double sum = 0.0;
         for (Eigen::Index i = 0; i < x.size(); ++i) sum += std::exp(x(i) - shift);
         for (Eigen::Index i = 0; i < x.size(); ++i)
             output(i) = std::exp(x(i) - shift) / sum * gradient.dot(vertex(i) - point);
+
+        return SplineTrajectory::Status::success();
     }
 };
 
@@ -257,12 +263,14 @@ void testVariableDimensionSpatialMap()
 struct CountingSpline : Spline
 {
     inline static int builds = 0, adjoints = 0;
+    /** @brief Observe the optimizer's ordinary public construction call. */
     template<class... Arguments>
     decltype(auto) update(Arguments &&...arguments)
     {
         ++builds;
         return Spline::update(std::forward<Arguments>(arguments)...);
     }
+    /** @brief Observe the optimizer's ordinary public adjoint call. */
     template<class... Arguments>
     decltype(auto) backward(Arguments &&...arguments)
     {
@@ -276,17 +284,17 @@ struct HullCost
     SplineTrajectory::ConvexHullWorkspace<3> workspace;
     Matrix control_gradient;
     explicit HullCost(const Spline::Polynomial &polynomial)
-        : workspace(SplineTrajectory::toBezier(polynomial))
+        : workspace(SplineTrajectory::toBezier(polynomial).value())
     { control_gradient.resize(workspace.controls().rows(), 3); }
 
     template<class Curve>
-    double operator()(const SplineTrajectory::ParameterView<Curve> &state,
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Curve> &state,
                       SplineTrajectory::CoefficientGradient<Curve> &gradient)
     {
-        workspace.update(state.polynomial);
+        if (const auto status = workspace.update(state.polynomial); !status) return {std::numeric_limits<double>::infinity(), status};
         control_gradient = 0.01 * workspace.controls();
-        workspace.backwardAdd(control_gradient, gradient.coefficients, gradient.durations);
-        return 0.005 * workspace.controls().squaredNorm();
+        if (const auto status = workspace.backwardAdd(control_gradient, gradient.coefficients, gradient.durations); !status) return {std::numeric_limits<double>::infinity(), status};
+        return {0.005 * workspace.controls().squaredNorm(), SplineTrajectory::Status::success()};
     }
 };
 

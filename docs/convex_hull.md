@@ -11,6 +11,9 @@ and segment durations. The included MINVO data covers polynomial degrees 0–7.
 
 auto position = SplineTrajectory::toBezier(spline.polynomial(), 0, 2);
 auto velocity = SplineTrajectory::toMINVO(spline.polynomial(), 1, 1);
+if (!position) return position.status();
+if (!velocity) return velocity.status();
+// Access position.value() / velocity.value() only after success.
 ```
 
 The arguments after the polynomial are derivative order and binary subdivision depth.
@@ -18,14 +21,17 @@ Depth `d` creates `2^d` pieces per original segment. Controls are stored piece b
 `pieceInfo(i).source_segment` maps a subdivided piece back to its source corridor.
 For a selectable basis or explicit memory budget, use
 `ConvexHullWorkspace<3>::fromPPoly(polynomial, HullOptions{basis, derivative, depth}, budget_bytes)`.
+Factories return `StatusOr`; configuration/update/Into/Add return `Status`.
 The options match `configure()`; the positional basis/order/depth factory signature is replaced.
 
 ```cpp
 SplineTrajectory::ConvexHullWorkspace<3> hull;
-hull.configure(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 0, 2});
+if (auto status = hull.configure(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 0, 2}); !status)
+    return status;
 // Repeat with the same topology:
-hull.update(spline.polynomial());
-hull.backwardAdd(control_partials, coefficient_partials, duration_partials);
+if (auto status = hull.update(spline.polynomial()); !status) return status;
+if (auto status = hull.backwardAdd(control_partials, coefficient_partials, duration_partials); !status)
+    return status;
 ```
 
 `configure()` prepares storage and shared conversion data. `update()` and `backwardAdd()` reuse
@@ -36,12 +42,14 @@ controls and physical times. Numeric results are usable only after a successful 
 
 The adjoint has three output forms:
 
-- `backward(control_partials)` allocates and returns coefficient and duration gradients.
+- `backward(control_partials)` allocates and returns `StatusOr<BackwardResult>`.
 - `backwardInto(control_partials, coefficient_partials, duration_partials)` overwrites pre-sized outputs.
 - `backwardAdd(control_partials, coefficient_partials, duration_partials)` adds to pre-sized outputs.
 
-`Into` and `Add` never resize or allocate. They check the workspace and every input/output shape
-before writing; errors leave both outputs unchanged. Input and output buffers must not alias each
+`Into` and `Add` never resize or allocate. Callers provide finite input partials and matching
+pre-sized outputs; shapes and input values are not checked. Invalid workspace state leaves
+both outputs unchanged. Numeric failure during
+accumulation returns `NumericalFailure` and may leave partial output; discard both outputs. Input and output buffers must not alias each
 other or workspace storage. The former resizing three-argument `backward()` is replaced by
 `backwardInto()`; size its outputs before calling, or use the allocating result overload.
 

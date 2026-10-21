@@ -37,11 +37,19 @@ the interpolation constraints. `backward()` receives coefficient and independent
 partials and overwrites physical gradients; `ConvexHullWorkspace::backwardAdd()` accumulates
 partials. Distinguish those contracts when combining multiple objectives.
 
-Negative derivative orders throw `invalid_argument` in scalar, segment, derivative-polynomial
-and batch entry points. Nonfinite numeric queries return NaNs; derivatives above degree are
-zero. Invalid construction clears the polynomial. Invalid energy queries return NaN;
-differentiating an invalid spline throws. `generateTimeSequence()` validates finite inputs,
-positive step, forward interval and representable count. Checked indexing uses `out_of_range`.
+Shared `ErrorCode`, `Status` and `StatusOr<T>` live in `SplineTrajectory.hpp`; no planner types
+are required. Replace fallible data constructors with `Type::create(...)`, check the result,
+then move its value. Repeated `update()` calls return `Status`. Numerical failure invalidates
+the polynomial; state rejection of output-reference operations leaves output unchanged.
+A failure during numeric accumulation may leave partial output: discard it entirely.
+
+Value-returning evaluation, energy, gradient, polynomial transform, time-sequence and hull
+factory APIs now return `StatusOr<T>`. Output-reference variants return `Status`; no extra
+result allocation is required. Low-level inputs are caller-validated: finite values, legal orders
+and indices, matching shapes, and valid time/topology constraints are preconditions. No input
+validation or checked/unchecked pair is provided. Invalid object state and computed numeric
+overflow still return errors. Derivatives above degree remain zero; outside times extrapolate.
+`at()` retains `StatusOr<Segment>` but, like `operator[]`, requires an already-valid index.
 
 ## Optimizer replacement
 
@@ -58,7 +66,7 @@ positive step, forward interval and representable count. Checked indexing uses `
 | `VoidTimeCost/VoidIntegralCost/...` | Omit that member; `NoObjective` for an empty objective |
 | `generateInitialGuess(context)` | `initialGuess()` |
 | `evaluate(context, x, g, spec)` | `evaluate(x, g, objective)` |
-| `evaluatePrepared(...)` | `costAndGradient(...)` |
+| `evaluatePrepared(...)` | `evaluate(...).cost` after checking the returned result |
 | `synchronizeWorkingState(context, x)` | `updateAccepted(x)` |
 | `getWorkingSpline(context)` | `polynomial()`; mutable solver access is removed |
 | Member `checkGradients(...)` | Free `checkGradients(optimizer, x, objective, ...)` |
@@ -107,7 +115,23 @@ objective. Preparation is the allocation boundary. After the solver returns, che
 
 `toBezier()` and `toMINVO()` retain their convenience arguments. The one-argument `backward()`
 still returns owned gradients; `backwardInto()` overwrites pre-sized outputs and `backwardAdd()`
-accumulates into them. Both validate all shapes before writing and never resize. `update()` with
-invalid source/topology invalidates the numerical state and throws. Numeric overflow is also
-rejected. The immutable kernel cache is consulted only during configuration; it is shared
+accumulates into them. Both require caller-validated matching shapes and never resize. `update()`
+requires a valid source matching the configured topology. Computed numeric overflow is
+reported as `NumericalFailure`. The immutable kernel cache is consulted only during configuration; it is shared
 across spatial dimensions. A complete tuple key avoids packed-field collisions.
+
+## Unified failure contracts
+
+`OptimizationError/OptimizationStatus` are replaced by the shared `ErrorCode/Status`.
+Optimizer `evaluate()` keeps `EvaluationResult { cost, status }`; do not wrap it in another
+`StatusOr`. Every cost callback and auxiliary backward callback returns `EvaluationResult`.
+Return `{cost, Status::success()}` on success, or `{infinity, status}` on rejection.
+Value-producing map operations return `StatusOr`, while map operations writing outputs return
+`Status`. Propagation preserves the original code/message/index. Update custom maps and
+callbacks together with their callers; no compatibility dispatch is retained.
+
+`costAndGradient()` and `lastStatus()` are removed. External scalar solver callbacks consume
+`evaluate()` directly and retain its status when needed; the solver still owns its termination
+codes. `initialGuess()` remains a normal owning return: successful `prepare()` is a precondition,
+checked by assertion. Failed trial evaluation does not invalidate that prepared initial vector.
+Allocation failure and unexpected user exceptions are not translated into expected-failure statuses.

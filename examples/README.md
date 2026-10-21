@@ -33,7 +33,7 @@ costs, and `coefficient` for polynomial or convex-hull costs. Each callback adds
 the supplied gradient; SplineOptimizer handles the interpolation and decision-variable chain.
 
 The shared [L-BFGS driver](support/OptimizationExample.hpp) shows the complete solver boundary:
-prepare the optimizer, obtain `initialGuess()`, call `costAndGradient()` from the GCOPTER callback,
+prepare the optimizer, obtain `initialGuess()`, call `evaluate()` and inspect its status in the GCOPTER callback,
 check the solver status and synchronize the returned vector with `updateAccepted()`.
 Cost functions remain in the individual examples; [Penalties.hpp](support/Penalties.hpp) contains
 the shared box and derivative penalties.

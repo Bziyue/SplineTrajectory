@@ -56,7 +56,7 @@ and `coefficient`; only the supplied components participate in evaluation.
 
 - Map decision variables to positive durations, spatial points and optional auxiliary states.
 - Combine energy, time, sampled-state and control-point costs.
-- Supply costs and gradients to L-BFGS or another numerical solver through `costAndGradient()`.
+- Supply costs and gradients to L-BFGS or another numerical solver through `evaluate()` and an explicit scalar callback.
 
 See the quick start below and the [optimizer reference](docs/optimizer.md)
 for custom maps and objective protocols.
@@ -168,9 +168,12 @@ using Spline = SplineTrajectory::QuinticSplineND<3>;
 Spline::CoefficientMatrix points(3, 3);
 points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
 std::vector<double> durations{1.2, 1.5};
-Spline spline(durations, points, 0.0);
-if (!spline.isValid()) throw std::runtime_error("Invalid spline");
-auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // position, velocity, acceleration
+auto created = Spline::create(durations, points, 0.0);
+if (!created) return 1;
+auto spline = std::move(created).value();
+auto sampled = spline.polynomial().evaluateDerivatives<2>(0.5);
+if (!sampled) return 1;
+auto state = std::move(sampled).value(); // position, velocity, acceleration
 ```
 
 ### Create an optimizer
@@ -184,15 +187,17 @@ SplineTrajectory::SplineOptimizer<Spline> optimizer;
 SplineTrajectory::SplineProblem<Spline> problem;
 problem.waypoints = points;
 problem.durations = durations;
-if (!optimizer.prepare(problem)) throw std::runtime_error("Invalid problem");
+if (!optimizer.prepare(problem)) return 1;
 auto x = optimizer.initialGuess();
 Eigen::VectorXd gradient(x.size());
 SplineTrajectory::NoObjective objective; // minimum-jerk energy only
-const double cost = optimizer.costAndGradient(x, gradient, objective);
+const auto result = optimizer.evaluate(x, gradient, objective);
+if (!result) return 1;
+const double cost = result.cost;
 ```
 
 Add named `duration`, `integral` or `coefficient` members to an objective to combine time,
-state and control-point costs. An external solver calls `costAndGradient`; after solving,
+state and control-point costs. An external solver adapts `evaluate()` to its scalar callback and inspects the returned status; after solving,
 call `updateAccepted(x)` before reading the trajectory. See the [GCOPTER L-BFGS examples](examples/README.md).
 
 ## 🧰 Examples and Documentation

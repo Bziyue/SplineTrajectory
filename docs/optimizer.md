@@ -14,6 +14,7 @@ SplineTrajectory::SplineProblem<Spline> problem;
 SplineTrajectory::OptimizerOptions options;
 // Fill problem.durations, problem.waypoints and optional problem.boundary/start_time/mask.
 auto status = optimizer.prepare(problem, options);
+if (!status) return status;
 auto x = optimizer.initialGuess();
 Eigen::VectorXd gradient(x.size());
 // objective is a named, caller-owned object.
@@ -21,9 +22,9 @@ auto result = optimizer.evaluate(x, gradient, objective);
 ```
 
 Check `status` before requesting an initial guess and `result` before using a cost. `result.status`
-contains `OptimizationError`, an optional offending knot index (`-1` when absent), and a static
-message pointer. Status carries no owning string or allocation. `lastStatus()` also exposes the
-last result for callers of `costAndGradient()`.
+contains `ErrorCode`, an optional offending input/segment/sample index (`-1` when absent), and a
+static message pointer. `Status` carries no owning string or allocation. `EvaluationResult`
+already carries cost and status; it is not wrapped in `StatusOr`. There is no last-status side channel.
 
 The optimizer privately owns its problem snapshot, prepared quadrature/layout, spline and
 buffers. Default maps are owned by value. There are no internal pointers into movable members.
@@ -35,9 +36,9 @@ independent value. Evaluation and `updateAccepted()` replace the polynomial. `pr
 `layout()` and `activeMask()` borrow prepared data until preparation, movement or destruction.
 Evaluation never changes that layout. A call does not retain any reference to the objective.
 `energy()` returns the unweighted minimum-derivative energy of the current trajectory without
-copying solver storage; an invalid trajectory returns NaN.
+copying solver storage, as `StatusOr<double>`; invalid state and overflow return failure.
 `parameters()` borrows the current physical values for diagnostics. After a failed decode they
-may be only partially updated; use `lastStatus()` and preserve the original decision vector
+may be only partially updated; use the returned evaluation status and preserve the original decision vector
 when recording a rejected candidate. The view expires on the next evaluation or state change.
 
 One optimizer supports one synchronous evaluation at a time. Independent solves need independent
@@ -92,11 +93,17 @@ C++17 does not reflect other member names: extra application data are allowed, a
 member alongside another valid stage cannot be diagnosed automatically.
 
 The following signatures use `S` for the spline, `D = S::kDimension`, `Opt = SplineOptimizer<S>`
-and the names in namespace `SplineTrajectory`. Outputs are **additive**. Do not resize a gradient,
+and the names in namespace `SplineTrajectory`. A successful map promises finite output with the declared shape. The optimizer validates
+reference/decision inputs at their boundary and calls the same public spline update()/backward()
+as any other caller. The spline, polynomial and hull APIs trust caller-validated inputs; there
+is no separate privileged entry or optimizer friendship. Numerical knot/factorization/coefficient
+failures remain checked during computation. Do not return success with an invalid map result.
+
+Outputs are **additive**. Do not resize a gradient,
 clear contributions from previous stages or include weights already handled by the optimizer.
 Several costs in one stage can be implemented by direct calls inside one named functor.
 
-| Member | Signature returning `double` | Meaning |
+| Member | Signature returning `EvaluationResult` | Meaning |
 | --- | --- | --- |
 | `duration` | `(const std::vector<double>&, Eigen::Ref<Eigen::VectorXd>)` | Cost and partials with respect to physical durations |
 | `integral` | `(const IntegralPointInfo&, const SampleState<D>&, SampleGradient<D>&)` | Unweighted integrand and local partials |
@@ -105,7 +112,8 @@ Several costs in one stage can be implemented by direct calls inside one named f
 | `parameter` | `(const ParameterView<S>&, ParameterGradient<S>&)` | Total physical parameter partials after the spline adjoint |
 | `decision` | `(const DecisionView&, Eigen::Ref<Eigen::VectorXd>)` | Direct decision-domain cost after mapped gradients have been written |
 
-Each view is valid only during its synchronous callback. The returned cost is added once.
+Each view is valid only during its synchronous callback. Check nested results and return `{cost, Status::success()}` or `{infinity, status}`.
+The optimizer propagates rejection and clears its output gradient. The returned successful cost is added once.
 Sample-stage output matrices have DIM × sample_count columns, unlike the piece-major
 coefficient/waypoint matrices. The corresponding time output has sample_count entries.
 
@@ -173,31 +181,33 @@ are supported when supplied to the constructor/factory.
 ### Time map
 
 ```cpp
-double toTime(double tau) const;
-double toTau(double duration) const;
-double backward(double tau, double duration, double grad_duration) const;
+StatusOr<double> toTime(double tau) const;
+StatusOr<double> toTau(double duration) const;
+StatusOr<double> backward(double tau, double duration, double grad_duration) const;
 ```
 
 `toTau()` is the inverse used for initial coordinates. `backward()` returns the chain rule for
 one unconstrained coordinate. Its `duration` is the output of `toTime(tau)` **before** any
 auxiliary transformation. This matters for maps whose derivative uses the physical duration,
 such as the exponential map. `QuadInvTimeMap` is the default; `IdentityTimeMap` is also available.
-Nonpositive, nonfinite or unrepresentable cumulative times are rejected before the spline kernel.
+The optimizer rejects nonpositive/nonfinite decoded durations. Unrepresentable cumulative times
+are detected during spline construction. Built-in identity maps copy caller-validated data;
+nonlinear maps still report overflow produced by their own computation.
 
 ### Spatial map
 
 ```cpp
 int dimension(int global_index) const;
-Vector toPhysical(const Eigen::Ref<const Eigen::VectorXd>& xi, int global_index) const;
-Eigen::VectorXd toUnconstrained(const Vector& point, int global_index) const;
-void backwardInto(const Eigen::Ref<const Eigen::VectorXd>& xi, const Vector& grad_point,
+StatusOr<Vector> toPhysical(const Eigen::Ref<const Eigen::VectorXd>& xi, int global_index) const;
+StatusOr<Eigen::VectorXd> toUnconstrained(const Vector& point, int global_index) const;
+Status backwardInto(const Eigen::Ref<const Eigen::VectorXd>& xi, const Vector& grad_point,
                   int global_index, Eigen::Ref<Eigen::VectorXd> destination) const;
 ```
 
 `Vector = S::Vector`. Global waypoint indices run from 0 to N, including endpoints. Each mapped
 dimension must be positive. `toPhysical()` must return DIM values; `toUnconstrained()` returns
 the configured mapped dimension and is allowed to allocate in preparation/initial-guess creation.
-A fixed-size vector return also satisfies the inverse protocol. `backwardInto()` **overwrites**
+A `StatusOr` containing a fixed-size vector also satisfies the inverse protocol. `backwardInto()` **overwrites**
 its exclusive pre-sized decision slice; the optimizer handles accumulation between cost stages.
 There is no owning-vector fallback on the hot path.
 
@@ -205,9 +215,9 @@ There is no owning-vector fallback on the hot path.
 
 ```cpp
 int dimension() const;
-Eigen::VectorXd initial(const SplineProblem<S>& reference) const;
-void apply(const Eigen::Ref<const Eigen::VectorXd>& z, MutableParameters<S>& state) const;
-double backward(const Eigen::Ref<const Eigen::VectorXd>& z, const ParameterView<S>& state,
+StatusOr<Eigen::VectorXd> initial(const SplineProblem<S>& reference) const;
+Status apply(const Eigen::Ref<const Eigen::VectorXd>& z, MutableParameters<S>& state) const;
+EvaluationResult backward(const Eigen::Ref<const Eigen::VectorXd>& z, const ParameterView<S>& state,
                 ParameterGradient<S>& gradient, Eigen::Ref<Eigen::VectorXd> grad_z) const;
 ```
 
@@ -224,14 +234,16 @@ plus a movable start time. This detects using post-auxiliary durations in the or
 
 ## External solvers and concurrency
 
-A capturing lambda may call `costAndGradient(x, g, objective)`. For C-style callbacks, only the
+A capturing lambda calls `evaluate(x, g, objective)`, handles its status and returns its cost. For C-style callbacks, only the
 outer solver boundary needs `void*`:
 
 ```cpp
 struct SolverData { Optimizer& optimizer; ProblemObjective& objective; };
 double callback(void* instance, const Eigen::VectorXd& x, Eigen::VectorXd& g) {
     auto& data = *static_cast<SolverData*>(instance);
-    return data.optimizer.costAndGradient(x, g, data.objective);
+    const auto result = data.optimizer.evaluate(x, g, data.objective);
+    // Inspect or retain result.status here; rejected trials already carry infinity.
+    return result.cost;
 }
 ```
 
@@ -246,15 +258,15 @@ outside the parallel loop. Each mutable hull workspace belongs to one active eva
 ## Failures, diagnostics and allocation
 
 - Failed preparation leaves an unprepared optimizer and invalid polynomial. Initial-guess access
-  while unprepared throws `std::logic_error`.
+  requires successful preparation and is guarded by an assertion. It remains an ordinary owning return.
 - Bad input/shape, missing sample capability, numerical construction failure and nonfinite
   objective/gradient values return explicit status; failed evaluation clears its output gradient
   and returns infinity. Failed numeric construction clears the polynomial.
 - A failed cost can leave a numerically valid trial polynomial. It is not an accepted solution.
-  `lastStatus()` and `polynomial().isValid()` represent different facts.
-- User cost exceptions propagate in serial stages; they are not converted to plausible costs. Map rejection by
-  `invalid_argument` during candidate decoding becomes a numerical-failure status. Bad allocation
-  and unexpected user exceptions are not swallowed.
+  The evaluation status and `polynomial().isValid()` represent different facts.
+- Expected callback/map failures return explicit status, preserving code, index and diagnostic.
+  Parallel integration reports the first failed segment in segment order after all workers finish.
+  User exceptions propagate in serial stages; bad allocation and unexpected exceptions are not swallowed.
 - `checkGradients(optimizer, x, objective, step, tolerance)` allocates diagnostic vectors, performs
   central differences and restores the base candidate even after a rejected perturbation.
   It returns analytical/numerical gradients, norm/relative/max errors, offending index and status.

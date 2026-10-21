@@ -31,7 +31,7 @@ PPoly makePolynomial(const std::vector<double> &durations,
     breaks.front() = 0.37;
     for (std::size_t i = 0; i < durations.size(); ++i)
         breaks[i + 1] = breaks[i] + durations[i];
-    return PPoly(breaks, coefficients, num_coefficients);
+    return PPoly::create(breaks, coefficients, num_coefficients).value();
 }
 
 double objective(const PPoly &polynomial,
@@ -41,7 +41,7 @@ double objective(const PPoly &polynomial,
                  const Matrix &weights)
 {
     auto representation = Hull::fromPPoly(
-        polynomial, {basis, derivative, subdivision_depth});
+        polynomial, {basis, derivative, subdivision_depth}).value();
     return (representation.controls().array() * weights.array()).sum();
 }
 
@@ -51,9 +51,9 @@ void checkRepresentationValues(const PPoly &polynomial,
                                int subdivision_depth)
 {
     auto representation = Hull::fromPPoly(
-        polynomial, {basis, derivative, subdivision_depth});
+        polynomial, {basis, derivative, subdivision_depth}).value();
     const Eigen::MatrixXd transform =
-        Hull::powerToControlMatrix(basis, representation.degree());
+        Hull::powerToControlMatrix(basis, representation.degree()).value();
     const Eigen::MatrixXd inverse = transform.inverse();
     const int degree = representation.degree();
 
@@ -78,7 +78,7 @@ void checkRepresentationValues(const PPoly &polynomial,
                 polynomial.breakpoints()[info.source_segment] +
                 u * info.duration;
             const Eigen::Vector3d expected =
-                polynomial[info.source_segment].evaluateLocal(local_time, derivative);
+                polynomial[info.source_segment].evaluateLocal(local_time, derivative).value();
             require((from_controls - expected).norm() < 2e-9,
                     "Converted controls do not reproduce the polynomial derivative.");
 
@@ -108,14 +108,14 @@ void checkBackward(SplineTrajectory::ConvexHullBasis basis,
 
     PPoly polynomial = makePolynomial(durations, coefficients, num_coefficients);
     auto representation = Hull::fromPPoly(
-        polynomial, {basis, derivative, subdivision_depth});
+        polynomial, {basis, derivative, subdivision_depth}).value();
 
     Matrix weights(representation.controls().rows(), 3);
     for (Eigen::Index row = 0; row < weights.rows(); ++row)
         for (Eigen::Index col = 0; col < weights.cols(); ++col)
             weights(row, col) = normal(generator);
 
-    const auto gradients = representation.backward(weights);
+    const auto gradients = representation.backward(weights).value();
     constexpr double epsilon = 2e-7;
     double max_coefficient_error = 0.0;
 
@@ -177,11 +177,11 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
     const PPoly polynomial =
         makePolynomial(durations, coefficients, num_coefficients);
     Hull workspace;
-    workspace.configure(
-        polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3});
-    workspace.update(polynomial);
+    if (const auto status = workspace.configure(
+        polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3}); !status) { throw std::runtime_error(status.message); }
+    if (const auto status = workspace.update(polynomial); !status) { throw std::runtime_error(status.message); }
     const auto reference = Hull::fromPPoly(
-        polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3});
+        polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3}).value();
     require((workspace.controls() - reference.controls()).norm() < 1e-13,
             "Workspace update differs from one-shot conversion.");
     require(workspace.kernel().get() == reference.kernel().get(),
@@ -191,13 +191,13 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
     for (Eigen::Index row = 0; row < control_gradients.rows(); ++row)
         for (Eigen::Index col = 0; col < control_gradients.cols(); ++col)
             control_gradients(row, col) = normal(generator);
-    const auto direct = workspace.backward(control_gradients);
+    const auto direct = workspace.backward(control_gradients).value();
     Matrix coefficient_sum =
         Matrix::Constant(direct.coefficients.rows(), 3, 0.17);
     Eigen::VectorXd duration_sum =
         Eigen::VectorXd::Constant(num_segments, -0.23);
-    workspace.backwardAdd(
-        control_gradients, coefficient_sum, duration_sum);
+    if (const auto status = workspace.backwardAdd(
+        control_gradients, coefficient_sum, duration_sum); !status) { throw std::runtime_error(status.message); }
     require((coefficient_sum -
              (direct.coefficients.array() + 0.17).matrix()).norm() < 1e-12,
             "backwardAdd() did not preserve an existing coefficient gradient.");
@@ -214,8 +214,8 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
     }
     Eigen::VectorXd analytic = Eigen::VectorXd::Zero(num_segments);
     double analytic_start = 0.0;
-    workspace.backwardPieceTimesAdd(
-        start_weights, duration_weights, analytic, analytic_start);
+    if (const auto status = workspace.backwardPieceTimesAdd(
+        start_weights, duration_weights, analytic, analytic_start); !status) { throw std::runtime_error(status.message); }
 
     auto time_objective = [&](double start,
                               const std::vector<double> &test_durations)
@@ -224,8 +224,8 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
         breaks[0] = start;
         for (int i = 0; i < num_segments; ++i)
             breaks[i + 1] = breaks[i] + test_durations[i];
-        PPoly test_poly(breaks, coefficients, num_coefficients);
-        workspace.update(test_poly);
+        auto test_poly = PPoly::create(breaks, coefficients, num_coefficients).value();
+        if (const auto status = workspace.update(test_poly); !status) { throw std::runtime_error(status.message); }
         double value = 0.0;
         for (int piece = 0; piece < workspace.numPieces(); ++piece)
             value += start_weights(piece) *
@@ -257,19 +257,11 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
                 "Piece duration adjoint failed finite differences.");
     }
 
-    bool budget_rejected = false;
-    try
-    {
-        Hull too_large;
-        too_large.configure(
-            1, 8, {SplineTrajectory::ConvexHullBasis::Bezier, 0, 8}, 1024);
-    }
-    catch (const std::length_error &)
-    {
-        budget_rejected = true;
-    }
-    require(budget_rejected,
-            "Memory-budget validation did not reject an oversized kernel.");
+    Hull too_large;
+    const auto budget = too_large.configure(
+        1, 8, {SplineTrajectory::ConvexHullBasis::Bezier, 0, 8}, 1024);
+    require(!budget && budget.code == SplineTrajectory::ErrorCode::ResourceLimit,
+            "Memory budget must return ResourceLimit before allocation");
 }
 
 void checkFixedTopologyEigenAllocationFree()
@@ -291,17 +283,17 @@ void checkFixedTopologyEigenAllocationFree()
     SplineTrajectory::BoundaryConditions<3> boundary;
 
     Spline spline;
-    spline.update(
-        durations, waypoints, 0.25, boundary);
+    if (const auto status = spline.update(
+        durations, waypoints, 0.25, boundary); !status) { throw std::runtime_error(status.message); }
     // A second update warms all fixed-topology solver and PPoly storage.
-    spline.update(
-        durations, waypoints, 0.25, boundary);
+    if (const auto status = spline.update(
+        durations, waypoints, 0.25, boundary); !status) { throw std::runtime_error(status.message); }
 
     Hull hull;
-    hull.configure(
+    if (const auto status = hull.configure(
         spline.numSegments(), Spline::kCoefficientCount,
-        {SplineTrajectory::ConvexHullBasis::Bezier, 1, 2});
-    hull.update(spline.polynomial());
+        {SplineTrajectory::ConvexHullBasis::Bezier, 1, 2}); !status) { throw std::runtime_error(status.message); }
+    if (const auto status = hull.update(spline.polynomial()); !status) { throw std::runtime_error(status.message); }
 
     SplineMatrix control_gradients =
         SplineMatrix::Ones(hull.controls().rows(), 3);
@@ -311,24 +303,24 @@ void checkFixedTopologyEigenAllocationFree()
     Eigen::VectorXd duration_gradients =
         Eigen::VectorXd::Zero(spline.numSegments());
     typename Spline::Gradients gradients;
-    gradients.resetTopology(spline.numSegments());
-    spline.backward(
-        coefficient_gradients, duration_gradients, gradients);
+    if (const auto status = gradients.resetTopology(spline.numSegments()); !status) { throw std::runtime_error(status.message); }
+    if (const auto status = spline.backward(
+        coefficient_gradients, duration_gradients, gradients); !status) { throw std::runtime_error(status.message); }
 
     Eigen::internal::set_is_malloc_allowed(false);
     for (int iteration = 0; iteration < 8; ++iteration)
     {
-        spline.update(
-            durations, waypoints, 0.25, boundary);
-        hull.update(spline.polynomial());
+        if (const auto status = spline.update(
+            durations, waypoints, 0.25, boundary); !status) { throw std::runtime_error(status.message); }
+        if (const auto status = hull.update(spline.polynomial()); !status) { throw std::runtime_error(status.message); }
         coefficient_gradients.setZero();
         duration_gradients.setZero();
-        hull.backwardAdd(
+        if (const auto status = hull.backwardAdd(
             control_gradients, coefficient_gradients,
-            duration_gradients);
-        spline.backward(
+            duration_gradients); !status) { throw std::runtime_error(status.message); }
+        if (const auto status = spline.backward(
             coefficient_gradients, duration_gradients,
-            gradients);
+            gradients); !status) { throw std::runtime_error(status.message); }
     }
     Eigen::internal::set_is_malloc_allowed(true);
 }

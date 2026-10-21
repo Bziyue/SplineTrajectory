@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "TestSupport.hpp"
 #include "SplineOptimizer.hpp"
 
@@ -30,22 +31,22 @@ template <class Curve>
 void CheckSplineValidity()
 {
   const auto problem = MakeProblem();
-  Curve curve(problem.durations, problem.waypoints, 0.0);
+  auto curve = Curve::create(problem.durations, problem.waypoints, 0.0).value();
   require(curve.isValid(), "valid initial curve");
 
-  curve.update(problem.durations, problem.waypoints, 2e16);
+  require(!curve.update(problem.durations, problem.waypoints, 2e16), "Invalid construction must return failure");
   require(!curve.isValid() && !curve.polynomial().isValid(),
           "outer spline must reject collapsed polynomial time knots");
 
   auto points = problem.waypoints;
   points(0, 0) = -std::numeric_limits<double>::max();
   points(1, 0) = std::numeric_limits<double>::max();
-  curve.update(problem.durations, points, 0.0);
+  require(!curve.update(problem.durations, points, 0.0), "Invalid construction must return failure");
   require(!curve.isValid() && !curve.polynomial().isValid(),
           "outer spline must reject nonfinite solved coefficients");
 
-  curve.update(problem.durations, problem.waypoints, 0.0);
-  require(curve.isValid() && curve.polynomial().evaluate(0.5).allFinite(),
+  if (const auto status = curve.update(problem.durations, problem.waypoints, 0.0); !status) { throw std::runtime_error(status.message); }
+  require(curve.isValid() && curve.polynomial().evaluate(0.5).value().allFinite(),
           "curve must recover after invalid updates");
 }
 
@@ -64,18 +65,18 @@ void CheckEvaluationFailures()
   auto time_cost = [&](const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> g) {
     ++time_calls;
     g.setOnes();
-    return nonfinite_cost ? std::numeric_limits<double>::infinity() : times[0] + times[1];
+    return SplineTrajectory::EvaluationResult{nonfinite_cost ? std::numeric_limits<double>::infinity() : times[0] + times[1], {}};
   };
   auto integral_cost = [&](const auto &, const auto &, auto &) {
     ++integral_calls;
-    return 0.0;
+    return SplineTrajectory::EvaluationResult{0.0, {}};
   };
   struct Objective
   {
     decltype(time_cost) &duration;
     decltype(integral_cost) &integral;
   } objective{time_cost, integral_cost};
-  const double baseline = optimizer.costAndGradient(good, gradient, objective);
+  const double baseline = optimizer.evaluate(good, gradient, objective).cost;
   const Eigen::VectorXd baseline_gradient = gradient;
   require(std::isfinite(baseline) && gradient.allFinite(), "valid baseline evaluation");
   require(bool(SplineTrajectory::checkGradients(optimizer, good, objective)), "normal gradient check remains valid");
@@ -104,14 +105,15 @@ void CheckEvaluationFailures()
 
     Optimizer::Status status;
     gradient.setOnes();
-    const double rejected = optimizer.costAndGradient(bad, gradient, objective);
-    status = optimizer.lastStatus();
+    const auto rejected_result = optimizer.evaluate(bad, gradient, objective);
+    const double rejected = rejected_result.cost;
+    status = rejected_result.status;
     require(!status && status.message[0] != 0 && std::isinf(rejected) && gradient.isZero(),
-            "scalar adapter must preserve status and reject invalid trials in Release too");
+            "evaluation must preserve status and reject invalid trials in Release too");
     require(!optimizer.updateAccepted(bad), "synchronization must reject same trial");
     require(!optimizer.polynomial().isValid(), "invalid synchronized curve");
 
-    require(optimizer.costAndGradient(good, gradient, objective) == baseline &&
+    require(optimizer.evaluate(good, gradient, objective).cost == baseline &&
                 gradient.isApprox(baseline_gradient, 1e-12),
             "valid retry must reproduce original cost and gradient");
   }
@@ -120,7 +122,7 @@ void CheckEvaluationFailures()
   const auto invalid_cost = optimizer.evaluate(good, gradient, objective);
   require(!invalid_cost && std::isinf(invalid_cost.cost) && gradient.isZero(), "nonfinite callback is failure");
   nonfinite_cost = false;
-  require(std::isfinite(optimizer.costAndGradient(good, gradient, objective)), "recover after bad cost");
+  require(std::isfinite(optimizer.evaluate(good, gradient, objective).cost), "recover after bad cost");
 
   auto invalid_seed = problem;
   invalid_seed.durations = {2e16, 1.0};

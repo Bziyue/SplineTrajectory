@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include <Eigen/Dense>
 
 #include <algorithm>
@@ -91,7 +92,7 @@ PPoly makePolynomial(int segments, int degree, std::mt19937 &generator)
     for (Eigen::Index row = 0; row < coefficients.rows(); ++row)
         for (Eigen::Index column = 0; column < coefficients.cols(); ++column)
             coefficients(row, column) = normal(generator);
-    return PPoly(breakpoints, coefficients, coefficients_per_segment);
+    return PPoly::create(breakpoints, coefficients, coefficients_per_segment).value();
 }
 
 Matrix makeGradients(Eigen::Index rows, std::mt19937 &generator)
@@ -122,7 +123,7 @@ void addForwardMeasurement(std::vector<Measurement> &measurements,
     const double elapsed = medianNanoseconds([&]()
     {
         auto representation = Hull::fromPPoly(
-            polynomial, {basis, derivative, subdivision_depth});
+            polynomial, {basis, derivative, subdivision_depth}).value();
         benchmark_sink +=
             representation.controls()(representation.controls().rows() - 1, 0);
     });
@@ -146,9 +147,9 @@ void addWorkspaceMeasurement(
         basis == SplineTrajectory::ConvexHullBasis::Bezier
             ? "Bezier" : "MINVO";
     Hull workspace;
-    workspace.configure(
-        polynomial, {basis, derivative, subdivision_depth});
-    workspace.update(polynomial);
+    if (const auto status = workspace.configure(
+        polynomial, {basis, derivative, subdivision_depth}); !status) { throw std::runtime_error(status.message); }
+    if (const auto status = workspace.update(polynomial); !status) { throw std::runtime_error(status.message); }
     const Matrix gradients =
         makeGradients(workspace.controls().rows(), generator);
     Matrix coefficient_gradients =
@@ -158,7 +159,7 @@ void addWorkspaceMeasurement(
 
     const double update_elapsed = medianNanoseconds([&]()
     {
-        workspace.update(polynomial);
+        if (const auto status = workspace.update(polynomial); !status) { throw std::runtime_error(status.message); }
         benchmark_sink += workspace.controls()(
             workspace.controls().rows() - 1, 0);
     });
@@ -170,9 +171,9 @@ void addWorkspaceMeasurement(
 
     const double backward_elapsed = medianNanoseconds([&]()
     {
-        workspace.backwardAdd(
+        if (const auto status = workspace.backwardAdd(
             gradients, coefficient_gradients,
-            duration_gradients);
+            duration_gradients); !status) { throw std::runtime_error(status.message); }
         benchmark_sink += coefficient_gradients(0, 0);
     });
     measurements.push_back({
@@ -196,12 +197,12 @@ void addBackwardMeasurement(std::vector<Measurement> &measurements,
         basis == SplineTrajectory::ConvexHullBasis::Bezier
             ? "Bezier" : "MINVO";
     auto representation = Hull::fromPPoly(
-        polynomial, {basis, derivative, subdivision_depth});
+        polynomial, {basis, derivative, subdivision_depth}).value();
     const Matrix gradients =
         makeGradients(representation.controls().rows(), generator);
     const double elapsed = medianNanoseconds([&]()
     {
-        const auto result = representation.backward(gradients);
+        const auto result = representation.backward(gradients).value();
         benchmark_sink += result.coefficients(0, 0) +
                           result.durations(result.durations.size() - 1);
     });
@@ -280,7 +281,7 @@ int main(int argc, char **argv)
         {
             const double elapsed = medianNanoseconds([&]()
             {
-                const auto result = polynomial.derivative(derivative);
+                const auto result = polynomial.derivative(derivative).value();
                 benchmark_sink += result.coefficients()(
                     result.coefficients().rows() - 1, 0);
             });

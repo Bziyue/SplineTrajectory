@@ -21,10 +21,10 @@ int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
      'Objective must declare a supported cost member'),
     ('duration-signature', prefix + '''struct Objective { int duration = 0; };
 int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
-     'Objective.duration must return double'),
+     'Objective.duration must return EvaluationResult'),
     ('integral-signature', prefix + '''struct Objective { int integral = 0; };
 int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
-     'Objective.integral must return double'),
+     'Objective.integral must return EvaluationResult'),
     ('derivative-order', prefix + '''struct Integral {
 static constexpr int kDerivativeOrder = 5;
 double operator()(const SplineTrajectory::IntegralPointInfo &,

@@ -10,12 +10,12 @@ using spline_test::require;
 
 struct DurationCost
 {
-    double operator()(const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> gradient) const
+    SplineTrajectory::EvaluationResult operator()(const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> gradient) const
     {
         gradient.array() += 0.2;
         double cost = 0.0;
         for (double time : times) cost += 0.2 * time;
-        return cost;
+        return {cost, SplineTrajectory::Status::success()};
     }
 };
 
@@ -23,7 +23,7 @@ template<int ORDER>
 struct StateCost
 {
     static constexpr int kDerivativeOrder = ORDER;
-    double operator()(const SplineTrajectory::IntegralPointInfo &point,
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &point,
                       const SplineTrajectory::SampleState<3> &state,
                       SplineTrajectory::SampleGradient<3> &gradient) const
     {
@@ -35,7 +35,7 @@ struct StateCost
         if constexpr (ORDER >= 2) { gradient.a += 0.02 * state.a; cost += 0.01 * state.a.squaredNorm(); }
         if constexpr (ORDER >= 3) { gradient.j += 0.002 * state.j; cost += 0.001 * state.j.squaredNorm(); }
         if constexpr (ORDER >= 4) { gradient.s += 0.0002 * state.s; cost += 0.0001 * state.s.squaredNorm(); }
-        return cost;
+        return {cost, SplineTrajectory::Status::success()};
     }
 };
 
@@ -45,7 +45,7 @@ struct CoefficientCost
     explicit CoefficientCost(double value) : weight(value) {}
     double weight;
     template<class Spline>
-    double operator()(const SplineTrajectory::ParameterView<Spline> &state,
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline> &state,
                       SplineTrajectory::CoefficientGradient<Spline> &gradient) const
     {
         gradient.coefficients += weight * state.polynomial.coefficients();
@@ -55,29 +55,29 @@ struct CoefficientCost
             gradient.durations(i) += 0.02 * state.durations[i];
             cost += 0.01 * state.durations[i] * state.durations[i];
         }
-        return cost;
+        return {cost, SplineTrajectory::Status::success()};
     }
 };
 
 struct ParameterCost
 {
     template<class Spline>
-    double operator()(const SplineTrajectory::ParameterView<Spline> &state,
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline> &state,
                       SplineTrajectory::ParameterGradient<Spline> &gradient) const
     {
         for (int i = 0; i < state.waypoints.rows(); ++i)
-            gradient.addWaypoint(i, 0.04 * state.waypoints.row(i).transpose());
+            if (const auto status = gradient.addWaypoint(i, 0.04 * state.waypoints.row(i).transpose()); !status) { throw std::runtime_error(status.message); }
         gradient.start.v += 0.02 * state.boundary.start_velocity;
-        return 0.02 * state.waypoints.squaredNorm() + 0.01 * state.boundary.start_velocity.squaredNorm();
+        return {0.02 * state.waypoints.squaredNorm() + 0.01 * state.boundary.start_velocity.squaredNorm(), SplineTrajectory::Status::success()};
     }
 };
 
 struct DecisionCost
 {
-    double operator()(const SplineTrajectory::DecisionView &view, Eigen::Ref<Eigen::VectorXd> gradient) const
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::DecisionView &view, Eigen::Ref<Eigen::VectorXd> gradient) const
     {
         gradient += 0.006 * view.variables;
-        return 0.003 * view.variables.squaredNorm();
+        return {0.003 * view.variables.squaredNorm(), SplineTrajectory::Status::success()};
     }
 };
 
@@ -167,15 +167,17 @@ void checkEnergyOnly()
 struct SharedMap
 {
     int dimension() const { return 2; }
-    template<class Problem> Eigen::VectorXd initial(const Problem &) const { return Eigen::VectorXd::Zero(2); }
+    template<class Problem> SplineTrajectory::StatusOr<Eigen::VectorXd> initial(const Problem &) const { return Eigen::VectorXd(Eigen::VectorXd::Zero(2)); }
     template<class Spline>
-    void apply(const Eigen::Ref<const Eigen::VectorXd> &x, SplineTrajectory::MutableParameters<Spline> &state) const
+    SplineTrajectory::Status apply(const Eigen::Ref<const Eigen::VectorXd> &x, SplineTrajectory::MutableParameters<Spline> &state) const
     {
         state.start_time += x(0);
         for (double &duration : state.durations) duration *= std::exp(x(1));
+
+        return SplineTrajectory::Status::success();
     }
     template<class Spline>
-    double backward(const Eigen::Ref<const Eigen::VectorXd> &x,
+    SplineTrajectory::EvaluationResult backward(const Eigen::Ref<const Eigen::VectorXd> &x,
                     const SplineTrajectory::ParameterView<Spline> &state,
                     SplineTrajectory::ParameterGradient<Spline> &gradient,
                     Eigen::Ref<Eigen::VectorXd> output) const
@@ -184,22 +186,22 @@ struct SharedMap
         for (int i = 0; i < gradient.durations.size(); ++i)
             output(1) += gradient.durations(i) * state.durations[i];
         gradient.durations *= std::exp(x(1));
-        return 0.0;
+        return {0.0, SplineTrajectory::Status::success()};
     }
 };
 
 struct ClockCoefficient
 {
     template<class Spline>
-    double operator()(const SplineTrajectory::ParameterView<Spline> &state,
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline> &state,
                       SplineTrajectory::CoefficientGradient<Spline> &gradient) const
-    { gradient.start_time += 3.0; return 3.0 * state.start_time; }
+    { gradient.start_time += 3.0; return {3.0 * state.start_time, SplineTrajectory::Status::success()}; }
 };
 
 struct ClockSample
 {
     template<class Samples, class PositionOutput>
-    double operator()(const Samples &samples, PositionOutput position, Eigen::Ref<Eigen::VectorXd> time) const
+    SplineTrajectory::EvaluationResult operator()(const Samples &samples, PositionOutput position, Eigen::Ref<Eigen::VectorXd> time) const
     {
         double cost = 0.0;
         for (int i = 0; i < static_cast<int>(samples.size()); ++i)
@@ -209,7 +211,7 @@ struct ClockSample
             position.col(i) += 0.002 * samples[i].p;
             cost += 0.001 * samples[i].p.squaredNorm();
         }
-        return cost;
+        return {cost, SplineTrajectory::Status::success()};
     }
 };
 
@@ -237,7 +239,7 @@ void checkSharedVariables()
     auto x = optimizer.initialGuess();
     Eigen::VectorXd gradient(x.size());
     const auto missing = optimizer.evaluate(x, gradient, objective);
-    require(!missing && missing.status.code == OptimizationError::SamplingNotPrepared, "sample requires explicit preparation");
+    require(!missing && missing.status.code == ErrorCode::SamplingNotPrepared, "sample requires explicit preparation");
     require(bool(optimizer.prepare(problem<Spline>(), options, objective)), "prepare sample objective");
     require(optimizer.recordedSamples().empty(), "Preparation must not expose unfilled sample records");
     x(optimizer.layout().auxiliary_offset) = 0.2;

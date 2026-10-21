@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "SplineOptimizer.hpp"
 #include "SplineConvexHull.hpp"
 #include <iostream>
@@ -8,9 +9,26 @@ using Spline = SplineTrajectory::SepticSplineND<3>;
 
 struct ExponentialTimeMap
 {
-    double toTime(double value) const { return std::exp(value); }
-    double toTau(double duration) const { return std::log(duration); }
-    double backward(double, double duration, double gradient) const { return duration * gradient; }
+    SplineTrajectory::StatusOr<double> toTime(double value) const
+    {
+        const double duration = std::exp(value);
+        if (!std::isfinite(duration) || duration <= 0.0)
+            return SplineTrajectory::Status{SplineTrajectory::ErrorCode::NumericalFailure, "Unrepresentable exponential duration"};
+        return duration;
+    }
+    SplineTrajectory::StatusOr<double> toTau(double duration) const
+    {
+        if (!std::isfinite(duration) || duration <= 0.0)
+            return SplineTrajectory::Status{SplineTrajectory::ErrorCode::InvalidInput, "Expected positive finite duration"};
+        return std::log(duration);
+    }
+    SplineTrajectory::StatusOr<double> backward(double, double duration, double gradient) const
+    {
+        const double result = duration * gradient;
+        if (!std::isfinite(result))
+            return SplineTrajectory::Status{SplineTrajectory::ErrorCode::NumericalFailure, "Nonfinite time gradient"};
+        return result;
+    }
 };
 
 /** @brief Smooth coordinates inside a box; seed points must lie strictly inside it. */
@@ -18,27 +36,48 @@ struct BoxCoordinates
 {
     Eigen::Vector3d extent{4.0, 3.0, 2.0};
     int dimension(int) const { return 3; }
-    Eigen::Vector3d toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const
-    { return (extent.array() * x.array().tanh()).matrix(); }
-    Eigen::Vector3d toUnconstrained(const Eigen::Vector3d &point, int) const
-    { return (point.array() / extent.array()).unaryExpr([](double value) { return std::atanh(value); }).matrix(); }
-    void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x, const Eigen::Vector3d &gradient,
+    SplineTrajectory::StatusOr<Eigen::Vector3d> toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const
+    {
+        const Eigen::Vector3d result = (extent.array() * x.array().tanh()).matrix();
+        if (!result.allFinite())
+            return SplineTrajectory::Status{SplineTrajectory::ErrorCode::NumericalFailure, "Nonfinite box coordinate"};
+        return result;
+    }
+    SplineTrajectory::StatusOr<Eigen::Vector3d> toUnconstrained(const Eigen::Vector3d &point, int) const
+    {
+        if ((point.array().abs() >= extent.array()).any())
+            return SplineTrajectory::Status{SplineTrajectory::ErrorCode::InvalidInput, "Initial point must be strictly inside the box"};
+        return Eigen::Vector3d((point.array() / extent.array()).unaryExpr([](double value) { return std::atanh(value); }).matrix());
+    }
+    SplineTrajectory::Status backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x, const Eigen::Vector3d &gradient,
                       int, Eigen::Ref<Eigen::VectorXd> output) const
-    { output = (gradient.array() * extent.array() * (1.0 - x.array().tanh().square())).matrix(); }
+    { output = (gradient.array() * extent.array() * (1.0 - x.array().tanh().square())).matrix();
+        return SplineTrajectory::Status::success();
+    }
 };
 
 /** @brief Two auxiliary coordinates: common start-time offset and logarithmic duration scale. */
 struct SharedCoordinates
 {
     int dimension() const { return 2; }
-    Eigen::VectorXd initial(const SplineTrajectory::SplineProblem<Spline> &) const
-    { return Eigen::VectorXd::Zero(2); }
-    void apply(const Eigen::Ref<const Eigen::VectorXd> &x, SplineTrajectory::MutableParameters<Spline> &state) const
+    SplineTrajectory::StatusOr<Eigen::VectorXd> initial(const SplineTrajectory::SplineProblem<Spline> &) const
+    { return Eigen::VectorXd(Eigen::VectorXd::Zero(2)); }
+    SplineTrajectory::Status apply(const Eigen::Ref<const Eigen::VectorXd> &x, SplineTrajectory::MutableParameters<Spline> &state) const
     {
         state.start_time += x(0);
-        for (double &duration : state.durations) duration *= std::exp(x(1));
+        const double scale = std::exp(x(1));
+        if (!std::isfinite(state.start_time) || !std::isfinite(scale) || scale <= 0.0)
+            return {SplineTrajectory::ErrorCode::NumericalFailure, "Unrepresentable auxiliary transform"};
+        for (double &duration : state.durations)
+        {
+            duration *= scale;
+            if (!std::isfinite(duration) || duration <= 0.0)
+                return {SplineTrajectory::ErrorCode::NumericalFailure, "Unrepresentable scaled duration"};
+        }
+
+        return SplineTrajectory::Status::success();
     }
-    double backward(const Eigen::Ref<const Eigen::VectorXd> &x,
+    SplineTrajectory::EvaluationResult backward(const Eigen::Ref<const Eigen::VectorXd> &x,
                     const SplineTrajectory::ParameterView<Spline> &state,
                     SplineTrajectory::ParameterGradient<Spline> &gradient,
                     Eigen::Ref<Eigen::VectorXd> output) const
@@ -47,7 +86,7 @@ struct SharedCoordinates
         for (int i = 0; i < gradient.durations.size(); ++i)
             output(1) += gradient.durations(i) * state.durations[i];
         gradient.durations *= std::exp(x(1));
-        return 0.0;
+        return {0.0, SplineTrajectory::Status::success()};
     }
 };
 
@@ -61,15 +100,15 @@ struct ProblemParameterization
 struct IntegralCost
 {
     static constexpr int kDerivativeOrder = 1;
-    double operator()(const SplineTrajectory::IntegralPointInfo &point,
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &point,
                       const SplineTrajectory::SampleState<3> &state,
                       SplineTrajectory::SampleGradient<3> &gradient) const
     {
         gradient.p += 0.02 * state.p;
         gradient.v += 0.04 * state.v;
         gradient.time += 0.02 * point.global_time;
-        return 0.01 * state.p.squaredNorm() + 0.02 * state.v.squaredNorm() +
-               0.01 * point.global_time * point.global_time;
+        return {0.01 * state.p.squaredNorm() + 0.02 * state.v.squaredNorm() +
+               0.01 * point.global_time * point.global_time, SplineTrajectory::Status::success()};
     }
 };
 
@@ -79,15 +118,15 @@ struct CoefficientCost
     SplineTrajectory::ConvexHullWorkspace<3> hull;
     Spline::CoefficientMatrix control_gradient;
     explicit CoefficientCost(const Spline::Polynomial &polynomial)
-        : hull(SplineTrajectory::toBezier(polynomial, 0, 1))
+        : hull(SplineTrajectory::toBezier(polynomial, 0, 1).value())
     { control_gradient.resize(hull.controls().rows(), 3); }
-    double operator()(const SplineTrajectory::ParameterView<Spline> &state,
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline> &state,
                       SplineTrajectory::CoefficientGradient<Spline> &gradient)
     {
-        hull.update(state.polynomial);
+        if (const auto status = hull.update(state.polynomial); !status) return {std::numeric_limits<double>::infinity(), status};
         control_gradient = 0.002 * hull.controls();
-        hull.backwardAdd(control_gradient, gradient.coefficients, gradient.durations);
-        return 0.001 * hull.controls().squaredNorm();
+        if (const auto status = hull.backwardAdd(control_gradient, gradient.coefficients, gradient.durations); !status) return {std::numeric_limits<double>::infinity(), status};
+        return {0.001 * hull.controls().squaredNorm(), SplineTrajectory::Status::success()};
     }
 };
 

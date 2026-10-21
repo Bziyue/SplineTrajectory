@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "SplineTrajectory.hpp"
 #include <algorithm>
 #include <chrono>
@@ -45,28 +46,28 @@ int main(int argc, char **argv)
             for (int j = 0; j < BENCH_DIMENSION; ++j) points(i, j) = 0.3*i + std::sin(i + 0.4*j);
         Spline spline;
         const auto first = Clock::now();
-        spline.update(durations, points, 0.0);
+        if (const auto status = spline.update(durations, points, 0.0); !status) { throw std::runtime_error(status.message); }
         const double first_us = std::chrono::duration<double, std::micro>(Clock::now() - first).count();
         Matrix gc = Matrix::Constant(n * (BENCH_DEGREE + 1), BENCH_DIMENSION, 0.01);
         Eigen::VectorXd gt = Eigen::VectorXd::Constant(n, 0.02);
         Spline::Gradients gradient;
-        gradient.resetTopology(n);
+        if (const auto status = gradient.resetTopology(n); !status) { throw std::runtime_error(status.message); }
         auto backward = [&] {
 #ifdef BENCH_OLD
             spline.propagateGrad(gc, gt, gradient);
             kernel_checksum += gradient.times.sum();
 #else
-            spline.backward(gc, gt, gradient);
+            if (const auto status = spline.backward(gc, gt, gradient); !status) { throw std::runtime_error(status.message); }
             kernel_checksum += gradient.durations.sum();
 #endif
         };
         backward();
-        const double build = measure(repeats, [&] { spline.update(durations, points, 0.0); });
+        const double build = measure(repeats, [&] { if (const auto status = spline.update(durations, points, 0.0); !status) { throw std::runtime_error(status.message); } });
         const double reverse = measure(repeats, backward);
 #ifdef BENCH_OLD
         const double energy = spline.getEnergy(), checksum = gradient.times.sum() + gradient.inner_points.sum();
 #else
-        const double energy = spline.energy(), checksum = gradient.durations.sum() + gradient.inner_points.sum();
+        const double energy = spline.energy().value(), checksum = gradient.durations.sum() + gradient.inner_points.sum();
 #endif
         std::cout << BENCH_DEGREE << ',' << BENCH_DIMENSION << ',' << n << ',' << first_us << ','
                   << build << ',' << reverse << ',' << energy << ',' << checksum << ',' << sizeof(Spline) << '\n';

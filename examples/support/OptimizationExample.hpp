@@ -18,10 +18,10 @@ using Vector = Eigen::Vector2d;
 struct DurationCost
 {
     double weight = 0.5;
-    double operator()(const std::vector<double> &durations, Eigen::Ref<Eigen::VectorXd> gradient) const
+    SplineTrajectory::EvaluationResult operator()(const std::vector<double> &durations, Eigen::Ref<Eigen::VectorXd> gradient) const
     {
         gradient.array() += weight;
-        return weight * std::accumulate(durations.begin(), durations.end(), 0.0);
+        return {weight * std::accumulate(durations.begin(), durations.end(), 0.0), SplineTrajectory::Status::success()};
     }
 };
 
@@ -72,7 +72,7 @@ double minimize(Engine &optimizer, Objective &objective, bool check_gradient = f
     auto callback = [](void *instance, const Eigen::VectorXd &variables, Eigen::VectorXd &gradient)
     {
         auto &context = *static_cast<CallbackData *>(instance);
-        return context.optimizer.costAndGradient(variables, gradient, context.objective);
+        return context.optimizer.evaluate(variables, gradient, context.objective).cost;
     };
     Eigen::VectorXd gradient(x.size());
     const double initial_cost = callback(&data, x, gradient);
@@ -106,7 +106,7 @@ void printDynamics(const Polynomial &polynomial)
     double speed = 0.0, acceleration = 0.0;
     for (int i = 0; i <= 1000; ++i)
     {
-        const auto state = sampler.evaluateDerivatives(polynomial.startTime() + polynomial.duration() * i / 1000.0);
+        const auto state = sampler.evaluateDerivatives(polynomial.startTime() + polynomial.duration() * i / 1000.0).value();
         speed = std::max(speed, state[1].norm());
         acceleration = std::max(acceleration, state[2].norm());
     }
