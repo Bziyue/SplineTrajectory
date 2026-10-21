@@ -169,7 +169,7 @@ int main() {
         auto sampler = traj.makeSampler<3>();
         for (double t = traj.startTime(); t <= traj.endTime(); t += 0.01)
         {
-            const auto values = sampler.evaluate(t);
+            const auto values = sampler.evaluateDerivatives(t);
             for (int derivative = 0; derivative <= 3; ++derivative)
                 if (!values[derivative].isApprox(traj.evaluate(t, derivative), 1e-12))
                     throw std::runtime_error("Sequential sampling differs from direct evaluation");

@@ -133,14 +133,14 @@ std::vector<double> generateUniformTimeSequence(double start_time, double end_ti
 }
 
 // Calculate maximum error between two trajectories
-double calculateMaxError(const std::vector<Vector3d>& traj1, const std::vector<Vector3d>& traj2)
+double calculateMaxError(const std::vector<Vector3d>& traj1, const PPolyND<3>::CoefficientMatrix& traj2)
 {
-    if (traj1.size() != traj2.size()) return -1.0;
+    if (static_cast<Eigen::Index>(traj1.size()) != traj2.rows()) return -1.0;
 
     double max_error = 0.0;
     for (size_t i = 0; i < traj1.size(); ++i)
     {
-        double error = (traj1[i] - traj2[i]).norm();
+        double error = (traj1[i] - traj2.row(static_cast<Eigen::Index>(i)).transpose()).norm();
         max_error = std::max(max_error, error);
     }
     return max_error;
@@ -349,14 +349,9 @@ void runEvaluationTests()
     auto qs_vel_consistency = quinticSpline.polynomial().evaluate(consistency_times, Deriv::Vel);
     auto qs_acc_consistency = quinticSpline.polynomial().evaluate(consistency_times, Deriv::Acc);
 
-    // Convert sampled results to std::vector for error calculation
-    std::vector<Vector3d> qs_pos_consistency_vec(qs_pos_consistency.begin(), qs_pos_consistency.end());
-    std::vector<Vector3d> qs_vel_consistency_vec(qs_vel_consistency.begin(), qs_vel_consistency.end());
-    std::vector<Vector3d> qs_acc_consistency_vec(qs_acc_consistency.begin(), qs_acc_consistency.end());
-
-    double pos_max_error = calculateMaxError(mj_pos_consistency, qs_pos_consistency_vec);
-    double vel_max_error = calculateMaxError(mj_vel_consistency, qs_vel_consistency_vec);
-    double acc_max_error = calculateMaxError(mj_acc_consistency, qs_acc_consistency_vec);
+    double pos_max_error = calculateMaxError(mj_pos_consistency, qs_pos_consistency);
+    double vel_max_error = calculateMaxError(mj_vel_consistency, qs_vel_consistency);
+    double acc_max_error = calculateMaxError(mj_acc_consistency, qs_acc_consistency);
 
     std::cout << "Derivative\tMax Error" << std::endl;
     std::cout << "Position\t" << std::scientific << std::setprecision(3) << pos_max_error << std::endl;

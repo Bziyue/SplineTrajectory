@@ -24,7 +24,7 @@ void checkSampler()
         int piece = 0;
         while (piece < 3 && t >= knots[piece + 1]) ++piece;
         const double dt = t - knots[piece];
-        const auto values = sample.evaluate(t);
+        const auto values = sample.evaluateDerivatives(t);
         const auto combined = poly.template evaluateDerivatives<5>(t);
         for (int d = 0; d <= 5; ++d)
         {
@@ -45,7 +45,7 @@ void checkSampler()
     for (double t : {1.9, 2.0, 2.0, 2.2, 2.3, 3.2, 3.25, 4.0, 4.1, 3.21, 2.0, 4.0}) verify(t);
     for (int k = 0; k <= 200; ++k) verify(2.0 + 0.01 * k);
     Eigen::internal::set_is_malloc_allowed(true);
-    const auto invalid = sample.evaluate(std::numeric_limits<double>::infinity());
+    const auto invalid = sample.evaluateDerivatives(std::numeric_limits<double>::infinity());
     for (const auto &value : invalid) require(value.array().isNaN().all(), "nonfinite time must return NaN");
 
     // Each worker performs its first query on a never-sampled immutable source.
@@ -53,7 +53,7 @@ void checkSampler()
     auto worker = [&cold]() {
         auto cursor = cold.template makeSampler<3>();
         double sum = 0;
-        for (int k = 0; k < 1000; ++k) sum += cursor.evaluate(2.0 + 0.001 * k)[1].sum();
+        for (int k = 0; k < 1000; ++k) sum += cursor.evaluateDerivatives(2.0 + 0.001 * k)[1].sum();
         return sum;
     };
     auto first = std::async(std::launch::async, worker);
@@ -62,7 +62,7 @@ void checkSampler()
 
     const Poly invalid_poly;
     auto invalid_sampler = invalid_poly.template makeSampler<3>();
-    require(invalid_sampler.evaluate(0)[0].array().isNaN().all(), "invalid source must return NaN");
+    require(invalid_sampler.evaluateDerivatives(0)[0].array().isNaN().all(), "invalid source must return NaN");
 }
 
 int main()

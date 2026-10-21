@@ -153,28 +153,28 @@ void printBatchPerformance(const BatchPerformanceResult &r, const std::string &n
 }
 
 // 一致性测试（包含snap/四阶导数）
-template <typename VecType>
+template <typename VecType, typename MatrixType>
 ConsistencyResult testConsistency(
-    const SplineVector<VecType> &quintic_pos, const SplineVector<VecType> &quintic_vel,
-    const SplineVector<VecType> &quintic_acc, const SplineVector<VecType> &quintic_jerk,
-    const SplineVector<VecType> &quintic_snap,
+    const MatrixType &quintic_pos, const MatrixType &quintic_vel,
+    const MatrixType &quintic_acc, const MatrixType &quintic_jerk,
+    const MatrixType &quintic_snap,
     const SplineVector<VecType> &minco_pos, const SplineVector<VecType> &minco_vel,
     const SplineVector<VecType> &minco_acc, const SplineVector<VecType> &minco_jerk,
     const SplineVector<VecType> &minco_snap)
 {
     ConsistencyResult result = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     double sum_pos = 0, sum_vel = 0, sum_acc = 0, sum_jerk = 0, sum_snap = 0;
-    int N = quintic_pos.size();
+    int N = static_cast<int>(quintic_pos.rows());
     if (N == 0)
         return result;
 
     for (int i = 0; i < N; ++i)
     {
-        double pos_diff = (quintic_pos[i] - minco_pos[i]).norm();
-        double vel_diff = (quintic_vel[i] - minco_vel[i]).norm();
-        double acc_diff = (quintic_acc[i] - minco_acc[i]).norm();
-        double jerk_diff = (quintic_jerk[i] - minco_jerk[i]).norm();
-        double snap_diff = (quintic_snap[i] - minco_snap[i]).norm();
+        double pos_diff = (quintic_pos.row(i).transpose() - minco_pos[i]).norm();
+        double vel_diff = (quintic_vel.row(i).transpose() - minco_vel[i]).norm();
+        double acc_diff = (quintic_acc.row(i).transpose() - minco_acc[i]).norm();
+        double jerk_diff = (quintic_jerk.row(i).transpose() - minco_jerk[i]).norm();
+        double snap_diff = (quintic_snap.row(i).transpose() - minco_snap[i]).norm();
 
         result.max_pos_diff = std::max(result.max_pos_diff, pos_diff);
         result.max_vel_diff = std::max(result.max_vel_diff, vel_diff);
@@ -467,7 +467,7 @@ void runQuinticTest()
     {
         for (size_t i = 0; i < time_seq.size(); ++i)
         {
-            double diff = (quintic_results_velocity[i] - vel_from_d_ppoly[i]).norm();
+            double diff = (quintic_results_velocity.row(i) - vel_from_d_ppoly.row(i)).norm();
             max_diff = std::max(max_diff, diff);
             avg_diff += diff;
         }

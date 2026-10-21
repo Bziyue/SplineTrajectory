@@ -153,28 +153,28 @@ void printBatchPerformance(const BatchPerformanceResult &r, const std::string &n
 }
 
 // 一致性测试（包含snap/四阶导数）
-template <typename VecType>
+template <typename VecType, typename MatrixType>
 ConsistencyResult testConsistency(
-    const SplineVector<VecType> &septic_pos, const SplineVector<VecType> &septic_vel,
-    const SplineVector<VecType> &septic_acc, const SplineVector<VecType> &septic_jerk,
-    const SplineVector<VecType> &septic_snap,
+    const MatrixType &septic_pos, const MatrixType &septic_vel,
+    const MatrixType &septic_acc, const MatrixType &septic_jerk,
+    const MatrixType &septic_snap,
     const SplineVector<VecType> &minco_pos, const SplineVector<VecType> &minco_vel,
     const SplineVector<VecType> &minco_acc, const SplineVector<VecType> &minco_jerk,
     const SplineVector<VecType> &minco_snap)
 {
     ConsistencyResult result = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     double sum_pos = 0, sum_vel = 0, sum_acc = 0, sum_jerk = 0, sum_snap = 0;
-    int N = septic_pos.size();
+    int N = static_cast<int>(septic_pos.rows());
     if (N == 0)
         return result;
 
     for (int i = 0; i < N; ++i)
     {
-        double pos_diff = (septic_pos[i] - minco_pos[i]).norm();
-        double vel_diff = (septic_vel[i] - minco_vel[i]).norm();
-        double acc_diff = (septic_acc[i] - minco_acc[i]).norm();
-        double jerk_diff = (septic_jerk[i] - minco_jerk[i]).norm();
-        double snap_diff = (septic_snap[i] - minco_snap[i]).norm();
+        double pos_diff = (septic_pos.row(i).transpose() - minco_pos[i]).norm();
+        double vel_diff = (septic_vel.row(i).transpose() - minco_vel[i]).norm();
+        double acc_diff = (septic_acc.row(i).transpose() - minco_acc[i]).norm();
+        double jerk_diff = (septic_jerk.row(i).transpose() - minco_jerk[i]).norm();
+        double snap_diff = (septic_snap.row(i).transpose() - minco_snap[i]).norm();
 
         result.max_pos_diff = std::max(result.max_pos_diff, pos_diff);
         result.max_vel_diff = std::max(result.max_vel_diff, vel_diff);
@@ -478,7 +478,7 @@ void runSepticTest()
     {
         for (size_t i = 0; i < time_seq.size(); ++i)
         {
-            double diff = (septic_results_velocity[i] - vel_from_d_ppoly[i]).norm();
+            double diff = (septic_results_velocity.row(i) - vel_from_d_ppoly.row(i)).norm();
             max_diff = std::max(max_diff, diff);
             avg_diff += diff;
         }

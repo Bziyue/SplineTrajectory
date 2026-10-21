@@ -73,7 +73,7 @@ void checkPolynomial()
     Eigen::internal::set_is_malloc_allowed(false);
     poly.evaluateInto(times, output);
     auto sampler = poly.makeSampler<3>();
-    require(sampler.evaluate(3.0)[0].isApprox(Eigen::Vector2d(3.0, 4.0)), "No warm-up sampling");
+    require(sampler.evaluate(3.0).isApprox(Eigen::Vector2d(3.0, 4.0)), "No warm-up sampling");
     Eigen::internal::set_is_malloc_allowed(true);
     auto begin = poly.begin(), end = poly.end();
     require(std::distance(begin, end) == 2 && (1 + begin)->index() == 1 && begin[1].index() == 1,

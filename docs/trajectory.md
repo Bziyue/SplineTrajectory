@@ -31,7 +31,7 @@ auto position = poly.evaluate(0.5);
 auto state = poly.evaluateDerivatives<2>(0.5);
 auto sampler = poly.makeSampler<3>();
 for (double time : poly.generateTimeSequence(0.01)) {
-    const auto pvaj = sampler.evaluate(time);
+    const auto pvaj = sampler.evaluateDerivatives(time);
     // Consume pvaj[0], pvaj[1], pvaj[2], pvaj[3].
 }
 ```

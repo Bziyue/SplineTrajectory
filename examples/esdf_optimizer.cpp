@@ -53,7 +53,7 @@ int main(int argc, char **argv) try
     for (int i = 0; i <= 1000; ++i)
     {
         example::Vector scratch;
-        const auto position = sampler.evaluate(optimizer.polynomial().duration() * i / 1000.0)[0];
+        const auto position = sampler.evaluate(optimizer.polynomial().duration() * i / 1000.0);
         minimum_distance = std::min(minimum_distance, objective.integral.field.query(position, scratch));
     }
     std::cout << "minimum sampled ESDF: " << minimum_distance << '\n';

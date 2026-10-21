@@ -111,24 +111,24 @@ void printPerformance(const PerformanceResult &r, const std::string &name)
 }
 
 // 一致性测试
-template <typename VecType>
+template <typename VecType, typename MatrixType>
 ConsistencyResult testConsistency(
-    const SplineVector<VecType> &cubic_pos, const SplineVector<VecType> &cubic_vel,
-    const SplineVector<VecType> &cubic_acc, const SplineVector<VecType> &cubic_jerk,
+    const MatrixType &cubic_pos, const MatrixType &cubic_vel,
+    const MatrixType &cubic_acc, const MatrixType &cubic_jerk,
     const SplineVector<VecType> &minco_pos, const SplineVector<VecType> &minco_vel,
     const SplineVector<VecType> &minco_acc, const SplineVector<VecType> &minco_jerk)
 {
     ConsistencyResult result = {0, 0, 0, 0, 0, 0, 0, 0};
     double sum_pos = 0, sum_vel = 0, sum_acc = 0, sum_jerk = 0;
-    int N = cubic_pos.size();
+    int N = static_cast<int>(cubic_pos.rows());
     if (N == 0)
         return result;
     for (int i = 0; i < N; ++i)
     {
-        double pos_diff = (cubic_pos[i] - minco_pos[i]).norm();
-        double vel_diff = (cubic_vel[i] - minco_vel[i]).norm();
-        double acc_diff = (cubic_acc[i] - minco_acc[i]).norm();
-        double jerk_diff = (cubic_jerk[i] - minco_jerk[i]).norm();
+        double pos_diff = (cubic_pos.row(i).transpose() - minco_pos[i]).norm();
+        double vel_diff = (cubic_vel.row(i).transpose() - minco_vel[i]).norm();
+        double acc_diff = (cubic_acc.row(i).transpose() - minco_acc[i]).norm();
+        double jerk_diff = (cubic_jerk.row(i).transpose() - minco_jerk[i]).norm();
         result.max_pos_diff = std::max(result.max_pos_diff, pos_diff);
         result.max_vel_diff = std::max(result.max_vel_diff, vel_diff);
         result.max_acc_diff = std::max(result.max_acc_diff, acc_diff);
@@ -346,7 +346,7 @@ void runTest()
     {
         for (size_t i = 0; i < time_seq.size(); ++i)
         {
-            double diff = (cubic_results_velocity[i] - vel_from_d_ppoly[i]).norm();
+            double diff = (cubic_results_velocity.row(i) - vel_from_d_ppoly.row(i)).norm();
             max_diff = std::max(max_diff, diff);
             avg_diff += diff;
         }

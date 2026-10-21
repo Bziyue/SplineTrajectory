@@ -106,7 +106,7 @@ void printDynamics(const Polynomial &polynomial)
     double speed = 0.0, acceleration = 0.0;
     for (int i = 0; i <= 1000; ++i)
     {
-        const auto state = sampler.evaluate(polynomial.startTime() + polynomial.duration() * i / 1000.0);
+        const auto state = sampler.evaluateDerivatives(polynomial.startTime() + polynomial.duration() * i / 1000.0);
         speed = std::max(speed, state[1].norm());
         acceleration = std::max(acceleration, state[2].norm());
     }

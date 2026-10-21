@@ -63,7 +63,7 @@ int main()
 #endif
 #ifdef BENCH_SAMPLER
             auto sampler=polynomial.makeSampler<3>();
-            measure("sampler",n,order,times,[&](double t){return sampler.evaluate(t);});
+            measure("sampler",n,order,times,[&](double t){return sampler.evaluateDerivatives(t);});
 #endif
             measure("fused",n,order,times,[&](double t){return fused(polynomial,t);});
         }
