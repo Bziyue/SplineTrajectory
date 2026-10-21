@@ -179,6 +179,52 @@ namespace SplineTrajectory
             return result;
         }
 
+        /** @brief Evaluate all requested derivatives of an already located piece.
+         * @tparam MAX_DERIVATIVE Nonnegative highest physical derivative order.
+         * @param segment Valid piece index in this initialized polynomial.
+         * @param local_time Physical time in seconds from the piece's left endpoint.
+         * @return Owned derivative array in source coordinates, with zeros above degree.
+         * @note No allocation or source mutation occurs; concurrent reads are independent. */
+        template <int MAX_DERIVATIVE>
+        Derivatives<MAX_DERIVATIVE> evaluateSegmentDerivatives(int segment, double local_time) const
+        {
+            static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
+            Derivatives<MAX_DERIVATIVE> values;
+            for (int d = 0; d <= MAX_DERIVATIVE; ++d)
+                values[d] = evaluateSegmentHorner(segment, local_time, d);
+            return values;
+        }
+
+        /** @brief Allocate one result matrix per requested derivative.
+         * @tparam MAX_DERIVATIVE Nonnegative highest physical derivative order.
+         * @param times Query times on the source axis; only their count determines output shape.
+         * @return Owned, uninitialized matrices with times.size() rows and DIM columns.
+         * @note Uses no polynomial or sampler state; independent calls are reentrant. */
+        template <int MAX_DERIVATIVE>
+        static DerivativeBatch<MAX_DERIVATIVE> makeDerivativeBatch(const std::vector<double> &times)
+        {
+            static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
+            DerivativeBatch<MAX_DERIVATIVE> output;
+            for (auto &matrix : output)
+                matrix.resize(static_cast<Eigen::Index>(times.size()), DIM);
+            return output;
+        }
+
+        /** @brief Validate every derivative output before evaluation can change output or cursor.
+         * @tparam MAX_DERIVATIVE Nonnegative highest physical derivative order.
+         * @param output Borrowed caller-owned matrices; column count is fixed to DIM by type.
+         * @param sample_count Required row count, equal to the number of query times.
+         * @throws std::invalid_argument If any matrix has a different row count.
+         * @note Does not allocate or modify output; independent reads are reentrant. */
+        template <int MAX_DERIVATIVE>
+        static void checkDerivativeBatchShape(const DerivativeBatch<MAX_DERIVATIVE> &output,
+                                             Eigen::Index sample_count)
+        {
+            for (const auto &matrix : output)
+                if (matrix.rows() != sample_count)
+                    throw std::invalid_argument("Invalid derivative batch shape");
+        }
+
         /** @brief Evaluate a batch element using the previous element's piece as a lookup hint.
          * @param t Time on the polynomial's axis, in seconds; outside times extrapolate.
          * @param derivative_order Nonnegative physical derivative order, checked by the caller.
@@ -252,6 +298,20 @@ namespace SplineTrajectory
                 return value;
             }
 
+            /** @brief Evaluate after the caller has checked the supported derivative range.
+             * @param t Time on the source axis, in seconds; outside times extrapolate.
+             * @param derivative_order Already validated order in [0, MAX_DERIVATIVE].
+             * @return Owned vector, NaNs for invalid source/time, or zero above degree.
+             * @note Requires exclusive sampler access and an unmodified source. A valid query
+             *       updates only this sampler's cursor/cache, without allocating. */
+            Vector evaluateValidOrder(double t, int derivative_order)
+            {
+                if (!source_->is_initialized_ || !std::isfinite(t))
+                    return Vector::Constant(std::numeric_limits<double>::quiet_NaN());
+                const double local_time = prepareQuery(t);
+                return evaluateCached(local_time, derivative_order);
+            }
+
         public:
             using Sample = Derivatives<MAX_DERIVATIVE>;
             using Batch = DerivativeBatch<MAX_DERIVATIVE>;
@@ -280,10 +340,7 @@ namespace SplineTrajectory
             {
                 if (derivative_order < 0 || derivative_order > MAX_DERIVATIVE)
                     throw std::invalid_argument("Derivative order exceeds sampler range");
-                if (!source_->is_initialized_ || !std::isfinite(t))
-                    return Vector::Constant(std::numeric_limits<double>::quiet_NaN());
-                const double local_time = prepareQuery(t);
-                return evaluateCached(local_time, derivative_order);
+                return evaluateValidOrder(t, derivative_order);
             }
 
             /** @brief Evaluate a named derivative, defaulting to position.
@@ -331,7 +388,8 @@ namespace SplineTrajectory
                     throw std::invalid_argument("Invalid batch shape or sampler derivative order");
 
                 for (std::size_t i = 0; i < times.size(); ++i)
-                    output.row(static_cast<Eigen::Index>(i)) = evaluate(times[i], derivative_order).transpose();
+                    output.row(static_cast<Eigen::Index>(i)) =
+                        evaluateValidOrder(times[i], derivative_order).transpose();
             }
 
             /** @brief Write a named derivative using the same batch contract as the integer overload.
@@ -375,9 +433,7 @@ namespace SplineTrajectory
              *       this sampler's cursor/cache and the caller's output change. */
             void evaluateDerivativesInto(const std::vector<double> &times, Batch &output)
             {
-                for (const auto &matrix : output)
-                    if (matrix.rows() != static_cast<Eigen::Index>(times.size()))
-                        throw std::invalid_argument("Invalid derivative batch shape");
+                checkDerivativeBatchShape<MAX_DERIVATIVE>(output, static_cast<Eigen::Index>(times.size()));
 
                 // Locate each time once, then write all derivatives to their corresponding rows.
                 for (std::size_t i = 0; i < times.size(); ++i)
@@ -394,9 +450,7 @@ namespace SplineTrajectory
              * @note Delegates to evaluateDerivativesInto(); the sampler's cursor is retained. */
             Batch evaluateDerivatives(const std::vector<double> &times)
             {
-                Batch output;
-                for (auto &matrix : output)
-                    matrix.resize(static_cast<Eigen::Index>(times.size()), DIM);
+                Batch output = makeDerivativeBatch<MAX_DERIVATIVE>(times);
                 evaluateDerivativesInto(times, output);
                 return output;
             }
@@ -610,17 +664,14 @@ namespace SplineTrajectory
         Derivatives<MAX_DERIVATIVE> evaluateDerivatives(double t) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            Derivatives<MAX_DERIVATIVE> values;
             if (!is_initialized_ || !std::isfinite(t))
             {
+                Derivatives<MAX_DERIVATIVE> values;
                 for (auto &value : values) value.setConstant(std::numeric_limits<double>::quiet_NaN());
                 return values;
             }
             const int segment = findSegment(t);
-            const double dt = t - breakpoints_[segment];
-            for (int derivative = 0; derivative <= MAX_DERIVATIVE; ++derivative)
-                values[derivative] = evaluateSegmentHorner(segment, dt, derivative);
-            return values;
+            return evaluateSegmentDerivatives<MAX_DERIVATIVE>(segment, t - breakpoints_[segment]);
         }
 
         /** @brief Evaluate one derivative into caller-owned rows without allocating.
@@ -691,9 +742,7 @@ namespace SplineTrajectory
                                      DerivativeBatch<MAX_DERIVATIVE> &output) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            for (const auto &matrix : output)
-                if (matrix.rows() != static_cast<Eigen::Index>(times.size()))
-                    throw std::invalid_argument("Invalid derivative batch shape");
+            checkDerivativeBatchShape<MAX_DERIVATIVE>(output, static_cast<Eigen::Index>(times.size()));
 
             // Share one local cursor across queries, locating each time once for all derivatives.
             int segment = -1;
@@ -709,9 +758,7 @@ namespace SplineTrajectory
 
                 segment = findSegment(times[i], segment);
                 const double local_time = times[i] - breakpoints_[segment];
-                Derivatives<MAX_DERIVATIVE> values;
-                for (int d = 0; d <= MAX_DERIVATIVE; ++d)
-                    values[d] = evaluateSegmentHorner(segment, local_time, d);
+                const auto values = evaluateSegmentDerivatives<MAX_DERIVATIVE>(segment, local_time);
                 for (int d = 0; d <= MAX_DERIVATIVE; ++d)
                     output[d].row(row) = values[d].transpose();
             }
@@ -726,9 +773,7 @@ namespace SplineTrajectory
         DerivativeBatch<MAX_DERIVATIVE> evaluateDerivatives(const std::vector<double> &times) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            DerivativeBatch<MAX_DERIVATIVE> output;
-            for (auto &matrix : output)
-                matrix.resize(static_cast<Eigen::Index>(times.size()), DIM);
+            auto output = makeDerivativeBatch<MAX_DERIVATIVE>(times);
             evaluateDerivativesInto<MAX_DERIVATIVE>(times, output);
             return output;
         }
