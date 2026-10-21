@@ -13,7 +13,15 @@
 #ifndef BENCH_DIMENSION
 #define BENCH_DIMENSION 3
 #endif
-using Spline = SplineTrajectory::MinDerivativeSplineND<BENCH_DIMENSION, (BENCH_DEGREE + 1) / 2>;
+#if BENCH_DEGREE == 3
+using Spline = SplineTrajectory::CubicSplineND<BENCH_DIMENSION>;
+#elif BENCH_DEGREE == 5
+using Spline = SplineTrajectory::QuinticSplineND<BENCH_DIMENSION>;
+#elif BENCH_DEGREE == 7
+using Spline = SplineTrajectory::SepticSplineND<BENCH_DIMENSION>;
+#else
+#error "BENCH_DEGREE must be 3, 5, or 7"
+#endif
 #ifdef BENCH_OLD
 using Matrix = Spline::MatrixType;
 #else

@@ -3,7 +3,6 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
-#include <type_traits>
 #include <vector>
 
 #include "TestSupport.hpp"
@@ -262,8 +261,7 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
 
 void checkFixedTopologyEigenAllocationFree()
 {
-    using Spline =
-        SplineTrajectory::MinDerivativeSplineND<3, 3>;
+    using Spline = SplineTrajectory::QuinticSplineND<3>;
     using Hull =
         SplineTrajectory::ConvexHullWorkspace<3>;
     using SplineMatrix = typename Spline::CoefficientMatrix;
@@ -361,14 +359,5 @@ int main()
         checkWorkspaceAndPieceTimeAdjoint(generator);
         checkFixedTopologyEigenAllocationFree();
 
-        static_assert(std::is_same_v<
-                          SplineTrajectory::MinDerivativeSplineND<3, 2>,
-                          SplineTrajectory::CubicSplineND<3>>);
-        static_assert(std::is_same_v<
-                          SplineTrajectory::MinDerivativeSplineND<3, 3>,
-                          SplineTrajectory::QuinticSplineND<3>>);
-        static_assert(std::is_same_v<
-                          SplineTrajectory::MinDerivativeSplineND<3, 4>,
-                          SplineTrajectory::SepticSplineND<3>>);
     });
 }

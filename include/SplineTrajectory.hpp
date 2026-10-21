@@ -4075,7 +4075,7 @@ namespace SplineTrajectory
         }
     };
 
-    // Public dimension aliases and compile-time order selection.
+    // Public dimension aliases.
 
     using SplinePoint1d = Eigen::Matrix<double, 1, 1>;
     using SplinePoint2d = Eigen::Matrix<double, 2, 1>;
@@ -4110,43 +4110,6 @@ namespace SplineTrajectory
     using PPoly9D = PPolyND<9>;
     using PPoly10D = PPolyND<10>;
     using PPoly = PPoly3D;
-
-    /**
-     * @brief Unified minimum-derivative spline name.
-     *
-     * The three practically relevant orders remain compile-time-specialized
-     * implementations, so selecting S adds no runtime branch or virtual call:
-     * S=2 is cubic/minimum acceleration, S=3 quintic/minimum jerk, and S=4
-     * septic/minimum snap.
-     */
-    template <int DIM, int S>
-    struct MinDerivativeSplineSelector
-    {
-        static_assert(S >= 2 && S <= 4,
-                      "MinDerivativeSplineND currently specializes S=2, 3, and 4.");
-    };
-
-    template <int DIM>
-    struct MinDerivativeSplineSelector<DIM, 2>
-    {
-        using type = CubicSplineND<DIM>;
-    };
-
-    template <int DIM>
-    struct MinDerivativeSplineSelector<DIM, 3>
-    {
-        using type = QuinticSplineND<DIM>;
-    };
-
-    template <int DIM>
-    struct MinDerivativeSplineSelector<DIM, 4>
-    {
-        using type = SepticSplineND<DIM>;
-    };
-
-    template <int DIM, int S>
-    using MinDerivativeSplineND =
-        typename MinDerivativeSplineSelector<DIM, S>::type;
 
     using CubicSpline1D = CubicSplineND<1>;
     using CubicSpline2D = CubicSplineND<2>;

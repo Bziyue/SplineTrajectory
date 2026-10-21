@@ -168,6 +168,8 @@ see [build and integration](docs/building.md) for CMake integration and compiler
 
 ### Create a spline
 
+Declare a spline, then initialize it from segment durations and an absolute start time:
+
 ```cpp
 #include "SplineTrajectory.hpp"
 
@@ -175,11 +177,24 @@ using Spline = SplineTrajectory::QuinticSplineND<3>;
 Spline::CoefficientMatrix points(3, 3);
 points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
 std::vector<double> durations{1.2, 1.5};
-auto created = Spline::create(durations, points, 0.0);
-if (!created) return 1;
-auto spline = std::move(created).value();
+Spline spline;
+if (const auto status = spline.update(durations, points, 0.0); !status) return 1;
 auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // position, velocity, acceleration
 ```
+
+Equivalently, use the same points with an absolute time for each waypoint:
+
+```cpp
+std::vector<double> knots{0.0, 1.2, 2.7};
+Spline spline_from_knots;
+if (const auto status = spline_from_knots.update(knots, points); !status) return 1;
+```
+
+The duration form takes `N` durations and an explicit start time; the knot form takes
+`N+1` strictly increasing absolute times. Both accept optional boundary conditions as
+the last argument; supported endpoint derivatives default to zero. Call `update()` again
+to reuse the same object and, when the segment count is unchanged, its workspace.
+Query only after a successful update.
 
 Low-level spline, polynomial and hull APIs expect caller-validated input shapes and finite
 values, with positive segment durations. Numerical construction failures use `Status` /

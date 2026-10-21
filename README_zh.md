@@ -155,6 +155,8 @@ cmake --build build --parallel 3
 
 ### 创建样条
 
+先声明样条，再使用段时长和绝对起点时间初始化：
+
 ```cpp
 #include "SplineTrajectory.hpp"
 
@@ -162,11 +164,22 @@ using Spline = SplineTrajectory::QuinticSplineND<3>;
 Spline::CoefficientMatrix points(3, 3);
 points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
 std::vector<double> durations{1.2, 1.5};
-auto created = Spline::create(durations, points, 0.0);
-if (!created) return 1;
-auto spline = std::move(created).value();
+Spline spline;
+if (const auto status = spline.update(durations, points, 0.0); !status) return 1;
 auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // 位置、速度、加速度
 ```
+
+也可以使用同一组插值点，为每个点提供绝对时间，构造等价的轨迹：
+
+```cpp
+std::vector<double> knots{0.0, 1.2, 2.7};
+Spline spline_from_knots;
+if (const auto status = spline_from_knots.update(knots, points); !status) return 1;
+```
+
+段时长形式接收 `N` 个时长和显式起点时间；绝对时间形式接收 `N+1` 个严格递增的时刻。
+两者都可在最后追加边界条件，省略时受支持的端点导数默认为零。
+再次调用 `update()` 可复用同一对象，段数不变时复用工作区；更新成功后才能进行数值查询。
 
 底层样条、多项式和凸包接口要求调用方保证输入维度正确、数值有限，以及分段时长为正。
 数值构造失败通过 `Status` / `StatusOr` 返回；优化器在 `prepare()` 阶段检查问题输入。

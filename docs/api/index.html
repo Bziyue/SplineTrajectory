@@ -69,12 +69,6 @@
 <td>∫ ‖p⁽⁴⁾(t)‖² dt</td>
 <td><span data-lang="en" lang="en"><code>v, a, j</code></span><span data-lang="zh" lang="zh-CN"><code>v, a, j</code></span></td>
 </tr>
-<tr id="spline-alias" data-search-entry>
-<td><code>MinDerivativeSplineND&lt;DIM, S&gt;</code></td>
-<td><span data-lang="en" lang="en"><code>S = 2, 3, 4</code></span><span data-lang="zh" lang="zh-CN"><code>S = 2, 3, 4</code></span></td>
-<td><span data-lang="en" lang="en">Selects cubic / quintic / septic</span><span data-lang="zh" lang="zh-CN">分别选择三次 / 五次 / 七次</span></td>
-<td><span data-lang="en" lang="en">Same as the selected class</span><span data-lang="zh" lang="zh-CN">与选定类一致</span></td>
-</tr>
 </tbody></table></div>
 <p class="notation"><span data-lang="en" lang="en"><code>N</code> = segments, <code>D</code> / <code>DIM</code> = spatial dimension, <code>K</code> = coefficients per segment, <code>M</code> = query count, <code>R</code> = highest requested derivative. <code>Spline</code> means the selected solver. <code>Vector</code>, <code>CoefficientMatrix</code>, <code>Polynomial</code> and <code>Gradients</code> are its public aliases. All library names are in <code>SplineTrajectory</code>.</span><span data-lang="zh" lang="zh-CN"><code>N</code> 为段数，<code>D</code> / <code>DIM</code> 为空间维度，<code>K</code> 为每段系数数，<code>M</code> 为查询数，<code>R</code> 为最高查询导数阶数。<code>Spline</code> 代表选定样条类；<code>Vector</code>、<code>CoefficientMatrix</code>、<code>Polynomial</code>、<code>Gradients</code> 是其公开类型别名。库类型均位于 <code>SplineTrajectory</code> 命名空间。</span></p>
 </article>
@@ -119,34 +113,45 @@
 <section id="splines" class="module">
 <h2 id="splines-title"><span data-lang="en" lang="en">Spline construction & gradients</span><span data-lang="zh" lang="zh-CN">样条构造与梯度</span><a class="anchor" href="#splines-title" aria-label="Permalink / 固定链接">#</a></h2>
 <p class="header-ref"><code>#include "SplineTrajectory.hpp"</code></p>
-<p><span data-lang="en" lang="en">The following signatures apply to <code>CubicSplineND</code>, <code>QuinticSplineND</code> and <code>SepticSplineND</code>. Constructors create empty objects; use <code>create()</code> or a successful <code>update()</code> before numerical queries.</span><span data-lang="zh" lang="zh-CN">以下签名适用于 <code>CubicSplineND</code>、<code>QuinticSplineND</code> 与 <code>SepticSplineND</code>。默认构造得到空对象；数值查询前使用 <code>create()</code> 或成功的 <code>update()</code>。</span></p>
+<p><span data-lang="en" lang="en">The following signatures apply to <code>CubicSplineND</code>, <code>QuinticSplineND</code> and <code>SepticSplineND</code>. Declare an empty <code>Spline spline;</code>, then initialize it with <code>update()</code> and check success before querying. Subsequent updates reuse the same object. <code>create()</code> remains an optional factory returning <code>StatusOr&lt;Spline&gt;</code>.</span><span data-lang="zh" lang="zh-CN">以下签名适用于 <code>CubicSplineND</code>、<code>QuinticSplineND</code> 与 <code>SepticSplineND</code>。先用 <code>Spline spline;</code> 声明空对象，再调用 <code>update()</code> 初始化，确认成功后进行查询；后续更新继续复用该对象。<code>create()</code> 仍可作为返回 <code>StatusOr&lt;Spline&gt;</code> 的工厂使用。</span></p>
 <article class="subsection">
 <h3 id="construction"><span data-lang="en" lang="en">Construction & in-place update</span><span data-lang="zh" lang="zh-CN">构造与原位更新</span><a class="anchor" href="#construction" aria-label="Permalink / 固定链接">#</a></h3>
-<pre class="signature"><code>static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; durations,
-    const CoefficientMatrix&amp; points, double start_time,
-    const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
-static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; knots,
-    const CoefficientMatrix&amp; points, const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
+<pre class="signature"><code>Spline();
 Status update(const std::vector&lt;double&gt;&amp; durations,
     const CoefficientMatrix&amp; points, double start_time,
     const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
 Status update(const std::vector&lt;double&gt;&amp; knots,
+    const CoefficientMatrix&amp; points, const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
+static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; durations,
+    const CoefficientMatrix&amp; points, double start_time,
+    const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
+static StatusOr&lt;Spline&gt; create(const std::vector&lt;double&gt;&amp; knots,
     const CoefficientMatrix&amp; points, const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});</code></pre>
 <div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API / argument</span><span data-lang="zh" lang="zh-CN">接口 / 参数</span></th><th><span data-lang="en" lang="en">Shape / return</span><span data-lang="zh" lang="zh-CN">形状 / 返回</span></th><th><span data-lang="en" lang="en">Use & constraints</span><span data-lang="zh" lang="zh-CN">用途与约束</span></th></tr></thead><tbody>
+<tr id="spline-default" data-search-entry>
+<td><code>Spline spline;</code></td>
+<td><code>Spline</code></td>
+<td><span data-lang="en" lang="en">Empty object. Initialize with a successful <code>update()</code> before numerical queries.</span><span data-lang="zh" lang="zh-CN">空对象，需通过成功的 <code>update()</code> 初始化后才能进行数值查询。</span></td>
+</tr>
+<tr id="update" data-search-entry>
+<td><code>update(durations, points, start_time, bc)</code></td>
+<td><code>Status</code></td>
+<td><span data-lang="en" lang="en">N positive durations, <code>(N+1) × D</code> points and a finite absolute start time. Copies inputs into the existing spline.</span><span data-lang="zh" lang="zh-CN">N 个正时长、<code>(N+1) × D</code> 插值点，以及有限的绝对起点时间。输入复制到已有样条。</span></td>
+</tr>
+<tr id="update-knots" data-search-entry>
+<td><code>update(knots, points, bc)</code></td>
+<td><code>Status</code></td>
+<td><span data-lang="en" lang="en">N+1 strictly increasing absolute times, one for each waypoint row. No separate start-time argument; this vector contains knots, not durations.</span><span data-lang="zh" lang="zh-CN">N+1 个严格递增的绝对时刻，与插值点行一一对应。无需另传起点时间；该数组表示时间节点，而非段时长。</span></td>
+</tr>
 <tr id="create" data-search-entry>
 <td><code>create(durations, points, start_time, bc)</code></td>
 <td><code>StatusOr&lt;Spline&gt;</code></td>
-<td><span data-lang="en" lang="en">N positive durations, <code>(N+1) × D</code> points, finite origin. Copies inputs into the new spline.</span><span data-lang="zh" lang="zh-CN">N 个正时长、<code>(N+1) × D</code> 插值点、有限起点时间。输入复制到新样条。</span></td>
+<td><span data-lang="en" lang="en">Optional factory with the same duration-input contract as <code>update()</code>; returns a new owning spline or an error.</span><span data-lang="zh" lang="zh-CN">可选工厂，输入契约与段时长版 <code>update()</code> 相同；返回新的样条对象或错误。</span></td>
 </tr>
 <tr id="create-knots" data-search-entry>
 <td><code>create(knots, points, bc)</code></td>
 <td><code>StatusOr&lt;Spline&gt;</code></td>
-<td><span data-lang="en" lang="en">N+1 strictly increasing absolute times and waypoint rows. Do not pass durations to this overload.</span><span data-lang="zh" lang="zh-CN">N+1 个严格递增的绝对时间与插值点行。此重载不能传入段时长。</span></td>
-</tr>
-<tr id="update" data-search-entry>
-<td><code>update(...)</code></td>
-<td><code>Status</code></td>
-<td><span data-lang="en" lang="en">Reuses fixed-topology storage; recomputes coefficients/factors. Failure invalidates the polynomial. Any update invalidates borrowed views.</span><span data-lang="zh" lang="zh-CN">复用固定拓扑存储，重新计算系数/分解。失败使多项式失效；任何更新均使借用视图失效。</span></td>
+<td><span data-lang="en" lang="en">Optional factory with the same absolute-time contract as <code>update()</code>; returns a new owning spline or an error.</span><span data-lang="zh" lang="zh-CN">可选工厂，输入契约与绝对时间版 <code>update()</code> 相同；返回新的样条对象或错误。</span></td>
 </tr>
 <tr id="boundary-conditions" data-search-entry>
 <td><code>BoundaryConditions&lt;DIM&gt;</code></td>
@@ -154,7 +159,8 @@ Status update(const std::vector&lt;double&gt;&amp; knots,
 <td><span data-lang="en" lang="en"><code>start_velocity/acceleration/jerk</code>, <code>end_velocity/acceleration/jerk</code>; zero by default. Only derivatives supported by the chosen spline participate. Endpoint positions are the first/last waypoints.</span><span data-lang="zh" lang="zh-CN"><code>start_velocity/acceleration/jerk</code> 与 <code>end_velocity/acceleration/jerk</code>，默认零。仅选定样条支持的导数参与构造；端点位置来自首尾插值点。</span></td>
 </tr>
 </tbody></table></div>
-<details class="example" open><summary><span data-lang="en" lang="en">Runnable construction example</span><span data-lang="zh" lang="zh-CN">可运行的构造示例</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="construction"><code>#include &quot;SplineTrajectory.hpp&quot;
+<p><span data-lang="en" lang="en">Both update forms reuse fixed-topology storage and recompute coefficients/factors. Failure invalidates the polynomial; any update invalidates borrowed views. The two runnable examples below describe the same trajectory using durations or absolute times. Both explicitly supply the same boundary conditions; omitting them uses zero endpoint derivatives.</span><span data-lang="zh" lang="zh-CN">两种更新形式均复用固定拓扑存储，重新计算系数与分解。失败使多项式失效；任何更新均使借用视图失效。以下两个可运行示例分别使用段时长和绝对时间，表示同一条轨迹。两者显式传入相同边界条件；省略时端点导数默认为零。</span></p>
+<details class="example" open><summary><span data-lang="en" lang="en">Initialize from segment durations</span><span data-lang="zh" lang="zh-CN">使用段时长初始化</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="construction"><code>#include &quot;SplineTrajectory.hpp&quot;
 #include &lt;iostream&gt;
 
 int main() {
@@ -164,10 +170,26 @@ int main() {
     SplineTrajectory::BoundaryConditions&lt;3&gt; bc;
     bc.start_velocity &lt;&lt; 0.2, 0, 0;
 
-    auto result = Spline::create({1.2, 1.5}, points, 0.0, bc);
-    if (!result) { std::cerr &lt;&lt; result.status().message; return 1; }
-    auto spline = std::move(result).value();
-    auto status = spline.update({1.3, 1.4}, points, 0.0, bc);
+    const std::vector&lt;double&gt; durations{1.2, 1.5};
+    Spline spline;
+    const auto status = spline.update(durations, points, 0.0, bc);
+    if (!status) { std::cerr &lt;&lt; status.message; return 1; }
+    std::cout &lt;&lt; spline.polynomial().evaluate(0.5).transpose() &lt;&lt; &#x27;\n&#x27;;
+}
+</code></pre></details>
+<details class="example" open><summary><span data-lang="en" lang="en">Initialize from absolute times</span><span data-lang="zh" lang="zh-CN">使用绝对时间初始化</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="construction-knots"><code>#include &quot;SplineTrajectory.hpp&quot;
+#include &lt;iostream&gt;
+
+int main() {
+    using Spline = SplineTrajectory::QuinticSplineND&lt;3&gt;;
+    Spline::CoefficientMatrix points(3, 3);
+    points &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
+    SplineTrajectory::BoundaryConditions&lt;3&gt; bc;
+    bc.start_velocity &lt;&lt; 0.2, 0, 0;
+
+    const std::vector&lt;double&gt; knots{0.0, 1.2, 2.7};
+    Spline spline;
+    const auto status = spline.update(knots, points, bc);
     if (!status) { std::cerr &lt;&lt; status.message; return 1; }
     std::cout &lt;&lt; spline.polynomial().evaluate(0.5).transpose() &lt;&lt; &#x27;\n&#x27;;
 }
@@ -372,9 +394,8 @@ int main() {
     using Spline = SplineTrajectory::QuinticSplineND&lt;3&gt;;
     Spline::CoefficientMatrix points(3, 3);
     points &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
-    auto result = Spline::create({1.2, 1.5}, points, 0.0);
-    if (!result) return 1;
-    auto spline = std::move(result).value();
+    Spline spline;
+    if (const auto status = spline.update({1.2, 1.5}, points, 0.0); !status) return 1;
     const auto &amp;poly = spline.polynomial();
     const std::vector&lt;double&gt; times{0.0, 0.5, 1.2, 2.7};
 
@@ -746,9 +767,8 @@ int main() {
     using Spline = SplineTrajectory::QuinticSplineND&lt;3&gt;;
     Spline::CoefficientMatrix points(3, 3);
     points &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
-    auto result = Spline::create({1.2, 1.5}, points, 0.0);
-    if (!result) return 1;
-    auto spline = std::move(result).value();
+    Spline spline;
+    if (const auto status = spline.update({1.2, 1.5}, points, 0.0); !status) return 1;
     SplineTrajectory::ConvexHullWorkspace&lt;3&gt; hull;
     hull.configure(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 0, 1});
     hull.update(spline.polynomial());

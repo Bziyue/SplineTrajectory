@@ -253,25 +253,7 @@ SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterV
 共享转换核不依赖 DIM，相同拓扑的不同维度工作区复用同一个不可变核。
 完整用法见[协议文档](optimizer.md)和[优化示例](../examples/convex_hull_optimizer.cpp)。
 
-## 6. 统一的 3/5/7 次样条名
-
-三个实际使用的最小导数样条现在可统一写成：
-
-```cpp
-SplineTrajectory::MinDerivativeSplineND<DIM, S>
-```
-
-- `S=2`：cubic / minimum acceleration；
-- `S=3`：quintic / minimum jerk；
-- `S=4`：septic / minimum snap。
-
-这是编译期选择器，内部仍使用已经稳定的三个专用线性求解与梯度实现，
-没有运行时分支；旧的 `CubicSplineND`、`QuinticSplineND`、
-`SepticSplineND` 类型名保留；查询和伴随名称按[迁移表](api_migration.md)统一。三个专用实现原位写入
-PPoly 唯一持有的系数矩阵，`Gradients` 提供固定拓扑的 `resetTopology()`/`setZero()`，
-因此统一名字不会牺牲现有专用求解器的热路径性能。
-
-## 7. 优化示例
+## 6. 优化示例
 
 [凸包优化示例](../examples/convex_hull_optimizer.cpp) 使用 GCOPTER L-BFGS，组合分段凸走廊、
 Bezier 速度与加速度控制点边界、minimum-jerk 能量和总时长。运行方法见[示例目录](../examples/README.md)。

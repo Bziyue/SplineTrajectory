@@ -1,8 +1,7 @@
 # Trajectories, sampling and gradients
 
 `CubicSplineND<DIM>`, `QuinticSplineND<DIM>` and `SepticSplineND<DIM>` interpolate waypoints and
-minimize squared acceleration, jerk and snap. `MinDerivativeSplineND<DIM, S>` selects the same
-implementations for `S = 2, 3, 4`.
+minimize squared acceleration, jerk and snap, respectively.
 
 ## Construction
 
