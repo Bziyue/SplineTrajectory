@@ -112,26 +112,38 @@ namespace SplineTrajectory
     /** @brief Smooth positive duration map with an analytic inverse and pullback. */
     struct QuadInvTimeMap
     {
+        /** @brief Map a decision coordinate to physical duration using the quadratic inverse map.
+         * @param tau Finite dimensionless decision coordinate.
+         * @return Computed duration in seconds; Optimizer checks its range once during decoding.
+         * @note Stateless and reentrant; standalone callers own numerical-range validation. */
         StatusOr<double> toTime(double tau) const noexcept
         {
             const double time = tau > 0.0 ? (0.5 * tau + 1.0) * tau + 1.0
                                          : 1.0 / ((0.5 * tau - 1.0) * tau + 1.0);
-            if (!(time > 0.0) || !std::isfinite(time)) return Status{ErrorCode::NumericalFailure, "Unrepresentable mapped duration"};
             return time;
         }
+        /** @brief Invert the duration map for initial decision coordinates.
+         * @param duration Positive physical duration in seconds.
+         * @return Computed coordinate; Optimizer validates the assembled initial vector once.
+         * @note Stateless and reentrant; standalone callers own numerical-range validation. */
         StatusOr<double> toTau(double duration) const noexcept
         {
             const double tau = duration > 1.0 ? std::sqrt(2.0 * duration - 1.0) - 1.0
                                              : 1.0 - std::sqrt(2.0 / duration - 1.0);
-            if (!std::isfinite(tau)) return Status{ErrorCode::NumericalFailure, "Unrepresentable time coordinate"};
             return tau;
         }
-        StatusOr<double> backward(double tau, double, double gradient) const noexcept
+        /** @brief Apply the duration-map chain rule without rescanning intermediate results.
+         * @param tau Dimensionless decision coordinate used for the forward map.
+         * @param time Physical duration in seconds; unused by this analytic derivative.
+         * @param gradient Partial with respect to physical duration.
+         * @return Decision partial; Optimizer checks the final accumulated gradient once.
+         * @note Stateless and reentrant; standalone callers guarantee representable arithmetic. */
+        StatusOr<double> backward(double tau, double time, double gradient) const noexcept
         {
+            (void)time;
             const double denominator = (0.5 * tau - 1.0) * tau + 1.0;
             const double result = tau > 0.0 ? gradient * (tau + 1.0) :
                 gradient * (1.0 - tau) / (denominator * denominator);
-            if (!std::isfinite(result)) return Status{ErrorCode::NumericalFailure, "Nonfinite time pullback"};
             return result;
         }
     };
@@ -663,8 +675,11 @@ namespace SplineTrajectory
             return prepared_.status = Status::success();
         }
 
-        /** @brief Decode and construct exactly once, rejecting invalid data before coefficient costs.
-         * @return Success with the documented output, or an explicit input/state/numerical failure. */
+        /** @brief Decode trusted decision coordinates and construct one trial trajectory.
+         * @param x Finite decision vector matching the prepared layout; checked by the entry point.
+         * @return Success, or an explicit map, duration-domain, knot or factorization failure.
+         * @pre Successful spatial/auxiliary maps preserve declared shapes and prepared topology.
+         * @note Requires exclusive optimizer access. Failure invalidates the candidate spline. */
         Status buildCandidate(const Eigen::VectorXd &x)
         {
             auto reject = [&](Status status) { state_.spline = Spline{}; return status; };
@@ -685,8 +700,6 @@ namespace SplineTrajectory
             {
                 auto point = spaceMap().toPhysical(x.segment(variable.offset, variable.dof), variable.point_index);
                 if (!point) return reject(point.status());
-                if (point.value().size() != DIM)
-                    return reject({ErrorCode::DimensionMismatch, "Spatial map returned the wrong physical dimension", variable.point_index});
                 state_.waypoints.row(variable.point_index) = point.value().transpose();
             }
             int offset = prepared_.layout.boundary_offset;
@@ -700,11 +713,9 @@ namespace SplineTrajectory
                 MutableParameters<Spline> state{state_.durations, state_.waypoints, state_.bc, state_.start_time};
                 if (const auto status = auxiliaryMap().apply(state_.auxiliary_vars, state); !status) return reject(status);
             }
-            if (state_.durations.size() != static_cast<std::size_t>(prepared_.num_segments) ||
-                state_.waypoints.rows() != prepared_.num_segments + 1 || state_.waypoints.cols() != DIM)
-                return reject({ErrorCode::DimensionMismatch, "Parameterization changed the prepared topology"});
-            // Map success promises finite physical outputs; fixed reference values and decision
-            // coordinates were checked at their boundary. Only numerical construction remains.
+            // Time-map range is checked above; other maps promise valid physical outputs.
+            // Reference data and decisions were checked at their own entry, so the spline
+            // can directly construct coefficients without repeating input/output scans.
             return state_.spline.update(state_.durations, state_.waypoints, state_.start_time, state_.bc);
         }
 
@@ -859,8 +870,6 @@ namespace SplineTrajectory
             constexpr bool needs_integral = detail::HasIntegral<O>::value;
             if (const auto status = accumulateCoefficientCosts(objective, executor, cost); !status)
                 return failEvaluation(status, gradient);
-            if (!std::isfinite(cost) || !detail::allFinite(b.grad_coeffs) || !detail::allFinite(b.grad_times) || !std::isfinite(b.grad_start_time))
-                return failEvaluation(error(ErrorCode::NumericalFailure, "Nonfinite coefficient-stage objective or partials"), gradient);
 
             // Inactive coefficient-stage costs need no spline adjoint. Test components
             // exactly: a norm can underflow and incorrectly erase nonzero partials.
@@ -1250,33 +1259,23 @@ namespace SplineTrajectory
                     auto &gj = partials.j; auto &gs = partials.s; auto &gt = partials.time;
                     const IntegralPointInfo point{i, prepared_.num_segments, k, K,
                                                   alpha, T, dt, t, t_global};
+                    // Successful callbacks guarantee valid partials. Only explicit rejection
+                    // stops this segment; the final objective/gradient is checked once outside.
                     const auto evaluated = integral_cost(point, sample_state, partials);
-                    if (!evaluated || !std::isfinite(evaluated.cost))
+                    if (!evaluated)
                     {
                         Status status = evaluated.status;
-                        if (status) status = {ErrorCode::NumericalFailure, "Nonfinite integral cost"};
                         if (status.index < 0) status.index = i * (K + 1) + k;
                         buffers.segment_results[i] = {std::numeric_limits<double>::infinity(), status};
                         return; // Only this segment stops; workers own disjoint result slots.
                     }
                     const double c_val = evaluated.cost;
 
-                    if (record_samples)
-                    {
-                        const int sample_index = i * (K + 1) + k;
-                        IntegralSample &sample = buffers.integral_samples[sample_index];
-                        sample.point = point;
-                        sample.trap_weight = weight_trap;
-                        sample.b_p = b_p.array() * time_powers.transpose().array();
-                        sample.p = p;
-                        sample.v = v;
-                    }
-
                     local_acc_cost += c_val * common_weight;
 
                     // Inactive constraints return exact zero partials. Avoid their outer
                     // products without a norm/tolerance test that could erase small gradients.
-                    // Keep time drift below unconditional so nonfinite states still fail closed.
+                    // Time drift and explicit time partials are accumulated independently.
                     if ((gp.array() != 0.0).any())
                         local_acc_gdC.noalias() += b_p.transpose() * gp.transpose() * common_weight;
                     if constexpr (derivative_order >= 1)
@@ -1302,6 +1301,19 @@ namespace SplineTrajectory
 
                     local_acc_gdT += gt * alpha * common_weight;
                     local_acc_explicit_time_grad += gt * common_weight;
+
+                    // Record the completed sample after numerical accumulation, keeping
+                    // bookkeeping stores separate from the coefficient/time arithmetic.
+                    if (record_samples)
+                    {
+                        const int sample_index = i * (K + 1) + k;
+                        IntegralSample &sample = buffers.integral_samples[sample_index];
+                        sample.point = point;
+                        sample.trap_weight = weight_trap;
+                        sample.b_p = b_p.array() * time_powers.transpose().array();
+                        sample.p = p;
+                        sample.v = v;
+                    }
                 }
 
                 buffers.segment_results[i] = {local_acc_cost, Status::success()};

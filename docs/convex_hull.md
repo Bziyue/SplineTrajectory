@@ -48,9 +48,10 @@ The adjoint has three output forms:
 
 `Into` and `Add` never resize or allocate. Callers provide finite input partials and matching
 pre-sized outputs; shapes and input values are not checked. Invalid workspace state leaves
-both outputs unchanged. Numeric failure during
-accumulation returns `NumericalFailure` and may leave partial output; discard both outputs. Input and output buffers must not alias each
-other or workspace storage. The former resizing three-argument `backward()` is replaced by
+both outputs unchanged. Callers guarantee representable conversion and adjoint arithmetic;
+controls and accumulated gradients are not scanned for overflow. Configuration retains index
+capacity and memory-budget checks. Input and output buffers must not alias each other or
+workspace storage. The former resizing three-argument `backward()` is replaced by
 `backwardInto()`; size its outputs before calling, or use the allocating result overload.
 
 ## Convex constraints

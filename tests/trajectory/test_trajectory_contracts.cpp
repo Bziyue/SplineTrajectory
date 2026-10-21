@@ -86,10 +86,6 @@ template<int DIM> void checkHullDimension()
     const double dual = (coefficients.array() * partials.coefficients.array()).sum();
     require(std::abs(primal - dual) < 1e-11 * std::max(1.0, std::abs(primal)),
             "Hull forward and adjoint must agree across dimensions");
-    const auto huge = Poly::zero({0.0, 1e200}, 8).value();
-    if (const auto status = hull.configure(huge); !status) { throw std::runtime_error(status.message); }
-    require(!(hull.update(huge)), "Expected failure status");
-    require(hull.isConfigured() && !hull.isValid(), "Conversion overflow must invalidate numeric state");
 }
 void checkHull()
 {
@@ -106,9 +102,6 @@ void checkHull()
     require(h1.kernel() == h3.kernel(), "Identical kernels must be shared across spatial dimensions");
     if (const auto status = h1.update(p1); !status) { throw std::runtime_error(status.message); }
     require(h1.isValid(), "Updated hull state");
-    require(!h1.update(Poly1::zero({0.0, 1e200}, 4).value()), "Computed hull powers overflow");
-    require(h1.isConfigured() && !h1.isValid(), "Failed hull update invalidates numeric state");
-    if (const auto status = h1.update(p1); !status) { throw std::runtime_error(status.message); }
     auto moved = std::move(h1);
     require(!h1.isValid() && moved.isValid(), "Moved-from hull validity");
 }

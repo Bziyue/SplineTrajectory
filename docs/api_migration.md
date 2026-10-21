@@ -47,8 +47,9 @@ Value-returning evaluation, energy, gradient, polynomial transform, time-sequenc
 factory APIs now return `StatusOr<T>`. Output-reference variants return `Status`; no extra
 result allocation is required. Low-level inputs are caller-validated: finite values, legal orders
 and indices, matching shapes, and valid time/topology constraints are preconditions. No input
-validation or checked/unchecked pair is provided. Invalid object state and computed numeric
-overflow still return errors. Derivatives above degree remain zero; outside times extrapolate.
+validation or checked/unchecked pair is provided. Callers guarantee representable arithmetic;
+ordinary computed results are not scanned for overflow. Invalid state, unrepresentable time
+knots, factorization failure and resource limits still return errors. Derivatives above degree remain zero; outside times extrapolate.
 `at()` retains `StatusOr<Segment>` but, like `operator[]`, requires an already-valid index.
 
 ## Optimizer replacement
@@ -116,8 +117,8 @@ objective. Preparation is the allocation boundary. After the solver returns, che
 `toBezier()` and `toMINVO()` retain their convenience arguments. The one-argument `backward()`
 still returns owned gradients; `backwardInto()` overwrites pre-sized outputs and `backwardAdd()`
 accumulates into them. Both require caller-validated matching shapes and never resize. `update()`
-requires a valid source matching the configured topology. Computed numeric overflow is
-reported as `NumericalFailure`. The immutable kernel cache is consulted only during configuration; it is shared
+requires a valid source matching the configured topology and a representable numerical range.
+Controls and accumulated gradients are not checked for overflow. The immutable kernel cache is consulted only during configuration; it is shared
 across spatial dimensions. A complete tuple key avoids packed-field collisions.
 
 ## Unified failure contracts

@@ -78,8 +78,10 @@ Output-reference operations return `Status`. Callers guarantee finite input valu
 and indices, positive durations or strictly increasing knots, and matching input/output shapes.
 The low-level APIs do not validate these preconditions. `at()` retains `StatusOr<Segment>` but
 requires the same valid index as `operator[]`. Derivatives above degree remain zero.
-Invalid object state and numerical failure computed from valid inputs still return explicit errors.
-Failed spline construction clears the polynomial. Direct polynomial `update()` copies trusted data.
-Creation uses `create(...)`; borrowed getters retain their documented lifetime/preconditions.
-Batch state failures leave output untouched; a numerical failure can leave a written prefix.
-Discard the entire output on failure; `Status::index` identifies the failed query. See [numerical notes](numerical_notes.md) for conditioning.
+Callers also guarantee a representable working range, including extrapolation. Evaluation,
+coefficient transforms, energy and gradients do not scan their results for overflow.
+Invalid object state still returns an error. Spline construction reports unrepresentable knots
+or failed factorization and clears the polynomial; it does not rescan completed coefficients.
+Direct polynomial `update()` copies trusted data. Creation uses `create(...)`; borrowed getters
+retain their documented lifetime/preconditions. Batch state is checked once before writing,
+so state failures leave output untouched. See [numerical notes](numerical_notes.md) for conditioning.

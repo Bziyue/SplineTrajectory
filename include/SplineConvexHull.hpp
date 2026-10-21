@@ -89,13 +89,17 @@ namespace SplineTrajectory
     {
         struct HullKernelFactory
         {
+            /** @brief Build the configured basis transform from ascending powers.
+             * @param basis Supported Bezier or MINVO basis.
+             * @param degree Supported nonnegative degree with representable conversion arithmetic.
+             * @return Owned matrix, or ResourceLimit when its dimension exceeds index capacity.
+             * @note Reentrant; allocation exceptions propagate normally. */
             static StatusOr<Eigen::MatrixXd> powerToControlMatrix(ConvexHullBasis basis, int degree)
             {
                 if (degree == std::numeric_limits<int>::max())
                     return Status{ErrorCode::ResourceLimit, "Polynomial degree exceeds index capacity"};
                 Eigen::MatrixXd result = basis == ConvexHullBasis::Bezier ?
                     bezierPowerToControlMatrix(degree) : minvoPowerToControlMatrix(degree);
-                if (!detail::allFinite(result)) return Status{ErrorCode::NumericalFailure, "Nonfinite conversion matrix"};
                 return result;
             }
 
@@ -315,8 +319,6 @@ namespace SplineTrajectory
                         fallingFactorial(
                             power + derivative_order,
                             derivative_order);
-                if (!detail::allFinite(kernel->stacked_power_to_control) || !detail::allFinite(kernel->derivative_factors))
-                    return Status{ErrorCode::NumericalFailure, "Nonfinite convex-hull conversion kernel"};
                 return std::shared_ptr<const ConvexHullKernel>(std::move(kernel));
             }
 
@@ -372,10 +374,10 @@ namespace SplineTrajectory
      * metadata, and preallocated scratch required by update()/backwardAdd(); it
      * does not retain or sample the source trajectory.
      * Callers guarantee valid input polynomials, supported options, finite partials and matching
-     * pre-sized input/output shapes. These preconditions are not checked.
-     * Operations return Status or StatusOr. Failed configure/update leaves no valid
-     * numeric result. Adjoint state errors leave outputs unchanged; a numerical failure
-     * may leave partial accumulation, so discard the entire output on failure.
+     * pre-sized input/output shapes, within a representable numerical working range.
+     * These preconditions are not checked; controls and gradients are not scanned for overflow.
+     * Operations return Status or StatusOr. Failed configuration leaves no valid numeric result.
+     * Update requires a configured workspace; adjoint state errors leave outputs unchanged.
      * Fixed-topology update/adjoint does not allocate; allocation exceptions during preparation
      * remain standard allocation failures.
      */
@@ -433,7 +435,7 @@ namespace SplineTrajectory
          * @param source_num_coeffs Positive source coefficient count per segment.
          * @param options Basis, physical derivative order and binary subdivision depth.
          * @param memory_budget_bytes Upper bound for kernel plus workspace storage.
-         * @return Success, or an invalid-state/numerical failure; discard outputs on failure.
+         * @return Success, or ResourceLimit for unrepresentable sizes or an exceeded budget.
          * @pre Positive counts, a supported basis, 0 <= derivative_order < source_num_coeffs,
          *      nonnegative subdivision depth, and MINVO degree <= 7. Inputs are not checked.
          * @note Successful configuration leaves isConfigured() true and isValid() false. */
@@ -497,19 +499,20 @@ namespace SplineTrajectory
         /** @brief Update numeric data with fixed topology, without allocation or locking.
          * @param polynomial Valid source matching the configured topology; data are copied.
          * @pre The caller guarantees the source validity and matching topology; no input checks.
-         * @return Success, or an invalid-state/numerical failure; discard outputs on failure.
+         * @return Success, or an invalid-state failure; discard outputs on failure.
          * @note Requires exclusive workspace access, as does backwardAdd(). */
         template <int MaxCoefficients>
         Status update(const PPolyND<DIM, MaxCoefficients> &polynomial)
         {
             initialized_ = false;
             if (!kernel_) return {ErrorCode::InvalidState, "Configure the convex-hull workspace before updating"};
-            return update(polynomial.breakpoints(), polynomial.coefficients());
+            update(polynomial.breakpoints(), polynomial.coefficients());
+            return Status::success();
         }
 
         /** @brief True after topology configuration, even before the first numeric update. */
         bool isConfigured() const { return bool(kernel_); }
-        /** @brief True only after the latest update produced finite controls. */
+        /** @brief True after numeric update; arithmetic range is guaranteed by the caller. */
         bool isValid() const { return kernel_ && initialized_; }
         /** @brief Compare topology and conversion options without allocating or locking. */
         template <int MaxCoefficients>
@@ -522,7 +525,11 @@ namespace SplineTrajectory
         }
 
         /** @brief Configure storage; may allocate and synchronize the shared kernel cache.
-         * @return Success, or an invalid-state/numerical failure; discard outputs on failure. */
+         * @param polynomial Valid source; only its topology is read during this call.
+         * @param options Supported basis, derivative order and subdivision depth.
+         * @param memory_budget_bytes Upper bound for kernel plus workspace storage.
+         * @return Success, or ResourceLimit for unrepresentable sizes or an exceeded budget.
+         * @note Requires exclusive workspace access; the source is neither retained nor changed. */
         template <int MaxCoefficients>
         Status configure(const PPolyND<DIM, MaxCoefficients> &polynomial, HullOptions options = {},
                        std::size_t memory_budget_bytes = kDefaultMemoryBudgetBytes)
@@ -560,7 +567,7 @@ namespace SplineTrajectory
         /** @brief Allocate and return source coefficient and independent-duration partials.
          * @param control_gradients Finite partials matching the piece-major rows of controls().
          * @return Owned gradients; durations holds local physical-time coefficients fixed.
-         *  Success, or an invalid-state/numerical failure; discard outputs on failure.
+         *  Success, or an invalid-state failure; discard outputs on failure.
          * @note Requires exclusive workspace access. Pass both outputs to the spline adjoint. */
         StatusOr<BackwardResult> backward(const CoefficientMatrix &control_gradients)
         {
@@ -569,7 +576,7 @@ namespace SplineTrajectory
             result.coefficients = CoefficientMatrix::Zero(
                 num_source_segments_ * kernel_->source_num_coeffs, DIM);
             result.durations = Eigen::VectorXd::Zero(num_source_segments_);
-            if (const auto status = accumulateControlGradients(control_gradients, result.coefficients, result.durations); !status) return status;
+            accumulateControlGradients(control_gradients, result.coefficients, result.durations);
             return result;
         }
 
@@ -577,7 +584,7 @@ namespace SplineTrajectory
          * @param control_gradients Finite partials matching the piece-major rows of controls().
          * @param[out] coefficient_gradients Source coefficient-shaped output in caller-owned storage.
          * @param[out] duration_gradients One independent physical-duration partial per source segment.
-         * @return Success, or an invalid-state/numerical failure; discard outputs on failure.
+         * @return Success, or an invalid-state failure; discard outputs on failure.
          * @note The caller supplies matching shapes. Inputs/outputs must not alias each other or
          *       workspace storage. Requires exclusive workspace and output access. */
         Status backwardInto(const CoefficientMatrix &control_gradients,
@@ -588,7 +595,8 @@ namespace SplineTrajectory
 
             coefficient_gradients.setZero();
             duration_gradients.setZero();
-            return accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
+            accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
+            return Status::success();
         }
 
         /**
@@ -600,7 +608,7 @@ namespace SplineTrajectory
          * @param control_gradients Finite partials matching the piece-major rows of controls().
          * @param[in,out] coefficient_gradients Source local-power partials, accumulated in place.
          * @param[in,out] duration_gradients Independent time partials at fixed source coefficients.
-         * @return Success, or an invalid-state/numerical failure; discard outputs on failure.
+         * @return Success, or an invalid-state failure; discard outputs on failure.
          * @note The caller supplies matching shapes. Inputs/outputs must not alias each other or
          *       workspace storage. Mutates scratch storage; requires exclusive workspace/output access.
          */
@@ -609,7 +617,8 @@ namespace SplineTrajectory
                          Eigen::Ref<Eigen::VectorXd> duration_gradients)
         {
             if (!isValid()) return Status{ErrorCode::InvalidState, "Cannot backpropagate an invalid workspace"};
-            return accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
+            accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
+            return Status::success();
         }
 
         /**
@@ -620,7 +629,7 @@ namespace SplineTrajectory
          * @param[in,out] source_duration_gradients Finite accumulated partials, one per source segment.
          * @param[in,out] source_start_time_gradient Finite accumulated common-start partial, per second.
          * @pre Caller guarantees matching shapes and exclusive output access.
-         * @return Success, or an invalid-state/numerical failure. */
+         * @return Success, or an invalid-state failure. */
         Status backwardPieceTimesAdd(
             const Eigen::Ref<const Eigen::VectorXd> &piece_start_gradients,
             const Eigen::Ref<const Eigen::VectorXd> &piece_duration_gradients,
@@ -653,8 +662,6 @@ namespace SplineTrajectory
                 later_start_sum += this_start_sum;
             }
             source_start_time_gradient += later_start_sum;
-            if (!detail::allFinite(source_duration_gradients) || !std::isfinite(source_start_time_gradient))
-                return {ErrorCode::NumericalFailure, "Nonfinite piece-time adjoint"};
             return Status::success();
         }
 
@@ -662,7 +669,7 @@ namespace SplineTrajectory
          * @brief Matrix B such that control = B * normalized_ascending_power.
          * @param basis Supported Bezier or MINVO basis.
          * @param degree Nonnegative polynomial degree; MINVO requires degree <= 7.
-         * @return Conversion matrix, or a resource/numerical failure during construction. */
+         * @return Conversion matrix, or a resource failure during construction. */
         static StatusOr<Eigen::MatrixXd> powerToControlMatrix(ConvexHullBasis basis, int degree)
         { return detail::HullKernelFactory::powerToControlMatrix(basis, degree); }
 
@@ -683,9 +690,9 @@ namespace SplineTrajectory
          * @param control_gradients Borrowed piece-major input partials.
          * @param[in,out] coefficient_gradients Additive local physical-time coefficient partials.
          * @param[in,out] duration_gradients Additive duration partials at fixed source coefficients.
-         * @note Uses exclusive scratch storage; no allocation occurs and buffers must not alias.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status accumulateControlGradients(const CoefficientMatrix &control_gradients,
+         * @pre The workspace is valid and all arithmetic stays within the caller's working range.
+         * @note Uses exclusive scratch storage; no allocation occurs and buffers must not alias. */
+        void accumulateControlGradients(const CoefficientMatrix &control_gradients,
                                         Eigen::Ref<CoefficientMatrix> coefficient_gradients,
                                         Eigen::Ref<Eigen::VectorXd> duration_gradients)
         {
@@ -725,17 +732,14 @@ namespace SplineTrajectory
                     }
                 }
             }
-            if (!detail::allFinite(coefficient_gradients) || !detail::allFinite(duration_gradients))
-                return {ErrorCode::NumericalFailure, "Nonfinite convex-hull adjoint"};
-            return Status::success();
         }
 
         /** @brief Refresh hull controls and adjoint caches at the configured topology.
          * @param breakpoints Strictly increasing physical times, one per segment boundary.
          * @param coefficients Borrowed local-power coefficients; copied into workspace storage.
-         * @return Success, or an invalid-state/numerical failure; discard outputs on failure.
+         * @pre The workspace is configured and the source matches its topology and numerical range.
          * @note Requires exclusive workspace access; fixed-topology updates do not allocate. */
-        Status update(const std::vector<double> &breakpoints,
+        void update(const std::vector<double> &breakpoints,
                     const CoefficientMatrix &coefficients)
         {
             source_coefficients_ = coefficients;
@@ -745,8 +749,6 @@ namespace SplineTrajectory
             {
                 const double duration =
                     breakpoints[segment + 1] - breakpoints[segment];
-                if (!std::isfinite(duration))
-                    return {ErrorCode::NumericalFailure, "Unrepresentable polynomial duration", segment};
                 source_durations_(segment) = duration;
                 duration_powers_(segment, 0) = 1.0;
                 for (int power = 1; power <= kernel_->degree; ++power)
@@ -762,7 +764,7 @@ namespace SplineTrajectory
                     const Vector control = kernel_->derivative_factors(0) *
                         source_coefficients_.row(segment * kernel_->source_num_coeffs +
                                                  kernel_->derivative_order).transpose();
-                    if (!control.allFinite()) return {ErrorCode::NumericalFailure, "Nonfinite hull control", segment};
+
                     for (int row = 0; row < kernel_->leaves_per_segment; ++row)
                         controls_.row(first_row + row) = control.transpose();
                 }
@@ -796,7 +798,7 @@ namespace SplineTrajectory
                             for (int power = 0; power < cp; ++power)
                                 control_pair.noalias() += transform.template block<2, 1>(row, power) *
                                     normalized_derivative_.row(power);
-                            if (!control_pair.allFinite()) return {ErrorCode::NumericalFailure, "Nonfinite hull control", segment};
+
                             controls_.template middleRows<2>(first_row + row) = control_pair;
                         }
                     }
@@ -808,7 +810,7 @@ namespace SplineTrajectory
                         for (int power = 0; power < cp; ++power)
                             control.noalias() += kernel_->stacked_power_to_control(row, power) *
                                 normalized_derivative_.row(power).transpose();
-                        if (!control.allFinite()) return {ErrorCode::NumericalFailure, "Nonfinite hull control", segment};
+
                         controls_.row(first_row + row) = control.transpose();
                     }
                 }
@@ -822,7 +824,6 @@ namespace SplineTrajectory
                 }
             }
             initialized_ = true;
-            return Status::success();
         }
     };
 

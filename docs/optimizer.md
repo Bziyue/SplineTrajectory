@@ -36,7 +36,7 @@ independent value. Evaluation and `updateAccepted()` replace the polynomial. `pr
 `layout()` and `activeMask()` borrow prepared data until preparation, movement or destruction.
 Evaluation never changes that layout. A call does not retain any reference to the objective.
 `energy()` returns the unweighted minimum-derivative energy of the current trajectory without
-copying solver storage, as `StatusOr<double>`; invalid state and overflow return failure.
+copying solver storage, as `StatusOr<double>`; invalid state returns failure; energy arithmetic follows the spline working-range precondition.
 `parameters()` borrows the current physical values for diagnostics. After a failed decode they
 may be only partially updated; use the returned evaluation status and preserve the original decision vector
 when recording a rejected candidate. The view expires on the next evaluation or state change.
@@ -93,11 +93,15 @@ C++17 does not reflect other member names: extra application data are allowed, a
 member alongside another valid stage cannot be diagnosed automatically.
 
 The following signatures use `S` for the spline, `D = S::kDimension`, `Opt = SplineOptimizer<S>`
-and the names in namespace `SplineTrajectory`. A successful map promises finite output with the declared shape. The optimizer validates
-reference/decision inputs at their boundary and calls the same public spline update()/backward()
-as any other caller. The spline, polynomial and hull APIs trust caller-validated inputs; there
-is no separate privileged entry or optimizer friendship. Numerical knot/factorization/coefficient
-failures remain checked during computation. Do not return success with an invalid map result.
+and the names in namespace `SplineTrajectory`. Successful spatial/auxiliary maps and cost
+callbacks promise valid outputs with the declared shapes. The optimizer checks reference data
+once during preparation, new decisions once per evaluation, and decoded durations once during
+candidate construction. It calls the same public spline update()/backward() as any other caller.
+The spline, polynomial and hull APIs trust caller-validated inputs and representable working
+ranges; there is no privileged entry or optimizer friendship. Knot/factorization failures and
+explicit callback/map failures propagate immediately. Intermediate coefficient partials and
+individual integral costs are not rescanned; final cost and decision/start-time gradients are
+checked once after all contributions.
 
 Outputs are **additive**. Do not resize a gradient,
 clear contributions from previous stages or include weights already handled by the optimizer.
@@ -192,7 +196,9 @@ auxiliary transformation. This matters for maps whose derivative uses the physic
 such as the exponential map. `QuadInvTimeMap` is the default; `IdentityTimeMap` is also available.
 The optimizer rejects nonpositive/nonfinite decoded durations. Unrepresentable cumulative times
 are detected during spline construction. Built-in identity maps copy caller-validated data;
-nonlinear maps still report overflow produced by their own computation.
+the built-in nonlinear map also performs arithmetic directly. The optimizer checks its forward
+result during candidate decoding, its inverse result in the initial decision vector, and its
+pullback in the final accumulated gradient. Standalone callers own numerical-range validation.
 
 ### Spatial map
 

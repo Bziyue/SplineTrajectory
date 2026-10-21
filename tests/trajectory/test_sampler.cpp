@@ -45,8 +45,6 @@ void checkSampler()
     for (double t : {1.9, 2.0, 2.0, 2.2, 2.3, 3.2, 3.25, 4.0, 4.1, 3.21, 2.0, 4.0}) verify(t);
     for (int k = 0; k <= 200; ++k) verify(2.0 + 0.01 * k);
     Eigen::internal::set_is_malloc_allowed(true);
-    const auto invalid = sample.evaluateDerivatives(1e200);
-    require(!invalid && invalid.status().code == SplineTrajectory::ErrorCode::NumericalFailure, "finite extrapolation overflow must return a numerical error");
 
     // Each worker performs its first query on a never-sampled immutable source.
     const auto cold = Poly::create(knots, coefficients, count).value();
