@@ -6,7 +6,7 @@
 
 [English](README.md) | **中文**
 
-[**HTML API 文档 · 中文 / English**](docs/api/index.html?lang=zh) — 本地打开即可查阅分类接口与维度表、双语搜索和交互曲线。
+[**在线 API 文档 · 中文 / English**](https://bziyue.github.io/SplineTrajectory/api/?lang=zh) — 直接查阅函数签名、数据维度、双语搜索和交互图示，无需构建。
 
 ## ✨ 概览
 
@@ -54,7 +54,7 @@
 
 - 将决策变量映射为正时长、空间点与可选的辅助状态。
 - 组合能量、时间、采样状态与控制点代价。
-- 通过 `costAndGradient()` 向 L-BFGS 或其他数值求解器提供代价与梯度。
+- 通过 `evaluate()` 和显式的标量回调向 L-BFGS 或其他数值求解器提供代价与梯度。
 
 下方快速开始给出最小用法，自定义映射与目标协议见[优化器参考](docs/optimizer.md)。
 
@@ -86,6 +86,7 @@ GCOPTER 组比较五次最小 jerk，SUPER 组比较七次最小 snap；两组�
 
 下表为 2026-09-12 的记录，公共头文件版本 `54abad9`：GCC 9.4、Eigen 3.3.7、
 C++17 `-O3 -fno-fast-math`、Ryzen 9 7945HX，固定一个逻辑 CPU，未启用 LTO。
+这些历史数据及下方内核图表不代表当前 `main` 版本的实测性能。
 
 | 项目组 | 问题 | 段数 | 代价与梯度，MINCO / Optimizer（µs） | 完整求解，MINCO / Optimizer（ms） |
 | --- | --- | ---: | ---: | ---: |
@@ -135,7 +136,7 @@ MINCO 为项目原始后端，Optimizer 为 SplineTrajectory 配合 `SplineOptim
 
 ## 🚀 快速开始
 
-需要支持 C++17 的编译器、CMake ≥ 3.12、Eigen ≥ 3.3；测试工具还需要 Python 3。
+库本身需要 C++17 和 Eigen ≥ 3.3。仓库构建使用 CMake ≥ 3.12；测试工具还需要 Python 3。
 
 ```sh
 git clone https://github.com/Bziyue/SplineTrajectory.git
@@ -149,6 +150,8 @@ cmake --build build --parallel 3
 
 默认构建测试与示例。性能基准通过 `-DSPLINE_BUILD_BENCHMARKS=ON` 启用。
 仅使用库时，可关闭 `BUILD_TESTING`、`SPLINE_BUILD_EXAMPLES` 和 `SPLINE_BUILD_BENCHMARKS`，或直接包含头文件。
+本机性能测试可添加 `-DSPLINE_NATIVE_ARCH=ON`，按构建机器的 CPU 优化仓库内可执行程序。
+该选项不会传递给下游项目；CMake 接入与编译选项见[构建指南](docs/building.md)。
 
 ### 创建样条
 
@@ -159,10 +162,15 @@ using Spline = SplineTrajectory::QuinticSplineND<3>;
 Spline::CoefficientMatrix points(3, 3);
 points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
 std::vector<double> durations{1.2, 1.5};
-Spline spline(durations, points, 0.0);
-if (!spline.isValid()) throw std::runtime_error("Invalid spline");
-auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // position, velocity, acceleration
+auto created = Spline::create(durations, points, 0.0);
+if (!created) return 1;
+auto spline = std::move(created).value();
+auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // 位置、速度、加速度
 ```
+
+底层样条、多项式和凸包接口要求调用方保证输入维度正确、数值有限，以及分段时长为正。
+数值构造失败通过 `Status` / `StatusOr` 返回；优化器在 `prepare()` 阶段检查问题输入。
+详见[接口契约](https://bziyue.github.io/SplineTrajectory/api/?lang=zh#contracts)。
 
 ### 创建优化器
 
@@ -175,15 +183,19 @@ SplineTrajectory::SplineOptimizer<Spline> optimizer;
 SplineTrajectory::SplineProblem<Spline> problem;
 problem.waypoints = points;
 problem.durations = durations;
-if (!optimizer.prepare(problem)) throw std::runtime_error("Invalid problem");
+if (!optimizer.prepare(problem)) return 1;
 auto x = optimizer.initialGuess();
 Eigen::VectorXd gradient(x.size());
-SplineTrajectory::NoObjective objective; // minimum-jerk energy only
-const double cost = optimizer.costAndGradient(x, gradient, objective);
+SplineTrajectory::NoObjective objective; // 仅最小 jerk 能量
+const auto result = optimizer.evaluate(x, gradient, objective);
+if (!result) return 1;
+const double cost = result.cost;
 ```
 
-在目标结构体中按需声明 `duration`、`integral` 或 `coefficient` 成员，即可组合时间、状态与控制点代价。
-外部求解器调用 `costAndGradient`；求解结束后，先调用 `updateAccepted(x)` 再读取轨迹。
+仅在 `prepare()` 成功后调用 `initialGuess()`。在目标结构体中按需声明 `duration`、`integral`
+或 `coefficient` 成员，即可组合时间、状态与控制点代价。
+外部求解器将 `evaluate()` 适配为标量回调并检查返回状态；求解结束后，
+先调用 `updateAccepted(x)` 并确认成功，再读取轨迹。
 完整接入见 [GCOPTER L-BFGS 示例](examples/README.md)。
 
 ## 🧰 示例与文档
@@ -196,6 +208,7 @@ const double cost = optimizer.costAndGradient(x, gradient, objective);
 | [动力学约束](examples/dynamics_optimizer.cpp) | 速度与加速度惩罚 |
 | [凸包优化](examples/convex_hull_optimizer.cpp) | Bezier 走廊与导数控制点边界 |
 
+[在线 API 文档](https://bziyue.github.io/SplineTrajectory/api/?lang=zh) ·
 [采样与梯度](docs/trajectory.md) · [优化器参考](docs/optimizer.md) ·
 [凸包](docs/convex_hull.md) · [性能基准](docs/benchmarks.md) · [数值说明](docs/numerical_notes.md)
 

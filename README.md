@@ -7,7 +7,7 @@ interface, and differentiable convex-hull conversions.
 
 **English** | [中文](README_zh.md)
 
-[**HTML API reference · English / 中文**](docs/api/index.html) — open locally for task-based API tables, bilingual search and interactive plots.
+[**Online API reference · English / 中文**](https://bziyue.github.io/SplineTrajectory/api/?lang=en) — signatures, data shapes, bilingual search and interactive plots. No build required.
 
 ## ✨ Overview
 
@@ -95,6 +95,7 @@ The two planner groups solve different formulations and are compared separately.
 
 Recorded on 2026-09-12 with headers at `54abad9`: GCC 9.4, Eigen 3.3.7, C++17
 `-O3 -fno-fast-math`, Ryzen 9 7945HX, one logical CPU, no LTO.
+These historical results and the kernel plots below do not measure the current `main` revision.
 
 | Group | Problem | Segments | Cost + Gradient, MINCO / Optimizer (µs) | Solve, MINCO / Optimizer (ms) |
 | --- | --- | ---: | ---: | ---: |
@@ -145,7 +146,8 @@ Related planner implementations using SplineTrajectory, each with its own integr
 
 ## 🚀 Quick Start
 
-Requires a C++17 compiler, CMake ≥ 3.12, Eigen ≥ 3.3 and Python 3 for the test tools.
+The library requires C++17 and Eigen ≥ 3.3. The repository build uses CMake ≥ 3.12;
+the test tools also require Python 3.
 
 ```sh
 git clone https://github.com/Bziyue/SplineTrajectory.git
@@ -160,6 +162,9 @@ cmake --build build --parallel 3
 Examples and tests build by default. Enable performance comparisons with
 `-DSPLINE_BUILD_BENCHMARKS=ON`. To use only the library, disable `BUILD_TESTING`,
 `SPLINE_BUILD_EXAMPLES` and `SPLINE_BUILD_BENCHMARKS`, or include the headers directly.
+For local performance measurements, add `-DSPLINE_NATIVE_ARCH=ON` to tune repository
+executables for the build machine's CPU. This option does not propagate to consumers;
+see [build and integration](docs/building.md) for CMake integration and compiler settings.
 
 ### Create a spline
 
@@ -175,6 +180,11 @@ if (!created) return 1;
 auto spline = std::move(created).value();
 auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // position, velocity, acceleration
 ```
+
+Low-level spline, polynomial and hull APIs expect caller-validated input shapes and finite
+values, with positive segment durations. Numerical construction failures use `Status` /
+`StatusOr`; the optimizer validates its problem at `prepare()`. See the
+[API contracts](https://bziyue.github.io/SplineTrajectory/api/?lang=en#contracts).
 
 ### Create an optimizer
 
@@ -196,9 +206,11 @@ if (!result) return 1;
 const double cost = result.cost;
 ```
 
-Add named `duration`, `integral` or `coefficient` members to an objective to combine time,
-state and control-point costs. An external solver adapts `evaluate()` to its scalar callback and inspects the returned status; after solving,
-call `updateAccepted(x)` before reading the trajectory. See the [GCOPTER L-BFGS examples](examples/README.md).
+Call `initialGuess()` only after successful `prepare()`. Add named `duration`, `integral`
+or `coefficient` members to an objective to combine time, state and control-point costs.
+An external solver adapts `evaluate()` to its scalar callback and inspects the returned
+status; after solving, call `updateAccepted(x)` and check its status before reading the
+trajectory. See the [GCOPTER L-BFGS examples](examples/README.md).
 
 ## 🧰 Examples and Documentation
 
@@ -210,6 +222,7 @@ call `updateAccepted(x)` before reading the trajectory. See the [GCOPTER L-BFGS 
 | [Dynamics](examples/dynamics_optimizer.cpp) | Speed and acceleration penalties |
 | [Convex hull](examples/convex_hull_optimizer.cpp) | Bezier corridor and derivative control-point bounds |
 
+[Online API reference](https://bziyue.github.io/SplineTrajectory/api/?lang=en) ·
 [Sampling and gradients](docs/trajectory.md) · [Optimizer reference](docs/optimizer.md) ·
 [Convex hulls](docs/convex_hull.md) · [Benchmarks](docs/benchmarks.md) · [Numerical notes](docs/numerical_notes.md)
 

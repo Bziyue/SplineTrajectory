@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="SplineTrajectory 中英双语 API 文档：样条构造、求值采样、解析梯度、优化器与凸包。Bilingual offline API reference.">
+  <meta name="description" content="SplineTrajectory 中英双语 API 文档：样条构造、求值采样、解析梯度、优化器与凸包。Bilingual API reference with interactive plots.">
   <title>SplineTrajectory · API 文档</title>
   <link rel="stylesheet" href="style.css">
   <script defer src="app.js"></script>
@@ -44,7 +44,7 @@
 <a class="nav-child" href="#hull-adjoint"><span data-lang="en" lang="en">Hull gradients</span><span data-lang="zh" lang="zh-CN">凸包梯度</span></a>
 <a class="nav-child" href="#hull-demo"><span data-lang="en" lang="en">Subdivision explorer</span><span data-lang="zh" lang="zh-CN">细分示意</span></a>
 </div>
-</nav><div class="sidebar-footer">C++17 · Eigen<br><span data-lang="en" lang="en">Offline reference</span><span data-lang="zh" lang="zh-CN">离线 API 参考</span></div></aside><main id="main">
+</nav><div class="sidebar-footer">C++17 · Eigen<br><span data-lang="en" lang="en">Online &amp; offline reference</span><span data-lang="zh" lang="zh-CN">在线与离线 API 参考</span></div></aside><main id="main">
 <section id="overview" class="module intro"><div class="page-heading"><h1><span data-lang="en" lang="en">API reference</span><span data-lang="zh" lang="zh-CN">API 文档</span></h1><span class="version-tag">3 headers</span></div>
 <p><span data-lang="en" lang="en">Construction, evaluation and differentiation for minimum-control-effort trajectories. Interfaces are grouped by task; the three independent spline solvers share one reference below.</span><span data-lang="zh" lang="zh-CN">最小控制量轨迹的构造、求值与梯度计算。按使用任务组织接口，三套独立样条实现的公共接口统一说明。</span></p>
 <div class="data-flow" aria-label="Data flow / 数据流"><div><span data-lang="en" lang="en">Durations · waypoints · boundaries</span><span data-lang="zh" lang="zh-CN">时长 · 插值点 · 边界</span><small><code>T, P, bc</code></small></div><b>→</b><a href="#construction">Spline<small><span data-lang="en" lang="en">Build / update</span><span data-lang="zh" lang="zh-CN">构造 / 更新</span></small></a><b>→</b><a href="#sampling">PPolyND<small><span data-lang="en" lang="en">Evaluate / sample</span><span data-lang="zh" lang="zh-CN">求值 / 采样</span></small></a><b>↔</b><a href="#adjoint"><span data-lang="en" lang="en">Costs & gradients</span><span data-lang="zh" lang="zh-CN">代价与梯度</span><small>Optimizer · Hull</small></a></div>
