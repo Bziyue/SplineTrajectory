@@ -303,8 +303,8 @@ void runSepticTest()
 
             minco_solvers[j].setConditions(head, tail, num_segments);
 
-            // 安全地设置中间waypoints
-            Eigen::MatrixXd minco_points = Eigen::MatrixXd::Zero(3, num_points - 2);
+            // MINCO 中间点固定为三维，明确行数以限定 Eigen 的向量化宽度。
+            Eigen::Matrix3Xd minco_points = Eigen::Matrix3Xd::Zero(3, num_points - 2);
             for (int k = 1; k < num_points - 1; ++k)
             {
                 Eigen::Vector3d waypoint_3d = make3DFromND(waypoints_mat.row(k).transpose(), start_dim);
@@ -361,7 +361,8 @@ void runSepticTest()
 
         minco_solvers_for_query[j].setConditions(head, tail, num_segments);
 
-        Eigen::MatrixXd minco_points = Eigen::MatrixXd::Zero(3, num_points - 2);
+        // MINCO 中间点固定为三维，明确行数以限定 Eigen 的向量化宽度。
+        Eigen::Matrix3Xd minco_points = Eigen::Matrix3Xd::Zero(3, num_points - 2);
         for (int k = 1; k < num_points - 1; ++k)
         {
             Eigen::Vector3d waypoint_3d = make3DFromND(waypoints_mat.row(k).transpose(), start_dim);
@@ -399,7 +400,9 @@ void runSepticTest()
             if (start_dim < DIM)
             {
                 Eigen::Vector3d pos_3d = minco_trajs[j].getPos(time_seq[i]);
-                p.segment(start_dim, current_dim) = pos_3d.head(current_dim);
+                // 按有效分量拷贝，避免一维目标触发 Eigen SIMD 越界告警。
+                for (int k = 0; k < current_dim; ++k)
+                    p(start_dim + k) = pos_3d(k);
             }
         }
     };
@@ -447,11 +450,15 @@ void runSepticTest()
                 Eigen::Vector3d jerk_3d = minco_trajs[j].getJer(t);
                 Eigen::Vector3d snap_3d = minco_trajs[j].getSnap(t); // 七次样条的四阶导数
 
-                p.segment(start_dim, current_dim) = pos_3d.head(current_dim);
-                v.segment(start_dim, current_dim) = vel_3d.head(current_dim);
-                a.segment(start_dim, current_dim) = acc_3d.head(current_dim);
-                jrk.segment(start_dim, current_dim) = jerk_3d.head(current_dim);
-                snp.segment(start_dim, current_dim) = snap_3d.head(current_dim);
+                // 按有效分量拷贝，避免一维目标触发 Eigen SIMD 越界告警。
+                for (int k = 0; k < current_dim; ++k)
+                {
+                    p(start_dim + k) = pos_3d(k);
+                    v(start_dim + k) = vel_3d(k);
+                    a(start_dim + k) = acc_3d(k);
+                    jrk(start_dim + k) = jerk_3d(k);
+                    snp(start_dim + k) = snap_3d(k);
+                }
             }
         }
         minco_pos[i] = p;

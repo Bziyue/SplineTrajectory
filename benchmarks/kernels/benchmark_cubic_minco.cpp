@@ -273,7 +273,10 @@ void runTest()
         {
             int start_dim = j * 3;
             int current_dim = std::min(3, DIM - start_dim);
-            p.segment(start_dim, current_dim) = minco_trajs[j].getPos(time_seq[i]).head(current_dim);
+            const Eigen::Vector3d pos_3d = minco_trajs[j].getPos(time_seq[i]);
+            // 按有效分量拷贝，避免一维目标触发 Eigen SIMD 越界告警。
+            for (int k = 0; k < current_dim; ++k)
+                p(start_dim + k) = pos_3d(k);
         }
     };
     auto perf_minco = measurePerformance(minco_func, num_queries);
@@ -316,10 +319,14 @@ void runTest()
                 Eigen::Vector3d acc_3d = minco_trajs[j].getAcc(t);
                 Eigen::Vector3d jerk_3d = minco_trajs[j].getJer(t);
 
-                p.segment(start_dim, current_dim) = pos_3d.head(current_dim);
-                v.segment(start_dim, current_dim) = vel_3d.head(current_dim);
-                a.segment(start_dim, current_dim) = acc_3d.head(current_dim);
-                jrk.segment(start_dim, current_dim) = jerk_3d.head(current_dim);
+                // 按有效分量拷贝，避免一维目标触发 Eigen SIMD 越界告警。
+                for (int k = 0; k < current_dim; ++k)
+                {
+                    p(start_dim + k) = pos_3d(k);
+                    v(start_dim + k) = vel_3d(k);
+                    a(start_dim + k) = acc_3d(k);
+                    jrk(start_dim + k) = jerk_3d(k);
+                }
             }
         }
         minco_pos[i] = p;
