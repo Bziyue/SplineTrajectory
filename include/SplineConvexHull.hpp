@@ -433,6 +433,16 @@ namespace SplineTrajectory
             update(polynomial.breakpoints(), polynomial.coefficients());
         }
 
+        /** @brief Update with explicit options, preparing storage only when topology or options change.
+         * @pre Valid polynomial and supported options, as required by prepare().
+         * @note Preparation may allocate and synchronize the kernel cache; matching updates do neither. */
+        template <int MaxCoefficients>
+        void update(const PPolyND<DIM, MaxCoefficients> &polynomial, HullOptions options)
+        {
+            if (!matches(polynomial, options)) prepare(polynomial, options);
+            update(polynomial);
+        }
+
         /** @brief True after topology preparation, even before the first numeric update. */
         bool isPrepared() const { return bool(kernel_); }
         /** @brief True after numeric update; arithmetic range is guaranteed by the caller. */
@@ -458,7 +468,7 @@ namespace SplineTrajectory
             prepare(polynomial.numSegments(), polynomial.coefficientCount(), options);
         }
         ConvexHullBasis basis() const { return kernel_ ? kernel_->basis : ConvexHullBasis::Bezier; }
-        int derivativeOrder() const { return kernel_ ? kernel_->derivative_order : 0; }
+        DerivativeOrder derivativeOrder() const { return kernel_ ? kernel_->derivative_order : 0; }
         int degree() const { return kernel_ ? kernel_->degree : 0; }
         int sourceDegree() const { return kernel_ ? kernel_->source_num_coeffs - 1 : -1; }
         int subdivisionDepth() const { return kernel_ ? kernel_->subdivision_depth : 0; }
@@ -467,22 +477,26 @@ namespace SplineTrajectory
         int numPieces() const { return static_cast<int>(pieces_.size()); }
         int controlsPerPiece() const { return kernel_ ? kernel_->degree + 1 : 0; }
 
-        const CoefficientMatrix &controls() const { return controls_; }
-        const std::vector<PieceInfo> &pieces() const { return pieces_; }
+        const CoefficientMatrix &controls() const & { return controls_; }
+        const CoefficientMatrix &controls() const && = delete;
+        const std::vector<PieceInfo> &pieceInfos() const & { return pieces_; }
+        const std::vector<PieceInfo> &pieceInfos() const && = delete;
         /** @brief Borrow metadata for a prepared piece.
          * @param piece_index Index in [0, numPieces()). @return Borrow valid until preparation or update.
          * @pre The workspace is prepared and the index is in range. */
-        const PieceInfo &pieceInfo(int piece_index) const
+        const PieceInfo &pieceInfo(int piece_index) const &
         { assert(isPrepared()); return pieces_[piece_index]; }
+        const PieceInfo &pieceInfo(int) const && = delete;
 
         /** @brief Borrow controls of a valid piece without copying.
          * @param piece_index Index in [0, numPieces()). @return View valid until workspace mutation.
          * @pre The latest update succeeded; the piece index is in range. */
-        auto pieceControls(int piece_index) const
+        auto pieceControls(int piece_index) const &
         {
             assert(isValid());
             return controls_.middleRows(piece_index * controlsPerPiece(), controlsPerPiece());
         }
+        auto pieceControls(int) const && = delete;
 
         /** @brief Allocate and return source coefficient and independent-duration partials.
          * @param control_gradients Finite partials matching the piece-major rows of controls().

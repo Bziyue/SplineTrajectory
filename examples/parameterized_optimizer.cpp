@@ -60,7 +60,7 @@ struct BoxCoordinates
 struct SharedCoordinates
 {
     int dimension() const { return 2; }
-    SplineTrajectory::StatusOr<Eigen::VectorXd> initial(const SplineTrajectory::SplineProblem<Spline::kDimension> &) const
+    SplineTrajectory::StatusOr<Eigen::VectorXd> initial(const SplineTrajectory::SplineInput<Spline::kDimension> &) const
     { return Eigen::VectorXd(Eigen::VectorXd::Zero(2)); }
     SplineTrajectory::Status apply(const Eigen::Ref<const Eigen::VectorXd> &x, SplineTrajectory::MutableParameters<Spline> &state) const
     {
@@ -83,9 +83,9 @@ struct SharedCoordinates
                     Eigen::Ref<Eigen::VectorXd> output) const
     {
         output(0) += gradient.start_time;
-        for (int i = 0; i < gradient.spline.durations.size(); ++i)
-            output(1) += gradient.spline.durations(i) * state.durations[i];
-        gradient.spline.durations *= std::exp(x(1));
+        for (int i = 0; i < gradient.durations.size(); ++i)
+            output(1) += gradient.durations(i) * state.durations[i];
+        gradient.durations *= std::exp(x(1));
         return SplineTrajectory::Status::success();
     }
 };
@@ -158,5 +158,5 @@ int main()
     x(optimizer.layout().auxiliary_offset + 1) = 0.1;
     const auto check = SplineTrajectory::checkGradients(optimizer, x, objective, 1e-5, 2e-4);
     if (!check) { std::cerr << check.status.message << ": " << check.error_norm << '\n'; return 1; }
-    std::cout << "dimension=" << optimizer.dimension() << " maximum_gradient_error=" << check.max_absolute_error << '\n';
+    std::cout << "dimension=" << optimizer.decisionDimension() << " maximum_gradient_error=" << check.max_absolute_error << '\n';
 }

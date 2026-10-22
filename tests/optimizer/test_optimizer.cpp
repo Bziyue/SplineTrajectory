@@ -15,9 +15,9 @@ using Matrix = Spline::CoefficientMatrix;
 using spline_test::require;
 
 template<class Curve = Spline>
-SplineTrajectory::SplineProblem<Curve::kDimension> makeProblem()
+SplineTrajectory::SplineInput<Curve::kDimension> makeProblem()
 {
-    SplineTrajectory::SplineProblem<Curve::kDimension> problem;
+    SplineTrajectory::SplineInput<Curve::kDimension> problem;
     problem.durations = {1.2, 1.5};
     problem.start_time = 2.0;
     problem.waypoints.resize(3, 3);
@@ -32,7 +32,7 @@ struct DurationCost
         SplineTrajectory::ParameterGradientView<Curve> &output) const
     {
         const auto &times = state.durations;
-        auto &gradient = output.spline.durations;
+        auto &gradient = output.durations;
         double cost = 0.0;
         for (double duration : times) cost += duration;
         gradient.array() += 1.0;
@@ -110,10 +110,10 @@ void testInputAndAcceptedState()
     auto problem = makeProblem();
     SplineTrajectory::OptimizationMask mask;
     mask.durations = {1};
-    problem.mask = mask;
-    require(!optimizer.prepare(problem, SplineTrajectory::NoObjective{}), "reject malformed mask");
+    SplineTrajectory::OptimizerOptions options;
+    options.mask = mask;
+    require(!optimizer.prepare(problem, options, SplineTrajectory::NoObjective{}), "reject malformed mask");
     require(!optimizer.isPrepared() && !optimizer.polynomial().isValid(), "failed preparation invalidates state");
-    problem.mask.reset();
     require(bool(optimizer.prepare(problem, SplineTrajectory::NoObjective{})), "prepare valid problem after rejection");
     auto x = optimizer.initialGuess();
     Eigen::VectorXd gradient;

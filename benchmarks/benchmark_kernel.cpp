@@ -74,7 +74,7 @@ int main(int argc, char **argv)
 #ifdef BENCH_OLD
         const double energy = spline.getEnergy(), checksum = gradient.trajectory_times.sum() + gradient.inner_points.sum();
 #else
-        const double energy = spline.energy(), checksum = gradient.durations.sum() + gradient.inner_points.sum();
+        const double energy = spline.energy(), checksum = gradient.durations.sum() + gradient.waypoints.middleRows(1, n - 1).sum();
 #endif
         std::cout << BENCH_DEGREE << ',' << BENCH_DIMENSION << ',' << n << ',' << first_us << ','
                   << build << ',' << reverse << ',' << energy << ',' << checksum << ',' << sizeof(Spline) << '\n';

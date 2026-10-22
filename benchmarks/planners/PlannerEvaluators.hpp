@@ -120,7 +120,7 @@ public:
 #endif
         if constexpr(UseSpline) {
             kernel_.backward(partial_coefficients_,partial_times_,spline_gradients_);
-            gradient_points_=spline_gradients_.inner_points.transpose(); gradient_times_=spline_gradients_.durations;
+            gradient_points_=spline_gradients_.waypoints.middleRows(1, spline_gradients_.waypoints.rows() - 2).transpose(); gradient_times_=spline_gradients_.durations;
         } else kernel_.propogateGrad(partial_coefficients_,partial_times_,gradient_points_,gradient_times_);
         cost+=problem_.time_weight*times_.sum(); gradient_times_.array()+=problem_.time_weight;
         Eigen::Map<Eigen::VectorXd> gradient_tau(gradient.data(),problem_.segments);

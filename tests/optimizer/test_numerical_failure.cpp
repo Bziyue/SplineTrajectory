@@ -60,7 +60,7 @@ void CheckEvaluationFailures()
   auto time_cost = [&](const SplineTrajectory::ParameterView<Spline> &state,
                        SplineTrajectory::ParameterGradientView<Spline> &gradient) {
     const auto &times = state.durations;
-    auto &g = gradient.spline.durations;
+    auto &g = gradient.durations;
     ++time_calls;
     g.array() += 1.0;
     return SplineTrajectory::EvaluationResult{nonfinite_cost ? std::numeric_limits<double>::infinity() : times[0] + times[1], {}};

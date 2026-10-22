@@ -704,8 +704,10 @@ namespace SplineTrajectory
             coefficients_.resize(0, DIM);
         }
 
-        ConstIterator begin() const { return ConstIterator(this, 0); }
-        ConstIterator end() const { return ConstIterator(this, num_segments_); }
+        ConstIterator begin() const & { return ConstIterator(this, 0); }
+        ConstIterator begin() const && = delete;
+        ConstIterator end() const & { return ConstIterator(this, num_segments_); }
+        ConstIterator end() const && = delete;
 
         Segment operator[](int idx) const &
         {
@@ -893,8 +895,10 @@ namespace SplineTrajectory
         double startTime() const { return breakpoints_.empty() ? 0.0 : breakpoints_.front(); }
         double endTime() const { return breakpoints_.empty() ? 0.0 : breakpoints_.back(); }
         double duration() const { return endTime() - startTime(); }
-        const std::vector<double> &breakpoints() const { return breakpoints_; }
-        const CoefficientMatrix &coefficients() const { return coefficients_; }
+        const std::vector<double> &breakpoints() const & { return breakpoints_; }
+        const std::vector<double> &breakpoints() const && = delete;
+        const CoefficientMatrix &coefficients() const & { return coefficients_; }
+        const CoefficientMatrix &coefficients() const && = delete;
 
         /** @brief Generate increasing query times on the caller's time axis, including both endpoints.
          * @param start_t Finite interval start in seconds. @param end_t Finite end, at or after start.
@@ -960,10 +964,10 @@ namespace SplineTrajectory
             return create(breakpoints_, new_coeffs, new_order);
         }
 
-        /** @brief Extract and rebase an interval using exact coefficient translation.
+        /** @brief Extract an interval on the original time axis using exact coefficient translation.
          * @param start Start on the original time axis, within the source domain.
          * @param end End on the original axis, strictly after start and within the source domain.
-         * @return Owned zero-origin spline, or a failure for invalid state or unrepresentable time knots.
+         * @return Owned polynomial on [start, end], or a failure for invalid state.
          * @note Preserves piece boundaries and coefficients outside the first clipped piece; const and reentrant. */
         StatusOr<PPolyND> extractInterval(double start, double end) const
         {
@@ -986,20 +990,32 @@ namespace SplineTrajectory
                             coefficients_.row(first * num_coeffs_ + source);
                     }
             }
-            std::vector<double> times{0.0};
+            std::vector<double> times{start};
             for (int i = first; i < last; ++i)
-            {
-                const double next = times.back() + std::min(end, breakpoints_[i + 1]) - std::max(start, breakpoints_[i]);
-                if (!std::isfinite(next) || next <= times.back())
-                    return Status{ErrorCode::NumericalFailure, "Unrepresentable extracted time knot", i};
-                times.push_back(next);
-            }
+                times.push_back(std::min(end, breakpoints_[i + 1]));
 
             return create(times, coefficients, num_coeffs_);
         }
 
-        /** @brief Append two zero-origin splines at coefficient level without a continuity policy.
-         * @param suffix Same-order zero-origin spline appended after this value.
+        /** @brief Copy a polynomial onto a new time origin, preserving local coefficients.
+         * @param new_start Finite start on the caller's trajectory time axis.
+         * @return Owned shifted polynomial, or a state/unrepresentable-knot failure. */
+        StatusOr<PPolyND> rebased(double new_start) const
+        {
+            if (!is_initialized_) return Status{ErrorCode::InvalidState, "Polynomial is not initialized"};
+            std::vector<double> times{new_start};
+            for (int i = 1; i <= num_segments_; ++i)
+            {
+                const double next = new_start + (breakpoints_[i] - startTime());
+                if (!std::isfinite(next) || next <= times.back())
+                    return Status{ErrorCode::NumericalFailure, "Unrepresentable rebased time knot", i};
+                times.push_back(next);
+            }
+            return create(times, coefficients_, num_coeffs_);
+        }
+
+        /** @brief Append a polynomial after this value, shifting its time origin to the seam.
+         * @param suffix Valid same-order polynomial with any start time.
          * @return Owned concatenated spline, or a failure for invalid state or unrepresentable time knots.
          * @note Callers own seam acceptance policy; inputs are read-only, no fitting or resampling occurs. */
         StatusOr<PPolyND> appendRebased(const PPolyND &suffix) const
@@ -1009,7 +1025,7 @@ namespace SplineTrajectory
             std::vector<double> times = breakpoints_;
             for (auto it = suffix.breakpoints_.begin() + 1; it != suffix.breakpoints_.end(); ++it)
             {
-                const double next = endTime() + *it;
+                const double next = endTime() + (*it - suffix.startTime());
                 if (!std::isfinite(next) || next <= times.back())
                     return Status{ErrorCode::NumericalFailure, "Unrepresentable appended time knot"};
                 times.push_back(next);
@@ -1132,30 +1148,38 @@ namespace SplineTrajectory
 
     };
 
-    /** @brief Boundary adjoints; unused higher derivatives remain zero. */
+    /** @brief Owning physical input shared by spline construction and optimizer preparation. */
     template <int DIM>
-    struct BoundaryGradient
+    struct SplineInput
     {
-        using Vector = Eigen::Matrix<double, DIM, 1>;
-        Vector p = Vector::Zero(), v = Vector::Zero(), a = Vector::Zero(), j = Vector::Zero();
+        using WaypointMatrix = typename PPolyND<DIM>::PointMatrix;
+        std::vector<double> durations;
+        WaypointMatrix waypoints;
+        BoundaryConditions<DIM> boundary;
+        double start_time = 0.0;
     };
 
-    /** @brief Start and end boundary adjoints in the same coordinate frame. */
-    template <int DIM>
-    struct BoundaryGradientPair
+    namespace detail
     {
-        BoundaryGradient<DIM> start, end;
-    };
+        template<class Matrix, class Derived>
+        inline void addWaypointGradient(Matrix &waypoints, int knot, const Eigen::MatrixBase<Derived> &partial)
+        {
+            static_assert(Derived::IsVectorAtCompileTime, "Waypoint partial must be a row or column vector");
+            static_assert(Derived::SizeAtCompileTime == static_cast<int>(Matrix::ColsAtCompileTime) || Derived::SizeAtCompileTime == Eigen::Dynamic,
+                          "Waypoint partial must match the spatial dimension");
+            if constexpr (Derived::RowsAtCompileTime == 1) waypoints.row(knot) += partial;
+            else waypoints.row(knot) += partial.transpose();
+        }
+    }
 
     /** @brief Total derivatives with respect to interpolation data, in physical coordinates. */
     template <int DIM>
     struct SplineGradients
     {
-        using CoefficientMatrix = typename PPolyND<DIM>::CoefficientMatrix;
-        using RowVector = typename PPolyND<DIM>::RowVector;
-        CoefficientMatrix inner_points;
+        using WaypointMatrix = typename PPolyND<DIM>::PointMatrix;
+        WaypointMatrix waypoints;
         Eigen::VectorXd durations;
-        BoundaryGradient<DIM> start, end;
+        BoundaryConditions<DIM> boundary;
         /** @brief Query the segment count represented by these gradients.
          * @return Number of duration entries; zero for a default-constructed output. */
         int size() const noexcept { return static_cast<int>(durations.size()); }
@@ -1164,8 +1188,8 @@ namespace SplineTrajectory
          * @note Requires exclusive access; storage is reused, including fixed-size boundary fields. */
         void setZero()
         {
-            inner_points.setZero(); durations.setZero();
-            start = {}; end = {};
+            waypoints.setZero(); durations.setZero();
+            boundary = {};
         }
 
         /** @brief Prepare zero gradients for additive accumulation over a segment count.
@@ -1173,7 +1197,7 @@ namespace SplineTrajectory
          * @note Requires exclusive access. Matching sizes reuse existing storage. */
         void setZero(int segments)
         {
-            inner_points.resize(std::max(0, segments - 1), DIM);
+            waypoints.resize(segments > 0 ? segments + 1 : 0, DIM);
             durations.resize(segments);
             setZero();
         }
@@ -1182,24 +1206,11 @@ namespace SplineTrajectory
          * @param knot Waypoint index in [0, N], with N given by the prepared durations size.
          * @param partial Physical position partials in the caller's coordinates; borrowed for this call.
          * @note Requires a prepared N-segment topology and exclusive access to this output.
-         *       Row and column expressions share one allocation-free index dispatch. */
+         *       Row and column expressions update the same waypoint row without allocation. */
         template<class Derived>
         void addWaypoint(int knot, const Eigen::MatrixBase<Derived> &partial)
         {
-            static_assert(Derived::IsVectorAtCompileTime, "Waypoint partial must be a row or column vector");
-            static_assert(Derived::SizeAtCompileTime == DIM || Derived::SizeAtCompileTime == Eigen::Dynamic,
-                          "Waypoint partial must match the spatial dimension");
-            if constexpr (Derived::RowsAtCompileTime == 1) addWaypointRow(knot, partial);
-            else addWaypointRow(knot, partial.transpose());
-        }
-
-    private:
-        template<class Derived>
-        void addWaypointRow(int knot, const Eigen::MatrixBase<Derived> &partial)
-        {
-            if (knot == 0) start.p += partial.transpose();
-            else if (knot == durations.size()) end.p += partial.transpose();
-            else inner_points.row(knot - 1) += partial;
+            detail::addWaypointGradient(waypoints, knot, partial);
         }
 
     };
@@ -1231,35 +1242,48 @@ namespace SplineTrajectory
             else destination = value;
         }
 
-        /** @brief Compute interior position gradients from the highest-derivative jump at each knot.
+        /** @brief Compute all position gradients from endpoint terms and highest-derivative jumps.
          * @tparam Add Select accumulation or overwrite at compile time.
          * @tparam Scale Signed multiplier of the right-minus-left highest power coefficient.
          * @param polynomial Valid minimum-derivative spline in physical time; borrowed for this call.
-         * @param[in,out] gradient Interior waypoint gradients in the caller's coordinates.
+         * @param[in,out] gradient All N+1 waypoint gradients in the caller's coordinates.
          *        Overwrite resizes the output; accumulation requires matching initialized storage.
          * @param weight Multiplier of the energy contribution.
          * @pre The spline is valid.
-         * @note Requires the per-order energy multiplier and exclusive access to gradient.
-         *       A single segment has no interior waypoints and produces an empty matrix. */
+         * @note Requires the per-order energy multiplier and exclusive access to gradient. */
         template <int Scale, bool Add = false, int DIM, int CoefficientCount>
         inline void computeEnergyWaypointGradient(const PPolyND<DIM, CoefficientCount> &polynomial,
                                            typename PPolyND<DIM>::CoefficientMatrix &gradient, double weight)
         {
             const int segments = polynomial.numSegments();
             if constexpr (!Add)
-                gradient.resize(segments - 1, DIM);
+                gradient.resize(segments + 1, DIM);
 
             // Integration by parts leaves only the highest-derivative jump at each interior knot.
             const auto &coefficients = polynomial.coefficients();
+            const auto first = coefficients.row(CoefficientCount - 1);
+            const auto last = coefficients.row(segments * CoefficientCount - 1);
+            storeGradient<Add>(gradient.row(0), weight * (static_cast<double>(Scale) * first));
+            // Preserve the original endpoint derivative and its signed factor of two.
+            if constexpr (Scale > 0)
+            {
+                const typename PPolyND<DIM>::RowVector derivative = static_cast<double>(Scale / 2) * last;
+                storeGradient<Add>(gradient.row(segments), weight * (-2.0 * derivative));
+            }
+            else
+            {
+                const typename PPolyND<DIM>::RowVector derivative = static_cast<double>(-Scale / 2) * last;
+                storeGradient<Add>(gradient.row(segments), weight * (2.0 * derivative));
+            }
             for (int knot = 1; knot < segments; ++knot)
             {
                 const auto left = coefficients.row((knot - 1) * CoefficientCount + CoefficientCount - 1);
                 const auto right = coefficients.row(knot * CoefficientCount + CoefficientCount - 1);
                 // Keep each order's original subtraction direction and positive multiplication.
                 if constexpr (Scale > 0)
-                    storeGradient<Add>(gradient.row(knot - 1), (weight * static_cast<double>(Scale)) * (right - left));
+                    storeGradient<Add>(gradient.row(knot), (weight * static_cast<double>(Scale)) * (right - left));
                 else
-                    storeGradient<Add>(gradient.row(knot - 1), (weight * static_cast<double>(-Scale)) * (left - right));
+                    storeGradient<Add>(gradient.row(knot), (weight * static_cast<double>(-Scale)) * (left - right));
             }
         }
 
@@ -1272,10 +1296,9 @@ namespace SplineTrajectory
         template <int DIM>
         inline void initializeGradients(const Eigen::VectorXd &duration_partials, SplineGradients<DIM> &gradient)
         {
-            gradient.inner_points.setZero(std::max<Eigen::Index>(0, duration_partials.size() - 1), DIM);
+            gradient.waypoints.setZero(duration_partials.size() > 0 ? duration_partials.size() + 1 : 0, DIM);
             gradient.durations = duration_partials;
-            gradient.start = {};
-            gradient.end = {};
+            gradient.boundary = {};
         }
 
     }
@@ -1603,8 +1626,6 @@ namespace SplineTrajectory
             static constexpr int kMinDerivativeOrder = 2;
             using Polynomial = PPolyND<DIM, kCoefficientCount>;
 
-            using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
-            using BoundaryGradients = BoundaryGradientPair<DIM>;
             using Gradients = SplineGradients<DIM>;
 
             using Data = SplineData<DIM, 3>;
@@ -1794,7 +1815,7 @@ namespace SplineTrajectory
              * @param[in,out] end End endpoint partials in physical coordinates.
              * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
             template<bool Add>
-            void computeEnergyBoundaryGradient(const Data &data, BoundaryGradient &start, BoundaryGradient &end, double weight) const
+            void computeEnergyBoundaryGradient(const Data &data, EndpointDerivatives<DIM> &start, EndpointDerivatives<DIM> &end, double weight) const
             {
                 if constexpr (!Add)
                 {
@@ -1804,9 +1825,7 @@ namespace SplineTrajectory
 
                 // Evaluate the start-boundary terms at local time zero.
                 const RowVector c2_first = data.trajectory_.coefficients_.row(2);
-                const RowVector c3_first = data.trajectory_.coefficients_.row(3);
 
-                detail::storeGradient<Add>(start.p, weight * (12.0 * c3_first.transpose()));
                 detail::storeGradient<Add>(start.v, weight * (-4.0 * c2_first.transpose()));
 
                 // Evaluate the end-boundary terms at the final segment's physical duration.
@@ -1817,9 +1836,7 @@ namespace SplineTrajectory
                 const RowVector c3_last = data.trajectory_.coefficients_.row(last_idx * 4 + 3);
 
                 RowVector acc_end = 2.0 * c2_last + 6.0 * c3_last * T;
-                RowVector jerk_end = 6.0 * c3_last;
 
-                detail::storeGradient<Add>(end.p, weight * (-2.0 * jerk_end.transpose()));
                 detail::storeGradient<Add>(end.v, weight * (2.0 * acc_end.transpose()));
             }
 
@@ -1963,8 +1980,8 @@ namespace SplineTrajectory
              * @note Only interior velocities are free; zero endpoint adjoints enforce those constraints. */
             void solveAdjoint(const Data &data, Gradients &gradient)
             {
-                gradient.start.v = adjoint_.row(0).transpose();
-                gradient.end.v = adjoint_.row(data.num_segments_).transpose();
+                gradient.boundary.start.v = adjoint_.row(0).transpose();
+                gradient.boundary.end.v = adjoint_.row(data.num_segments_).transpose();
                 adjoint_.row(0).setZero();
                 adjoint_.row(data.num_segments_).setZero();
 
@@ -1996,9 +2013,9 @@ namespace SplineTrajectory
                         6.0 * derivatives_.row(i).dot(lambda_c3);
 
                     if (i == 0)
-                        gradient.start.v += 2.0 * lambda_c2.transpose();
+                        gradient.boundary.start.v += 2.0 * lambda_c2.transpose();
                     if (i + 1 == data.num_segments_)
-                        gradient.end.v -= (2.0 * lambda_c2 + (6.0 * tp.h) * lambda_c3).transpose();
+                        gradient.boundary.end.v -= (2.0 * lambda_c2 + (6.0 * tp.h) * lambda_c3).transpose();
                 }
             }
         };
@@ -2022,8 +2039,6 @@ namespace SplineTrajectory
             static constexpr int kMinDerivativeOrder = 3;
             using Polynomial = PPolyND<DIM, kCoefficientCount>;
 
-            using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
-            using BoundaryGradients = BoundaryGradientPair<DIM>;
             using Gradients = SplineGradients<DIM>;
 
             using Data = SplineData<DIM, 5>;
@@ -2235,7 +2250,7 @@ namespace SplineTrajectory
              * @param[in,out] end End endpoint partials in physical coordinates.
              * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
             template<bool Add>
-            void computeEnergyBoundaryGradient(const Data &data, BoundaryGradient &start, BoundaryGradient &end, double weight) const
+            void computeEnergyBoundaryGradient(const Data &data, EndpointDerivatives<DIM> &start, EndpointDerivatives<DIM> &end, double weight) const
             {
                 if constexpr (!Add)
                 {
@@ -2245,9 +2260,7 @@ namespace SplineTrajectory
                 // Evaluate the start-boundary terms at local time zero.
                 const RowVector c3_first = data.trajectory_.coefficients_.row(3);
                 const RowVector c4_first = data.trajectory_.coefficients_.row(4);
-                const RowVector c5_first = data.trajectory_.coefficients_.row(5);
 
-                detail::storeGradient<Add>(start.p, weight * (-240.0 * c5_first.transpose()));
                 detail::storeGradient<Add>(start.v, weight * (48.0 * c4_first.transpose()));
                 detail::storeGradient<Add>(start.a, weight * (-12.0 * c3_first.transpose()));
 
@@ -2262,9 +2275,7 @@ namespace SplineTrajectory
 
                 RowVector jerk_end = 6.0 * c3_last + 24.0 * c4_last * T + 60.0 * c5_last * T2;
                 RowVector snap_end = 24.0 * c4_last + 120.0 * c5_last * T;
-                RowVector crackle_end = 120.0 * c5_last;
 
-                detail::storeGradient<Add>(end.p, weight * (2.0 * crackle_end.transpose()));
                 detail::storeGradient<Add>(end.v, weight * (-2.0 * snap_end.transpose()));
                 detail::storeGradient<Add>(end.a, weight * (2.0 * jerk_end.transpose()));
             }
@@ -2478,10 +2489,10 @@ namespace SplineTrajectory
              * @note A is symmetric: the primal factors also solve A^T lambda = seed. */
             void solveAdjoint(const Data &data, Gradients &gradient)
             {
-                gradient.start.v = adjoint_.row(0).transpose();
-                gradient.end.v = adjoint_.row(data.num_segments_ * 2 + 0).transpose();
-                gradient.start.a = adjoint_.row(1).transpose();
-                gradient.end.a = adjoint_.row(data.num_segments_ * 2 + 1).transpose();
+                gradient.boundary.start.v = adjoint_.row(0).transpose();
+                gradient.boundary.end.v = adjoint_.row(data.num_segments_ * 2 + 0).transpose();
+                gradient.boundary.start.a = adjoint_.row(1).transpose();
+                gradient.boundary.end.a = adjoint_.row(data.num_segments_ * 2 + 1).transpose();
                 adjoint_.template topRows<2>().setZero();
                 adjoint_.template bottomRows<2>().setZero();
 
@@ -2541,15 +2552,15 @@ namespace SplineTrajectory
                     // Only clamped endpoints contribute boundary derivative corrections.
                     if (i == 0)
                     {
-                        gradient.start.v -= adjoint_snap.transpose();
-                        gradient.start.a += adjoint_jerk.transpose();
+                        gradient.boundary.start.v -= adjoint_snap.transpose();
+                        gradient.boundary.start.a += adjoint_jerk.transpose();
                     }
                     if (i + 1 == data.num_segments_)
                     {
                         const RowVector end_v = tp.h * adjoint_crackle + adjoint_snap;
                         const RowVector end_a = ((60.0 * tp.h) * lambda_c5 + adjoint_snap) * tp.h + adjoint_jerk;
-                        gradient.end.v += end_v.transpose();
-                        gradient.end.a -= end_a.transpose();
+                        gradient.boundary.end.v += end_v.transpose();
+                        gradient.boundary.end.a -= end_a.transpose();
                     }
                 }
             }
@@ -2574,8 +2585,6 @@ namespace SplineTrajectory
             static constexpr int kMinDerivativeOrder = 4;
             using Polynomial = PPolyND<DIM, kCoefficientCount>;
 
-            using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
-            using BoundaryGradients = BoundaryGradientPair<DIM>;
             using Gradients = SplineGradients<DIM>;
 
             using Data = SplineData<DIM, 7>;
@@ -2813,15 +2822,13 @@ namespace SplineTrajectory
              * @param[in,out] end End endpoint partials in physical coordinates.
              * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
             template<bool Add>
-            void computeEnergyBoundaryGradient(const Data &data, BoundaryGradient &start, BoundaryGradient &end, double weight) const
+            void computeEnergyBoundaryGradient(const Data &data, EndpointDerivatives<DIM> &start, EndpointDerivatives<DIM> &end, double weight) const
             {
                 // Evaluate the start-boundary terms at local time zero.
                 const RowVector c4_first = data.trajectory_.coefficients_.row(4);
                 const RowVector c5_first = data.trajectory_.coefficients_.row(5);
                 const RowVector c6_first = data.trajectory_.coefficients_.row(6);
-                const RowVector c7_first = data.trajectory_.coefficients_.row(7);
 
-                detail::storeGradient<Add>(start.p, weight * (10080.0 * c7_first.transpose()));
                 detail::storeGradient<Add>(start.v, weight * (-1440.0 * c6_first.transpose()));
                 detail::storeGradient<Add>(start.a, weight * (240.0 * c5_first.transpose()));
                 detail::storeGradient<Add>(start.j, weight * (-48.0 * c4_first.transpose()));
@@ -2841,9 +2848,7 @@ namespace SplineTrajectory
                                          360.0 * c6_last * T2 + 840.0 * c7_last * T3;
                 RowVector crackle_end = 120.0 * c5_last + 720.0 * c6_last * T + 2520.0 * c7_last * T2;
                 RowVector pop_end = 720.0 * c6_last + 5040.0 * c7_last * T;
-                RowVector d7_end = 5040.0 * c7_last;
 
-                detail::storeGradient<Add>(end.p, weight * (-2.0 * d7_end.transpose()));
                 detail::storeGradient<Add>(end.v, weight * (2.0 * pop_end.transpose()));
                 detail::storeGradient<Add>(end.a, weight * (-2.0 * crackle_end.transpose()));
                 detail::storeGradient<Add>(end.j, weight * (2.0 * snap_end.transpose()));
@@ -3108,12 +3113,12 @@ namespace SplineTrajectory
              * @note A is symmetric: the primal factors also solve A^T lambda = seed. */
             void solveAdjoint(const Data &data, Gradients &gradient)
             {
-                gradient.start.v = adjoint_.row(0).transpose();
-                gradient.end.v = adjoint_.row(data.num_segments_ * 3 + 0).transpose();
-                gradient.start.a = adjoint_.row(1).transpose();
-                gradient.end.a = adjoint_.row(data.num_segments_ * 3 + 1).transpose();
-                gradient.start.j = adjoint_.row(2).transpose();
-                gradient.end.j = adjoint_.row(data.num_segments_ * 3 + 2).transpose();
+                gradient.boundary.start.v = adjoint_.row(0).transpose();
+                gradient.boundary.end.v = adjoint_.row(data.num_segments_ * 3 + 0).transpose();
+                gradient.boundary.start.a = adjoint_.row(1).transpose();
+                gradient.boundary.end.a = adjoint_.row(data.num_segments_ * 3 + 1).transpose();
+                gradient.boundary.start.j = adjoint_.row(2).transpose();
+                gradient.boundary.end.j = adjoint_.row(data.num_segments_ * 3 + 2).transpose();
                 adjoint_.template topRows<3>().setZero();
                 adjoint_.template bottomRows<3>().setZero();
 
@@ -3183,9 +3188,9 @@ namespace SplineTrajectory
                     // Only clamped endpoints contribute boundary derivative corrections.
                     if (i == 0)
                     {
-                        gradient.start.v += adjoint_pop.transpose();
-                        gradient.start.a -= adjoint_crackle.transpose();
-                        gradient.start.j += adjoint_snap.transpose();
+                        gradient.boundary.start.v += adjoint_pop.transpose();
+                        gradient.boundary.start.a -= adjoint_crackle.transpose();
+                        gradient.boundary.start.j += adjoint_snap.transpose();
                     }
                     if (i + 1 == data.num_segments_)
                     {
@@ -3193,9 +3198,9 @@ namespace SplineTrajectory
                         const RowVector end_a = ((2520.0 * tp.h) * lambda_c7 + adjoint_pop) * tp.h + adjoint_crackle;
                         const RowVector end_j = (((840.0 * tp.h) * lambda_c7 + 360.0 * lambda_c6) * tp.h
                             + adjoint_crackle) * tp.h + adjoint_snap;
-                        gradient.end.v -= end_v.transpose();
-                        gradient.end.a += end_a.transpose();
-                        gradient.end.j -= end_j.transpose();
+                        gradient.boundary.end.v -= end_v.transpose();
+                        gradient.boundary.end.a += end_a.transpose();
+                        gradient.boundary.end.j -= end_j.transpose();
                     }
                 }
             }
@@ -3237,8 +3242,6 @@ namespace SplineTrajectory
         static constexpr int kMinDerivativeOrder = (DEGREE + 1) / 2;
         using Polynomial = PPolyND<DIM, kCoefficientCount>;
 
-        using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
-        using BoundaryGradients = BoundaryGradientPair<DIM>;
         using Gradients = SplineGradients<DIM>;
 
     private:
@@ -3269,7 +3272,7 @@ namespace SplineTrajectory
 
         /** @brief Replace interpolation data using positive durations and a common time origin.
          * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
-         * @param start_time Absolute time origin in seconds.
+         * @param start_time Origin on the caller's trajectory time axis, in seconds.
          * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @pre Inputs satisfy the class contract; no input validation is performed.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
@@ -3286,6 +3289,10 @@ namespace SplineTrajectory
             data_.boundary_ = boundary;
             return updateSplineInternal();
         }
+
+        /** @brief Construct from shared physical input; same topology reuses owned storage. */
+        Status update(const SplineInput<DIM> &input)
+        { return update(input.durations, input.waypoints, input.start_time, input.boundary); }
 
         /** @brief Inspect the published polynomial. @return True after successful construction; numerical range is a caller precondition. */
         bool isValid() const { return data_.trajectory_.isValid(); }
@@ -3311,9 +3318,9 @@ namespace SplineTrajectory
         }
 
         /** @brief Inspect input topology. @return Number of stored waypoints. */
-        size_t numPoints() const
+        int numWaypoints() const
         {
-            return static_cast<size_t>(data_.spatial_points_.rows());
+            return static_cast<int>(data_.spatial_points_.rows());
         }
 
         /** @brief Inspect the polynomial topology. @return Segment count, or zero when invalid. */
@@ -3323,13 +3330,17 @@ namespace SplineTrajectory
         }
 
         /** @brief Borrow physical waypoints. @return Storage valid until update, assignment or move. */
-        const WaypointMatrix &waypoints() const { return data_.spatial_points_; }
+        const WaypointMatrix &waypoints() const & { return data_.spatial_points_; }
+        const WaypointMatrix &waypoints() const && = delete;
         /** @brief Borrow segment durations in seconds. @return Storage valid until the next mutation. */
-        const std::vector<double> &durations() const { return data_.time_segments_; }
+        const std::vector<double> &durations() const & { return data_.time_segments_; }
+        const std::vector<double> &durations() const && = delete;
         /** @brief Borrow trajectory breakpoints in seconds. @return Storage valid until the next mutation. */
-        const std::vector<double> &breakpoints() const { return data_.trajectory_.breakpoints_; }
+        const std::vector<double> &breakpoints() const & { return data_.trajectory_.breakpoints_; }
+        const std::vector<double> &breakpoints() const && = delete;
         /** @brief Borrow physical boundary data. @return Storage valid until the next mutation. */
-        const BoundaryConditions<DIM> &boundary() const { return data_.boundary_; }
+        const BoundaryConditions<DIM> &boundary() const & { return data_.boundary_; }
+        const BoundaryConditions<DIM> &boundary() const && = delete;
 
         /** @brief Borrow the polynomial. @return View valid until the next update, assignment or move. */
         const Polynomial &polynomial() const & { return data_.trajectory_; }
@@ -3424,56 +3435,56 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @param[out] grad Full gradient dE/dP for inner points only.
-         *         Resized to (N-1) × DIM (excludes boundary points P0 and PN); matching storage is reused.
+         * @brief Compute full gradient of energy w.r.t. all waypoints, including both endpoints.
+         * @param[out] grad Full gradient dE/dP with the same row indices as input waypoints.
+         *         Resized to (N+1) × DIM; matching storage is reused.
          * @pre The spline is valid. */
-        void energyInnerWaypointGradient(WaypointMatrix &grad) const
+        void energyWaypointGradient(WaypointMatrix &grad) const
         {
             assert(data_.trajectory_.isValid());
             detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale>(data_.trajectory_, grad, 1.0);
         }
 
-        /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
-        WaypointMatrix energyInnerWaypointGradient() const
+        /** @brief Allocate total energy waypoint gradients. @return All physical waypoint gradients, including endpoints. */
+        WaypointMatrix energyWaypointGradient() const
         {
             WaypointMatrix grad;
-            energyInnerWaypointGradient(grad);
+            energyWaypointGradient(grad);
             return grad;
         }
 
         /**
-         * @brief Compute energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
+         * @brief Compute energy gradients w.r.t. boundary velocity, acceleration and jerk only.
          * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
          *        physical-time derivative convention (seconds); unsupported higher derivatives are zero.
          * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
-        void energyBoundaryGradient(BoundaryGradients &grad) const
+        void energyBoundaryGradient(BoundaryConditions<DIM> &grad) const
         {
             assert(data_.trajectory_.isValid());
             kernel_.template computeEnergyBoundaryGradient<false>(data_, grad.start, grad.end, 1.0);
         }
 
-        /** @brief Return energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
+        /** @brief Return energy gradients w.r.t. boundary velocity, acceleration and jerk only.
          * @return Owned start/end gradients using physical seconds and the caller's coordinates;
          *         unsupported higher derivatives are zero.
          * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
-        BoundaryGradients energyBoundaryGradient() const
+        BoundaryConditions<DIM> energyBoundaryGradient() const
         {
-            BoundaryGradients res;
+            BoundaryConditions<DIM> res;
             energyBoundaryGradient(res);
             return res;
         }
 
         /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
+         * @brief Compute full energy gradient combining duration, waypoint, and boundary derivative gradients.
          *
          * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
+         *       - waypoints: gradient w.r.t. all waypoints, size (N+1) × DIM
          *       - durations: gradient w.r.t. physical segment durations, size N
-         *       - start/end: gradients w.r.t. position and supported endpoint derivatives
+         *       - boundary: gradients w.r.t. supported endpoint derivatives
          */
         Gradients energyGradient() const
         {
@@ -3483,7 +3494,7 @@ namespace SplineTrajectory
         }
 
         /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
+         * @brief Compute full energy gradient combining duration, waypoint, and boundary derivative gradients (reference overload).
          *
          * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
          * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
@@ -3491,9 +3502,9 @@ namespace SplineTrajectory
         void energyGradient(Gradients &grads) const
         {
             assert(data_.trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale>(data_.trajectory_, grads.inner_points, 1.0);
+            detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale>(data_.trajectory_, grads.waypoints, 1.0);
             kernel_.template computeEnergyDurationGradient<false>(data_, grads.durations, 1.0);
-            kernel_.template computeEnergyBoundaryGradient<false>(data_, grads.start, grads.end, 1.0);
+            kernel_.template computeEnergyBoundaryGradient<false>(data_, grads.boundary.start, grads.boundary.end, 1.0);
         }
 
         /** @brief Add weighted minimum-derivative energy gradients to existing physical partials.
@@ -3504,9 +3515,9 @@ namespace SplineTrajectory
         void energyGradientAdd(Gradients &grads, double weight = 1.0) const
         {
             assert(data_.trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale, true>(data_.trajectory_, grads.inner_points, weight);
+            detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale, true>(data_.trajectory_, grads.waypoints, weight);
             kernel_.template computeEnergyDurationGradient<true>(data_, grads.durations, weight);
-            kernel_.template computeEnergyBoundaryGradient<true>(data_, grads.start, grads.end, weight);
+            kernel_.template computeEnergyBoundaryGradient<true>(data_, grads.boundary.start, grads.boundary.end, weight);
         }
 
         /**
@@ -3515,9 +3526,9 @@ namespace SplineTrajectory
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (N*kCoefficientCount) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
+         *       - waypoints: gradient w.r.t. all waypoints, size (N+1) × DIM
          *       - durations: gradient w.r.t. physical segment durations, size N
-         *       - start/end: gradients w.r.t. position and supported endpoint derivatives
+         *       - boundary: gradients w.r.t. supported endpoint derivatives
          */
         Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes)

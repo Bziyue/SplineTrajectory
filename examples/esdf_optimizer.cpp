@@ -36,7 +36,7 @@ struct EsdfCost
         return cost;
     }
 };
-struct Objective { example::DurationCost parameter; EsdfCost integral; };
+struct Objective { EsdfCost integral; };
 
 int main(int argc, char **argv) try
 {

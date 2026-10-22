@@ -53,7 +53,7 @@ struct TimeCost
     SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline> &state,
         SplineTrajectory::ParameterGradientView<Spline> &gradient) const
     {
-        gradient.spline.durations.array() += 0.2;
+        gradient.durations.array() += 0.2;
         return {0.2 * std::accumulate(state.durations.begin(), state.durations.end(), 0.0), SplineTrajectory::Status::success()};
     }
 
@@ -191,7 +191,7 @@ public:
         spline.backward(coeff_grad, time_grad, spline_gradients);
         spline.energyGradient(energy_gradients); cost += energy_weight*spline.energy();
         physical_time_grad = spline_gradients.durations + energy_weight*energy_gradients.durations;
-        point_grad = (spline_gradients.inner_points + energy_weight*energy_gradients.inner_points).transpose();
+        point_grad = (spline_gradients.waypoints.middleRows(1, pieces - 1) + energy_weight*energy_gradients.waypoints.middleRows(1, pieces - 1)).transpose();
 #endif
         gradient.resize(x.size());
         for(int i=0;i<pieces;++i) gradient(i)=time_map.backward(x(i),times[i],physical_time_grad(i));

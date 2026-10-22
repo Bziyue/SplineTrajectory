@@ -10,15 +10,15 @@ using spline_test::require;
 
 struct DurationCost
 {
+    double weight = 0.2;
     template<class Curve>
     SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Curve> &state,
         SplineTrajectory::ParameterGradientView<Curve> &output) const
     {
         const auto &times = state.durations;
-        auto &gradient = output.spline.durations;
-        gradient.array() += 0.2;
-        double cost = 0.0;
-        for (double time : times) cost += 0.2 * time;
+        auto &gradient = output.durations;
+        gradient.array() += weight;
+        const double cost = weight * std::accumulate(times.begin(), times.end(), 0.0);
         return {cost, SplineTrajectory::Status::success()};
     }
 };
@@ -71,7 +71,7 @@ struct ParameterCost
     {
         for (int i = 0; i < state.waypoints.rows(); ++i)
             gradient.addWaypoint(i, 0.04 * state.waypoints.row(i).transpose());
-        gradient.spline.start.v += 0.02 * state.boundary.start.v;
+        gradient.boundary.start.v += 0.02 * state.boundary.start.v;
         return {DurationCost{}(state, gradient).cost + 0.02 * state.waypoints.squaredNorm() + 0.01 * state.boundary.start.v.squaredNorm(), SplineTrajectory::Status::success()};
     }
 };
@@ -88,7 +88,7 @@ struct DecisionCost
 template<class Spline>
 auto problem()
 {
-    SplineTrajectory::SplineProblem<Spline::kDimension> result;
+    SplineTrajectory::SplineInput<Spline::kDimension> result;
     result.durations = {1.4, 1.7};
     result.start_time = 0.7;
     result.waypoints.resize(3, 3);
@@ -108,11 +108,12 @@ void checkCompleteGradient()
     mask.start.v = mask.end.v = true;
     if constexpr (Spline::kDegree >= 5) mask.start.a = mask.end.a = true;
     if constexpr (Spline::kDegree >= 7) mask.start.j = mask.end.j = true;
-    reference.mask = mask;
     Optimizer optimizer;
     SplineTrajectory::OptimizerOptions options;
+    options.mask = mask;
     options.integration_steps = 5;
     options.energy_weight = 0.01;
+    options.duration_weight = 0.3;
     struct Objective
     {
         StateCost<ORDER> integral;
@@ -186,12 +187,77 @@ struct SharedMap
                     Eigen::Ref<Eigen::VectorXd> output) const
     {
         output(0) += gradient.start_time;
-        for (int i = 0; i < gradient.spline.durations.size(); ++i)
-            output(1) += gradient.spline.durations(i) * state.durations[i];
-        gradient.spline.durations *= std::exp(x(1));
+        for (int i = 0; i < gradient.durations.size(); ++i)
+            output(1) += gradient.durations(i) * state.durations[i];
+        gradient.durations *= std::exp(x(1));
         return SplineTrajectory::Status::success();
     }
 };
+
+template<class Spline>
+void checkDurationWeight()
+{
+    using namespace SplineTrajectory;
+    struct Parameterization
+    {
+        QuadInvTimeMap time;
+        IdentitySpatialMap<3> space;
+        SharedMap auxiliary;
+    };
+    using Optimizer = SplineOptimizer<Spline, Parameterization>;
+    NoObjective empty;
+    for (int active_durations : {0, 1, 2})
+    {
+        auto input = problem<Spline>();
+        OptimizationMask mask;
+        mask.durations = {active_durations > 0, active_durations > 1};
+        for (double weight : {0.0, 0.2, 1.3})
+        {
+            Optimizer builtin, callback;
+            OptimizerOptions options;
+            options.mask = mask;
+            options.energy_weight = 0.01;
+            struct Objective { DurationCost parameter; } objective{{weight}};
+            require(bool(callback.prepare(input, options, objective)), "prepare reference duration callback");
+            options.duration_weight = weight;
+            require(bool(builtin.prepare(input, options, empty)), "prepare built-in duration weight");
+            auto x = builtin.initialGuess();
+            x.array() += 0.05;
+            x(builtin.layout().auxiliary_offset) = 0.2;
+            x(builtin.layout().auxiliary_offset + 1) = -0.3;
+            Eigen::VectorXd gradient(x.size()), reference_gradient(x.size());
+            const auto expected = callback.evaluate(x, reference_gradient, objective);
+            require(bool(expected), "reference duration evaluation");
+
+            // Include the first prepared evaluation, with nonidentity maps and fixed duration slots.
+            allocation_test::begin();
+            Eigen::internal::set_is_malloc_allowed(false);
+            for (int iteration = 0; iteration < 3; ++iteration)
+            {
+                const auto result = builtin.evaluate(x, gradient, empty);
+                require(bool(result) && std::abs(result.cost - expected.cost) < 1e-12,
+                        "built-in duration cost equals parameter callback");
+                require((gradient - reference_gradient).norm() < 1e-11,
+                        "duration gradient passes through auxiliary and time maps");
+            }
+            Eigen::internal::set_is_malloc_allowed(true);
+            require(allocation_test::end() == 0, "built-in duration cost does not allocate");
+            const auto checked = checkGradients(builtin, x, empty, 1e-5, 2e-4);
+            require(bool(checked), "built-in energy and duration finite differences");
+        }
+    }
+
+    Optimizer optimizer;
+    for (double weight : {-1.0, std::numeric_limits<double>::infinity(),
+                          std::numeric_limits<double>::quiet_NaN()})
+    {
+        OptimizerOptions options;
+        options.duration_weight = weight;
+        const auto status = optimizer.prepare(problem<Spline>(), options, empty);
+        require(!status && status.code == ErrorCode::InvalidInput && !optimizer.isPrepared(),
+                "duration weight must be finite and nonnegative");
+    }
+}
 
 struct ClockCoefficient
 {
@@ -203,15 +269,15 @@ struct ClockCoefficient
 
 struct ClockSample
 {
-    template<class Samples, class PositionOutput>
-    SplineTrajectory::EvaluationResult operator()(const Samples &samples, PositionOutput position, Eigen::Ref<Eigen::VectorXd> time) const
+    template<class Samples, class Spline>
+    SplineTrajectory::EvaluationResult operator()(const Samples &samples, SplineTrajectory::SampleGradientView<Spline> &gradient) const
     {
         double cost = 0.0;
         for (int i = 0; i < static_cast<int>(samples.size()); ++i)
         {
             cost += 0.005 * samples[i].point.trajectory_time * samples[i].point.trajectory_time;
-            time(i) += 0.01 * samples[i].point.trajectory_time;
-            position.row(i) += 0.002 * samples[i].p.transpose();
+            gradient.trajectory_times(i) += 0.01 * samples[i].point.trajectory_time;
+            gradient.positions.row(i) += 0.002 * samples[i].p.transpose();
             cost += 0.001 * samples[i].p.squaredNorm();
         }
         return {cost, SplineTrajectory::Status::success()};
@@ -238,6 +304,7 @@ void checkSharedVariables()
     SplineOptimizer<Spline, Parameterization> optimizer;
     OptimizerOptions options;
     options.integration_steps = 5;
+    options.duration_weight = 0.4;
     require(bool(optimizer.prepare(problem<Spline>(), options, SplineTrajectory::NoObjective{})), "prepare without sample capability");
     auto x = optimizer.initialGuess();
     Eigen::VectorXd gradient(x.size());
@@ -278,6 +345,9 @@ int main()
         checkCompleteGradient<SplineTrajectory::SepticSplineND<3>, 3>();
         checkCompleteGradient<SplineTrajectory::SepticSplineND<3>, 4>();
         checkEnergyOnly();
+        checkDurationWeight<SplineTrajectory::CubicSplineND<3>>();
+        checkDurationWeight<SplineTrajectory::QuinticSplineND<3>>();
+        checkDurationWeight<SplineTrajectory::SepticSplineND<3>>();
         checkSharedVariables();
     });
 }

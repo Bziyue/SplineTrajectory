@@ -4,23 +4,13 @@
 
 namespace example = spline_examples;
 /** @brief Penalize Bezier position, velocity and acceleration controls in convex sets.
- * @note Each objective owns its mutable hull workspaces. A soft penalty does not enforce exact feasibility. */
+ * @note Workspaces allocate on first use and reuse matching storage. A soft penalty does not enforce exact feasibility. */
 struct HullCost
 {
     using Matrix = example::Spline::CoefficientMatrix;
     std::array<SplineTrajectory::ConvexHullWorkspace<2>, 3> hulls;
     std::array<Matrix, 3> control_gradients;
     std::array<example::Box, 3> boxes = example::corridor();
-
-    explicit HullCost(int segments)
-    {
-        for (int derivative = 0; derivative < 3; ++derivative)
-        {
-            hulls[derivative].prepare(segments, example::Spline::kCoefficientCount,
-                {SplineTrajectory::ConvexHullBasis::Bezier, derivative, 1});
-            control_gradients[derivative].resize(hulls[derivative].controls().rows(), 2);
-        }
-    }
 
     double operator()(const SplineTrajectory::ParameterView<example::Spline> &state,
                       SplineTrajectory::CoefficientGradientView<example::Spline> &gradient)
@@ -30,8 +20,8 @@ struct HullCost
         {
             auto &hull = hulls[derivative];
             auto &partials = control_gradients[derivative];
-            hull.update(state.polynomial);
-            partials.setZero();
+            hull.update(state.polynomial, {SplineTrajectory::ConvexHullBasis::Bezier, derivative, 1});
+            partials.setZero(hull.controls().rows(), 2);
             for (int piece = 0; piece < hull.numPieces(); ++piece)
             {
                 const auto p = hull.piece(piece);
@@ -53,14 +43,14 @@ struct HullCost
         return cost;
     }
 };
-struct Objective { example::DurationCost parameter; HullCost coefficient; };
+struct Objective { HullCost coefficient; };
 
 int main(int argc, char **argv) try
 {
     auto problem = example::makeProblem();
     problem.waypoints(1, 1) = 0.85;
     example::Optimizer optimizer;
-    Objective objective{{}, HullCost(static_cast<int>(problem.durations.size()))};
+    Objective objective;
     const auto prepared = optimizer.prepare(problem, example::options(), objective);
     if (!prepared) throw std::runtime_error(prepared.message);
 

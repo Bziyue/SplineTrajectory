@@ -5,7 +5,6 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -14,20 +13,6 @@ namespace spline_examples
 using Spline = SplineTrajectory::QuinticSplineND<2>;
 using Optimizer = SplineTrajectory::SplineOptimizer<Spline>;
 using Vector = Eigen::Vector2d;
-
-struct DurationCost
-{
-    double weight = 0.5;
-    template<class Curve>
-    double operator()(const SplineTrajectory::ParameterView<Curve> &state,
-        SplineTrajectory::ParameterGradientView<Curve> &output) const
-    {
-        const auto &durations = state.durations;
-        auto &gradient = output.spline.durations;
-        gradient.array() += weight;
-        return weight * std::accumulate(durations.begin(), durations.end(), 0.0);
-    }
-};
 
 inline Optimizer::Problem makeProblem()
 {
@@ -42,6 +27,7 @@ inline SplineTrajectory::OptimizerOptions options()
 {
     SplineTrajectory::OptimizerOptions result;
     result.energy_weight = 0.02;
+    result.duration_weight = 0.5;
     result.integration_steps = 32;
     return result;
 }

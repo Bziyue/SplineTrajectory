@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "TestSupport.hpp"
+#include "AllocationCounter.hpp"
 #include "SplineConvexHull.hpp"
 
 namespace
@@ -260,6 +261,58 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
 
 }
 
+void checkUpdateWithOptions()
+{
+    using namespace SplineTrajectory;
+    Hull hull;
+    auto verify = [&](const PPoly &polynomial, HullOptions options)
+    {
+        hull.update(polynomial, options);
+        auto expected = Hull::fromPPoly(polynomial, options);
+        require(hull.isValid() && hull.matches(polynomial, options), "update prepares matching hull topology");
+        require(hull.controls().isApprox(expected.controls(), 1e-13), "configured update matches explicit preparation");
+        for (int i = 0; i < hull.numPieces(); ++i)
+        {
+            const auto &actual = hull.piece(i).info();
+            const auto &reference = expected.piece(i).info();
+            require(actual.source_segment == reference.source_segment &&
+                    actual.start_time == reference.start_time && actual.duration == reference.duration,
+                    "configured update refreshes piece times");
+        }
+        const Matrix weights = Matrix::Ones(hull.controls().rows(), 3);
+        const auto actual_gradient = hull.backward(weights);
+        const auto expected_gradient = expected.backward(weights);
+        require(actual_gradient.coefficients.isApprox(expected_gradient.coefficients, 1e-13) &&
+                actual_gradient.durations.isApprox(expected_gradient.durations, 1e-13),
+                "reconfigured hull backward matches explicit preparation");
+
+        const auto *storage = hull.controls().data();
+        allocation_test::begin();
+        Eigen::internal::set_is_malloc_allowed(false);
+        for (int i = 0; i < 3; ++i)
+        {
+            hull.update(polynomial, options);
+            hull.update(polynomial);
+        }
+        Eigen::internal::set_is_malloc_allowed(true);
+        require(allocation_test::end() == 0 && storage == hull.controls().data(),
+                "matching configured updates reuse storage without allocation");
+        require(hull.matches(polynomial, options), "single-argument update preserves explicit options");
+    };
+
+    const Matrix coefficients = Matrix::Random(12, 3);
+    auto polynomial = makePolynomial({0.8, 1.2}, coefficients, 6);
+    verify(polynomial, {ConvexHullBasis::Bezier, Deriv::Pos, 0});
+    verify(polynomial, {ConvexHullBasis::MINVO, Deriv::Pos, 0});
+    verify(polynomial, {ConvexHullBasis::MINVO, Deriv::Vel, 0});
+    verify(polynomial, {ConvexHullBasis::MINVO, Deriv::Vel, 2});
+    polynomial = makePolynomial({1.1, 0.7}, 0.5 * coefficients, 6);
+    verify(polynomial, {ConvexHullBasis::MINVO, Deriv::Vel, 2});
+    verify(makePolynomial({0.9}, Matrix::Random(6, 3), 6), {ConvexHullBasis::MINVO, Deriv::Vel, 2});
+    verify(makePolynomial({0.9}, Matrix::Random(8, 3), 8), {ConvexHullBasis::MINVO, Deriv::Vel, 2});
+    verify(makePolynomial({0.9, 1.2, 0.8}, Matrix::Random(24, 3), 8), {ConvexHullBasis::Bezier, Deriv::Pos, 1});
+}
+
 void checkFixedTopologyEigenAllocationFree()
 {
     using Spline = SplineTrajectory::QuinticSplineND<3>;
@@ -301,12 +354,14 @@ void checkFixedTopologyEigenAllocationFree()
     spline.backward(
         coefficient_gradients, duration_gradients, gradients);
 
+    allocation_test::begin();
     Eigen::internal::set_is_malloc_allowed(false);
     for (int iteration = 0; iteration < 8; ++iteration)
     {
         if (const auto status = spline.update(
             durations, waypoints, 0.25, boundary); !status) { throw std::runtime_error(status.message); }
         hull.update(spline.polynomial());
+        hull.update(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 1, 2});
         coefficient_gradients.setZero();
         duration_gradients.setZero();
         hull.backwardAdd(
@@ -317,6 +372,7 @@ void checkFixedTopologyEigenAllocationFree()
             gradients);
     }
     Eigen::internal::set_is_malloc_allowed(true);
+    require(allocation_test::end() == 0, "fixed-topology hull and spline operations do not allocate");
 }
 }
 
@@ -357,6 +413,7 @@ int main()
         checkBackward(
             SplineTrajectory::ConvexHullBasis::MINVO, 7, 1, generator);
         checkWorkspaceAndPieceTimeAdjoint(generator);
+        checkUpdateWithOptions();
         checkFixedTopologyEigenAllocationFree();
 
     });

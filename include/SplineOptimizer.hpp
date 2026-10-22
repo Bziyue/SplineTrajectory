@@ -37,7 +37,7 @@
 #include <vector>
 #include <cstdint>
 #include <functional>
-#include <optional>
+#include <numeric>
 #include <type_traits>
 #include <utility>
 
@@ -50,7 +50,8 @@ namespace SplineTrajectory
     {
         double cost = std::numeric_limits<double>::infinity();
         Status status{ErrorCode::NotPrepared, "No successful evaluation"};
-        explicit operator bool() const noexcept { return static_cast<bool>(status); }
+        bool ok() const noexcept { return status.ok(); }
+        explicit operator bool() const noexcept { return ok(); }
     };
 
     /** @brief Integration location on the source time axis, measured in seconds. */
@@ -205,18 +206,23 @@ namespace SplineTrajectory
     {
         std::vector<std::uint8_t> durations, waypoints;
         BoundaryDerivativeMask start, end;
-    };
 
-    /** @brief Numerical input copied by prepare(); times use seconds on one common axis. */
-    template<int DIM>
-    struct SplineProblem
-    {
-        std::vector<double> durations;
-        using WaypointMatrix = typename PPolyND<DIM>::PointMatrix;
-        WaypointMatrix waypoints;
-        BoundaryConditions<DIM> boundary;
-        double start_time = 0.0;
-        std::optional<OptimizationMask> mask;
+        /** @brief Fix every physical coordinate for a nonnegative segment count. */
+        static OptimizationMask allFixed(int segments)
+        {
+            OptimizationMask mask;
+            mask.durations.assign(segments, 0);
+            mask.waypoints.assign(segments + 1, 0);
+            return mask;
+        }
+
+        /** @brief Optimize only interior waypoints; durations and boundary derivatives stay fixed. */
+        static OptimizationMask interiorWaypoints(int segments)
+        {
+            auto mask = allFixed(segments);
+            for (int i = 1; i < segments; ++i) mask.waypoints[i] = 1;
+            return mask;
+        }
     };
 
     /** @brief Fixed solve options; changing topology or recording requires preparation. */
@@ -225,6 +231,8 @@ namespace SplineTrajectory
         double energy_weight = 0.0;
         int integration_steps = 64;
         bool record_samples = false;
+        double duration_weight = 0.0; ///< Linear cost on the sum of physical segment durations.
+        OptimizationMask mask{};
     };
 
     struct DurationVariable { int segment_index = 0, offset = 0; };
@@ -273,13 +281,22 @@ namespace SplineTrajectory
     template<class Spline>
     struct ParameterGradientView
     {
-        typename Spline::Gradients &spline;
+        typename Spline::WaypointMatrix &waypoints;
+        Eigen::VectorXd &durations;
+        BoundaryConditions<Spline::kDimension> &boundary;
         double &start_time;
-        /** @brief Add a row or column waypoint partial through the owning gradient's implementation. */
+        /** @brief Add a row or column waypoint partial to the borrowed owning storage. */
         template<class Derived>
         void addWaypoint(int index, const Eigen::MatrixBase<Derived> &partial)
-        { spline.addWaypoint(index, partial); }
+        { detail::addWaypointGradient(waypoints, index, partial); }
+    };
 
+    /** @brief Additive recorded-position and explicit trajectory-time partials, one sample per row. */
+    template<class Spline>
+    struct SampleGradientView
+    {
+        Eigen::Ref<typename Spline::WaypointMatrix> positions;
+        Eigen::Ref<Eigen::VectorXd> trajectory_times;
     };
 
     /** @brief Borrowed decision coordinates and immutable layout for additive domain penalties. */
@@ -464,7 +481,7 @@ namespace SplineTrajectory
     public:
         using Vector = typename Spline::Vector;
         using CoefficientMatrix = typename Spline::CoefficientMatrix;
-        using Problem = SplineProblem<DIM>;
+        using Problem = SplineInput<DIM>;
         using Polynomial = typename Spline::Polynomial;
         using Status = SplineTrajectory::Status;
         using ErrorCode = SplineTrajectory::ErrorCode;
@@ -483,7 +500,7 @@ namespace SplineTrajectory
 
     private:
         template<class O> using IntegralStage = detail::IntegralStage<O, const IntegralPointInfo &, const SampleState<DIM> &, SampleGradient<DIM> &>;
-        template<class O> using SampleStage = detail::SampleStage<O, const SampleBuffer &, Eigen::Ref<SampleGradMatrix>, Eigen::Ref<Eigen::VectorXd>>;
+        template<class O> using SampleStage = detail::SampleStage<O, const SampleBuffer &, SampleGradientView<Spline> &>;
         template<class O> using CoefficientStage = detail::CoefficientStage<O, const ParameterView<Spline> &, CoefficientGradientView<Spline> &>;
         template<class O> using ParameterStage = detail::ParameterStage<O, const ParameterView<Spline> &, ParameterGradientView<Spline> &>;
         template<class O> using DecisionStage = detail::DecisionStage<O, const DecisionView &, Eigen::Ref<Eigen::VectorXd>>;
@@ -517,7 +534,6 @@ namespace SplineTrajectory
         {
             Problem problem;
             OptimizerOptions options;
-            OptimizationMask mask;
             DecisionLayout layout;
             Eigen::VectorXd initial_variables;
             SplineVector<IntegralBasis> basis;
@@ -606,8 +622,8 @@ namespace SplineTrajectory
                 if constexpr (Spline::kDegree >= 5) if (mask.a) function(endpoint.a);
                 if constexpr (Spline::kDegree >= 7) if (mask.j) function(endpoint.j);
             };
-            visit(boundary.start, prepared_.mask.start);
-            visit(boundary.end, prepared_.mask.end);
+            visit(boundary.start, prepared_.options.mask.start);
+            visit(boundary.end, prepared_.options.mask.end);
         }
         ParameterView<Spline> parameterView() const
         {
@@ -616,7 +632,7 @@ namespace SplineTrajectory
         ParameterGradientView<Spline> parameterGradient()
         {
             auto &gradient = buffers_.grads;
-            return {gradient, buffers_.grad_start_time};
+            return {gradient.waypoints, gradient.durations, gradient.boundary, buffers_.grad_start_time};
         }
 
         // Initial coordinates belong to the prepared problem, not the changing trial state.
@@ -657,9 +673,9 @@ namespace SplineTrajectory
 
         /** @brief Validate reference topology and numerical options without changing workspace state.
          * @param problem Physical input with durations in seconds and waypoints in caller coordinates.
-         * @param options Fixed integration and energy settings.
+         * @param options Fixed integration and built-in cost settings.
          * @return Success or the first invalid-input/dimension status; maps are checked during layout setup. */
-        static Status validateProblem(const Problem &problem, OptimizerOptions options)
+        static Status validateProblem(const Problem &problem, const OptimizerOptions &options)
         {
             if (problem.durations.empty() ||
                 problem.durations.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / Spline::kCoefficientCount))
@@ -673,8 +689,9 @@ namespace SplineTrajectory
                 if (!std::isfinite(duration) || duration <= 0.0)
                     return error(ErrorCode::InvalidInput, "Durations must be finite and positive");
             if (options.integration_steps <= 0 || options.integration_steps == std::numeric_limits<int>::max() ||
-                !std::isfinite(options.energy_weight) || options.energy_weight < 0.0)
-                return error(ErrorCode::InvalidInput, "Invalid integration steps or energy weight");
+                !std::isfinite(options.energy_weight) || options.energy_weight < 0.0 ||
+                !std::isfinite(options.duration_weight) || options.duration_weight < 0.0)
+                return error(ErrorCode::InvalidInput, "Invalid integration steps or cost weight");
 
             return Status::success();
         }
@@ -685,8 +702,7 @@ namespace SplineTrajectory
         Status prepareDecisionLayout()
         {
             const int n = prepared_.num_segments;
-            prepared_.mask = prepared_.problem.mask.value_or(OptimizationMask{});
-            auto &mask = prepared_.mask;
+            auto &mask = prepared_.options.mask;
             if (mask.durations.empty()) mask.durations.assign(n, 1);
             if (mask.waypoints.empty())
             {
@@ -766,7 +782,7 @@ namespace SplineTrajectory
          * @param need_samples Whether the objective requires recorded sample storage.
          * @return Success or a preparation failure that leaves no usable candidate.
          * @note Requires exclusive access; allocation and user map exceptions follow prepare(). */
-        Status prepareImpl(const Problem &problem, OptimizerOptions options, bool need_samples)
+        Status prepareImpl(const Problem &problem, const OptimizerOptions &options, bool need_samples)
         {
             // Snapshot first: callers may pass this optimizer's current problem view.
             Problem snapshot = problem;
@@ -873,7 +889,7 @@ namespace SplineTrajectory
 
         /** @brief Validate and copy a problem, allocate storage, and build its initial candidate.
          * @param problem Physical input; not retained by reference.
-         * @param options Fixed quadrature, energy and optional recording settings.
+         * @param options Fixed quadrature, built-in costs and optional recording settings.
          * @return Failure leaves the optimizer unprepared with no usable polynomial.
          * @note Allocation occurs here. Borrowed maps must remain valid throughout the solve;
          *       reprepare whenever their mapping behavior changes. */
@@ -884,7 +900,7 @@ namespace SplineTrajectory
 
         /** @brief Prepare all library storage needed by the objective; no objective reference is retained. */
         template<class Objective>
-        Status prepare(const Problem &problem, OptimizerOptions options, const Objective &objective)
+        Status prepare(const Problem &problem, const OptimizerOptions &options, const Objective &objective)
         {
             (void)objective;
             using O = detail::Plain<Objective>;
@@ -893,10 +909,13 @@ namespace SplineTrajectory
         }
 
         bool isPrepared() const noexcept { return static_cast<bool>(prepared_.status); }
-        int dimension() const noexcept { return isPrepared() ? prepared_.layout.dimension : 0; }
-        const Problem &problem() const noexcept { return prepared_.problem; }
-        const DecisionLayout &layout() const noexcept { return prepared_.layout; }
-        const OptimizationMask &activeMask() const noexcept { return prepared_.mask; }
+        int decisionDimension() const noexcept { return isPrepared() ? prepared_.layout.dimension : 0; }
+        const Problem &problem() const & noexcept { return prepared_.problem; }
+        const Problem &problem() const && noexcept = delete;
+        const DecisionLayout &layout() const & noexcept { return prepared_.layout; }
+        const DecisionLayout &layout() const && noexcept = delete;
+        const OptimizationMask &activeMask() const & noexcept { return prepared_.options.mask; }
+        const OptimizationMask &activeMask() const && noexcept = delete;
         /** @brief Borrow the last built polynomial; inspect evaluation/update status before use.
          * @note Any evaluation, preparation or movement invalidates previously obtained views/samplers. */
         const Polynomial &polynomial() const & { return state_.spline.polynomial(); }
@@ -914,14 +933,17 @@ namespace SplineTrajectory
         StatusOr<double> energy() const
         {
             if (!state_.spline.isValid()) return Status{ErrorCode::InvalidState, "Energy requires a valid candidate"};
-            return state_.spline.energy();
+            const double value = state_.spline.energy();
+            if (!std::isfinite(value)) return Status{ErrorCode::NumericalFailure, "Nonfinite spline energy"};
+            return value;
         }
         /** @brief Borrow records from the latest successful recording evaluation; otherwise empty. */
-        const SampleBuffer &recordedSamples() const noexcept
+        const SampleBuffer &recordedSamples() const & noexcept
         {
             static const SampleBuffer empty;
             return isPrepared() && buffers_.samples_valid ? buffers_.integral_samples : empty;
         }
+        const SampleBuffer &recordedSamples() const && noexcept = delete;
 
         /** @brief Copy the initial coordinates encoded once during preparation.
          * @return Owning vector, independent of subsequent trial evaluations and caller edits.
@@ -943,11 +965,11 @@ namespace SplineTrajectory
         Status update(const Eigen::VectorXd &x)
         {
             buffers_.samples_valid = false;
-            if (!isPrepared() || x.size() != dimension() || !detail::allFinite(x))
+            if (!isPrepared() || x.size() != decisionDimension() || !detail::allFinite(x))
             {
                 state_.spline = Spline{};
                 if (!isPrepared()) return prepared_.status;
-                if (x.size() != dimension()) return error(ErrorCode::DimensionMismatch, "Decision vector has wrong size");
+                if (x.size() != decisionDimension()) return error(ErrorCode::DimensionMismatch, "Decision vector has wrong size");
                 return error(ErrorCode::InvalidInput, "Nonfinite decision vector");
             }
             return buildCandidate(x);
@@ -969,8 +991,8 @@ namespace SplineTrajectory
             using O = detail::Plain<Objective>;
             validateObjective<O>();
             if (!isPrepared()) return failEvaluation(prepared_.status, gradient);
-            gradient.resize(dimension());
-            if (x.size() != dimension())
+            gradient.resize(decisionDimension());
+            if (x.size() != decisionDimension())
             {
                 state_.spline = Spline{};
                 return failEvaluation(error(ErrorCode::DimensionMismatch, "Decision vector must match the prepared layout"), gradient);
@@ -1056,9 +1078,8 @@ namespace SplineTrajectory
             {
                 b.sample_position_grad_buffer.setZero();
                 b.sample_time_grad_buffer.setZero();
-                const auto result = detail::toEvaluationResult(objective.sample(b.integral_samples,
-                    Eigen::Ref<SampleGradMatrix>(b.sample_position_grad_buffer),
-                    Eigen::Ref<Eigen::VectorXd>(b.sample_time_grad_buffer)));
+                SampleGradientView<Spline> output{b.sample_position_grad_buffer, b.sample_time_grad_buffer};
+                const auto result = detail::toEvaluationResult(objective.sample(b.integral_samples, output));
                 if (!result) return result.status;
                 cost += result.cost;
                 accumulateSampleCostGradients();
@@ -1085,6 +1106,12 @@ namespace SplineTrajectory
         {
             using O = detail::Plain<Objective>;
             auto &b = buffers_;
+            const double duration_weight = prepared_.options.duration_weight;
+            if (duration_weight != 0.0)
+            {
+                b.grads.durations.array() += duration_weight;
+                cost += duration_weight * std::accumulate(state_.durations.begin(), state_.durations.end(), 0.0);
+            }
             if constexpr (ParameterStage<O>::valid)
             {
                 auto input = parameterView();
@@ -1161,10 +1188,7 @@ namespace SplineTrajectory
             }
             for (const auto &variable : prepared_.layout.waypoints)
             {
-                Vector physical;
-                if (variable.point_index == 0) physical = g.start.p;
-                else if (variable.point_index == prepared_.num_segments) physical = g.end.p;
-                else physical = g.inner_points.row(variable.point_index - 1).transpose();
+                const Vector physical = g.waypoints.row(variable.point_index).transpose();
                 const auto status = detail::invokeMapping([&] {
                     return spaceMap().backward(x.segment(variable.offset, variable.dof), physical,
                         variable.point_index, gradient.segment(variable.offset, variable.dof));
@@ -1172,7 +1196,7 @@ namespace SplineTrajectory
                 if (!status) return status;
             }
             int offset = prepared_.layout.boundary_offset;
-            forEachBoundary(g, [&](const auto &value) {
+            forEachBoundary(g.boundary, [&](const auto &value) {
                 gradient.template segment<DIM>(offset) = value;
                 offset += DIM;
             });

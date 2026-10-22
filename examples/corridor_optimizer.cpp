@@ -16,7 +16,7 @@ struct CorridorCost
              + dynamics_cost;
     }
 };
-struct Objective { example::DurationCost parameter; CorridorCost integral; };
+struct Objective { CorridorCost integral; };
 
 int main(int argc, char **argv) try
 {

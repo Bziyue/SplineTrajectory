@@ -210,7 +210,7 @@ void test_cubic()
     cout << std::scientific << std::setprecision(6);
     cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.durations - gT_minco).norm() << "\n";
     cout << "[Compare] ||dL/dP_inner_spline - dL/dP_inner_minco|| = "
-         << (g.inner_points - gP_minco.transpose()).norm() << "\n";
+         << (g.waypoints.middleRows(1, g.waypoints.rows() - 2) - gP_minco.transpose()).norm() << "\n";
 
     cout << "\n[Check] dL/dP (inner points)\n";
     for (int k = 1; k <= n_pts - 2; ++k)
@@ -223,7 +223,7 @@ void test_cubic()
             const double fp = eval_loss(T, Pp, bc);
             const double fm = eval_loss(T, Pm, bc);
             const double num = (fp - fm) / (2.0 * eps);
-            const double ana = g.inner_points.row(k - 1)(d);
+            const double ana = g.waypoints.row(k)(d);
             cout << "P[" << k << "]." << d
                  << "  ana=" << ana << "  num=" << num
                  << "  rel=" << rel_err(ana, num) << "\n";
@@ -251,7 +251,7 @@ void test_cubic()
         Pp(0, d) += eps;
         Pm(0, d) -= eps;
         const double num = (eval_loss_minco(T, Pp, bc) - eval_loss_minco(T, Pm, bc)) / (2.0 * eps);
-        print_triplet("start_p." + std::to_string(d), g.start.p(d), gHead_minco(d, 0), num);
+        print_triplet("start_p." + std::to_string(d), g.waypoints(0, d), gHead_minco(d, 0), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -259,7 +259,7 @@ void test_cubic()
         bcp.start.v(d) += eps;
         bcm.start.v(d) -= eps;
         const double num = (eval_loss_minco(T, P, bcp) - eval_loss_minco(T, P, bcm)) / (2.0 * eps);
-        print_triplet("start_v." + std::to_string(d), g.start.v(d), gHead_minco(d, 1), num);
+        print_triplet("start_v." + std::to_string(d), g.boundary.start.v(d), gHead_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -267,7 +267,7 @@ void test_cubic()
         Pp(n_seg, d) += eps;
         Pm(n_seg, d) -= eps;
         const double num = (eval_loss_minco(T, Pp, bc) - eval_loss_minco(T, Pm, bc)) / (2.0 * eps);
-        print_triplet("end_p." + std::to_string(d), g.end.p(d), gTail_minco(d, 0), num);
+        print_triplet("end_p." + std::to_string(d), g.waypoints(g.waypoints.rows() - 1, d), gTail_minco(d, 0), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -275,7 +275,7 @@ void test_cubic()
         bcp.end.v(d) += eps;
         bcm.end.v(d) -= eps;
         const double num = (eval_loss_minco(T, P, bcp) - eval_loss_minco(T, P, bcm)) / (2.0 * eps);
-        print_triplet("end_v." + std::to_string(d), g.end.v(d), gTail_minco(d, 1), num);
+        print_triplet("end_v." + std::to_string(d), g.boundary.end.v(d), gTail_minco(d, 1), num);
     }
 }
 
@@ -356,7 +356,7 @@ void test_quintic()
     cout << std::scientific << std::setprecision(6);
     cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.durations - gT_minco).norm() << "\n";
     cout << "[Compare] ||dL/dP_inner_spline - dL/dP_inner_minco|| = "
-         << (g.inner_points - gP_minco.transpose()).norm() << "\n";
+         << (g.waypoints.middleRows(1, g.waypoints.rows() - 2) - gP_minco.transpose()).norm() << "\n";
 
     cout << "\n[Check] dL/dP (inner points)\n";
     for (int k = 1; k <= n_pts - 2; ++k)
@@ -369,7 +369,7 @@ void test_quintic()
             const double fp = eval_loss(T, Pp, bc);
             const double fm = eval_loss(T, Pm, bc);
             const double num = (fp - fm) / (2.0 * eps);
-            const double ana = g.inner_points.row(k - 1)(d);
+            const double ana = g.waypoints.row(k)(d);
             cout << "P[" << k << "]." << d
                  << "  ana=" << ana << "  num=" << num
                  << "  rel=" << rel_err(ana, num) << "\n";
@@ -397,7 +397,7 @@ void test_quintic()
         Pp(0, d) += eps;
         Pm(0, d) -= eps;
         const double num = (eval_loss_minco(T, Pp, bc) - eval_loss_minco(T, Pm, bc)) / (2.0 * eps);
-        print_triplet("start_p." + std::to_string(d), g.start.p(d), gHead_minco(d, 0), num);
+        print_triplet("start_p." + std::to_string(d), g.waypoints(0, d), gHead_minco(d, 0), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -405,7 +405,7 @@ void test_quintic()
         bcp.start.v(d) += eps;
         bcm.start.v(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("start_v." + std::to_string(d), g.start.v(d), gHead_minco(d, 1), num);
+        print_triplet("start_v." + std::to_string(d), g.boundary.start.v(d), gHead_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -413,7 +413,7 @@ void test_quintic()
         bcp.start.a(d) += eps;
         bcm.start.a(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("start_a." + std::to_string(d), g.start.a(d), gHead_minco(d, 2), num);
+        print_triplet("start_a." + std::to_string(d), g.boundary.start.a(d), gHead_minco(d, 2), num);
     }
 
     for (int d = 0; d < DIM; ++d)
@@ -422,7 +422,7 @@ void test_quintic()
         Pp(n_seg, d) += eps;
         Pm(n_seg, d) -= eps;
         const double num = (eval_loss_minco(T, Pp, bc) - eval_loss_minco(T, Pm, bc)) / (2.0 * eps);
-        print_triplet("end_p." + std::to_string(d), g.end.p(d), gTail_minco(d, 0), num);
+        print_triplet("end_p." + std::to_string(d), g.waypoints(g.waypoints.rows() - 1, d), gTail_minco(d, 0), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -430,7 +430,7 @@ void test_quintic()
         bcp.end.v(d) += eps;
         bcm.end.v(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("end_v." + std::to_string(d), g.end.v(d), gTail_minco(d, 1), num);
+        print_triplet("end_v." + std::to_string(d), g.boundary.end.v(d), gTail_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -438,7 +438,7 @@ void test_quintic()
         bcp.end.a(d) += eps;
         bcm.end.a(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("end_a." + std::to_string(d), g.end.a(d), gTail_minco(d, 2), num);
+        print_triplet("end_a." + std::to_string(d), g.boundary.end.a(d), gTail_minco(d, 2), num);
     }
 }
 
@@ -521,7 +521,7 @@ void test_septic()
     cout << std::scientific << std::setprecision(6);
     cout << "[Compare] ||dL/dT_spline - dL/dT_minco|| = " << (g.durations - gT_minco).norm() << "\n";
     cout << "[Compare] ||dL/dP_inner_spline - dL/dP_inner_minco|| = "
-         << (g.inner_points - gP_minco.transpose()).norm() << "\n";
+         << (g.waypoints.middleRows(1, g.waypoints.rows() - 2) - gP_minco.transpose()).norm() << "\n";
 
     cout << "\n[Check] dL/dP (inner points)\n";
     for (int k = 1; k <= n_pts - 2; ++k)
@@ -532,7 +532,7 @@ void test_septic()
             Pp(k, d) += eps;
             Pm(k, d) -= eps;
             const double num = (eval_loss(T, Pp, bc) - eval_loss(T, Pm, bc)) / (2.0 * eps);
-            const double ana = g.inner_points.row(k - 1)(d);
+            const double ana = g.waypoints.row(k)(d);
             cout << "P[" << k << "]." << d
                  << "  ana=" << ana << "  num=" << num
                  << "  rel=" << rel_err(ana, num) << "\n";
@@ -558,7 +558,7 @@ void test_septic()
         Pp(0, d) += eps;
         Pm(0, d) -= eps;
         const double num = (eval_loss_minco(T, Pp, bc) - eval_loss_minco(T, Pm, bc)) / (2.0 * eps);
-        print_triplet("start_p." + std::to_string(d), g.start.p(d), gHead_minco(d, 0), num);
+        print_triplet("start_p." + std::to_string(d), g.waypoints(0, d), gHead_minco(d, 0), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -566,7 +566,7 @@ void test_septic()
         bcp.start.v(d) += eps;
         bcm.start.v(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("start_v." + std::to_string(d), g.start.v(d), gHead_minco(d, 1), num);
+        print_triplet("start_v." + std::to_string(d), g.boundary.start.v(d), gHead_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -574,7 +574,7 @@ void test_septic()
         bcp.start.a(d) += eps;
         bcm.start.a(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("start_a." + std::to_string(d), g.start.a(d), gHead_minco(d, 2), num);
+        print_triplet("start_a." + std::to_string(d), g.boundary.start.a(d), gHead_minco(d, 2), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -582,7 +582,7 @@ void test_septic()
         bcp.start.j(d) += eps;
         bcm.start.j(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("start_j." + std::to_string(d), g.start.j(d), gHead_minco(d, 3), num);
+        print_triplet("start_j." + std::to_string(d), g.boundary.start.j(d), gHead_minco(d, 3), num);
     }
 
     for (int d = 0; d < DIM; ++d)
@@ -591,7 +591,7 @@ void test_septic()
         Pp(n_seg, d) += eps;
         Pm(n_seg, d) -= eps;
         const double num = (eval_loss_minco(T, Pp, bc) - eval_loss_minco(T, Pm, bc)) / (2.0 * eps);
-        print_triplet("end_p." + std::to_string(d), g.end.p(d), gTail_minco(d, 0), num);
+        print_triplet("end_p." + std::to_string(d), g.waypoints(g.waypoints.rows() - 1, d), gTail_minco(d, 0), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -599,7 +599,7 @@ void test_septic()
         bcp.end.v(d) += eps;
         bcm.end.v(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("end_v." + std::to_string(d), g.end.v(d), gTail_minco(d, 1), num);
+        print_triplet("end_v." + std::to_string(d), g.boundary.end.v(d), gTail_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -607,7 +607,7 @@ void test_septic()
         bcp.end.a(d) += eps;
         bcm.end.a(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("end_a." + std::to_string(d), g.end.a(d), gTail_minco(d, 2), num);
+        print_triplet("end_a." + std::to_string(d), g.boundary.end.a(d), gTail_minco(d, 2), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
@@ -615,7 +615,7 @@ void test_septic()
         bcp.end.j(d) += eps;
         bcm.end.j(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
-        print_triplet("end_j." + std::to_string(d), g.end.j(d), gTail_minco(d, 3), num);
+        print_triplet("end_j." + std::to_string(d), g.boundary.end.j(d), gTail_minco(d, 3), num);
     }
 }
 

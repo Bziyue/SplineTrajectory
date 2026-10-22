@@ -126,7 +126,7 @@ struct DurationCost {
         SplineTrajectory::ParameterGradientView<Curve> &output) const
     {
         const auto &times = state.durations;
-        auto &gradient = output.spline.durations;
+        auto &gradient = output.durations;
         gradient.array()+=weight;
         return {weight*std::accumulate(times.begin(),times.end(),0.0), SplineTrajectory::Status::success()};
     }
@@ -235,8 +235,8 @@ struct IntegralCost {
     }
 };
 
-inline SplineTrajectory::SplineProblem<Spline::kDimension> splineProblem(const ProblemData &p) {
-    SplineTrajectory::SplineProblem<Spline::kDimension> problem;
+inline SplineTrajectory::SplineInput<Spline::kDimension> splineProblem(const ProblemData &p) {
+    SplineTrajectory::SplineInput<Spline::kDimension> problem;
     problem.durations=p.durations; problem.waypoints=p.waypoints;
     problem.boundary.start.v=p.start_derivatives.col(0); problem.boundary.end.v=p.end_derivatives.col(0);
     problem.boundary.start.a=p.start_derivatives.col(1); problem.boundary.end.a=p.end_derivatives.col(1);
