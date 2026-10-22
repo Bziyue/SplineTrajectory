@@ -446,7 +446,7 @@ namespace SplineTrajectory
                 grad_times.resize(pieces);
                 global_time_grad_buffer.resize(pieces);
                 auxiliary_grad_buffer.resize(auxiliary);
-                grads.resetTopology(pieces);
+                grads.setZero(pieces);
                 segment_results.resize(pieces);
                 integral_samples.resize(static_cast<std::size_t>(samples));
                 sample_position_grad_buffer.resize(DIM, samples);

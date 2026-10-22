@@ -760,7 +760,7 @@ BoundaryGradients energyBoundaryGradient() const;</code></pre>
 <td><span data-lang="en" lang="en">Start/end p/v/a/j; unsupported higher fields remain zero.</span><span data-lang="zh" lang="zh-CN">起终点 p/v/a/j；未支持的高阶字段为零。</span></td>
 </tr>
 </tbody></table></div>
-<p class="note"><span data-lang="en" lang="en">Each partial/gradient getter also has a <code>void method(Output&amp; output) const</code> overload with the corresponding output type. Pre-size its dynamic storage; no resizing occurs. Full gradient storage is prepared with <code>output.resetTopology(N)</code>. Use <code>setZero()</code> before additive accumulation.</span><span data-lang="zh" lang="zh-CN">各偏导/梯度取值方法也提供 <code>void method(Output&amp; output) const</code> 引用重载，输出类型与返回值版本一致。动态缓冲须预分配，调用中不调整大小。完整梯度用 <code>output.resetTopology(N)</code> 准备；累加前用 <code>setZero()</code> 清零。</span></p>
+<p class="note"><span data-lang="en" lang="en">Each partial/gradient getter also has a <code>void method(Output&amp; output) const</code> overload with the corresponding output type. Overwrite overloads resize outputs automatically and reuse matching storage. <code>output.size()</code> reports the segment count. For accumulation, prepare matching zero gradients with <code>output.setZero(N)</code>; <code>output.setZero()</code> clears existing values.</span><span data-lang="zh" lang="zh-CN">各偏导/梯度取值方法也提供 <code>void method(Output&amp; output) const</code> 引用重载，输出类型与返回值版本一致。覆盖接口自动调整输出尺寸，尺寸相同时复用存储。<code>output.size()</code> 返回段数。累加前可用 <code>output.setZero(N)</code> 准备对应段数的零梯度；<code>output.setZero()</code> 清零现有值。</span></p>
 </article>
 <article class="subsection">
 <h3 id="adjoint"><span data-lang="en" lang="en">Custom-cost adjoint</span><span data-lang="zh" lang="zh-CN">自定义代价的伴随反传</span><a class="anchor" href="#adjoint" aria-label="Permalink / 固定链接">#</a></h3>
@@ -893,11 +893,20 @@ void backward(const CoefficientMatrix&amp; gdC, const Eigen::VectorXd&amp; gdT,
 <td><code>BoundaryGradient&lt;DIM&gt;</code></td>
 <td><span data-lang="en" lang="en">Each has D-vectors <code>p, v, a, j</code>, including endpoint positions.</span><span data-lang="zh" lang="zh-CN">各含 D 维向量 <code>p, v, a, j</code>，包括端点位置。</span></td>
 </tr>
+<tr id="gradient-size" data-search-entry>
+<td><code>output.size()</code></td>
+<td><code>int</code></td>
+<td><span data-lang="en" lang="en">Segment count; zero for a default-constructed output.</span><span data-lang="zh" lang="zh-CN">当前段数；默认构造时为零。</span></td>
+</tr>
+<tr id="gradient-setZero" data-search-entry>
+<td><code>output.setZero()</code><br><code>output.setZero(N)</code></td>
+<td><code>void</code></td>
+<td><span data-lang="en" lang="en">Clear all gradients, including boundaries. Without N, retain current sizes; with N, prepare zero gradients for N segments. Matching sizes reuse storage.</span><span data-lang="zh" lang="zh-CN">清零全部梯度，包括边界。不传 N 时保留当前尺寸；传入 N 时准备 N 段的零梯度。尺寸相同时复用存储。</span></td>
+</tr>
 </tbody></table></div>
-<p><span data-lang="en" lang="en"><code>backward()</code> reuses construction factors and requires exclusive access to the spline. The reference form overwrites pre-sized output. For energy alone, prefer the direct <code>energyGradient()</code>; <code>backward(energyCoefficientPartials(), energyDurationPartials())</code> expresses the same chain rule.</span><span data-lang="zh" lang="zh-CN"><code>backward()</code> 复用构造分解，需独占样条。引用版本覆盖预分配输出。仅能量项优先使用直接的 <code>energyGradient()</code>；<code>backward(energyCoefficientPartials(), energyDurationPartials())</code> 表达相同链式法则。</span></p>
+<p><span data-lang="en" lang="en"><code>backward()</code> reuses construction factors and requires exclusive access to the spline. The reference form resizes and overwrites the output, reusing matching storage. For energy alone, prefer the direct <code>energyGradient()</code>; <code>backward(energyCoefficientPartials(), energyDurationPartials())</code> expresses the same chain rule.</span><span data-lang="zh" lang="zh-CN"><code>backward()</code> 复用构造分解，需独占样条。引用版本自动调整尺寸并覆盖输出，尺寸相同时复用存储。仅能量项优先使用直接的 <code>energyGradient()</code>；<code>backward(energyCoefficientPartials(), energyDurationPartials())</code> 表达相同链式法则。</span></p>
 <pre class="signature"><code>Spline::Gradients g;
-g.resetTopology(spline.numSegments());
-spline.backward(gdC, gdT, g);   // overwrite / 覆盖
+spline.backward(gdC, gdT, g);   // auto-size and overwrite / 自动调整尺寸并覆盖
 spline.energyGradientAdd(g, 0.5); // add energy / 累加能量</code></pre>
 </article>
 </section>

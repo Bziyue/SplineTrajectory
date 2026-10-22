@@ -112,7 +112,7 @@ public:
 #else
         if (const auto status = spline.update(times, points, 0.0, problem.boundary); !status) { throw std::runtime_error(status.message); }
 #endif
-        spline_gradients.resetTopology(n); energy_gradients.resetTopology(n);
+        spline_gradients.setZero(n); energy_gradients.setZero(n);
         coeff_grad.resize(n * count, 3); time_grad.resize(n); physical_time_grad.resize(n);
         inner.resize(3, n - 1); point_grad.resize(3, n - 1);
     }

@@ -1192,17 +1192,26 @@ namespace SplineTrajectory
         CoefficientMatrix inner_points;
         Eigen::VectorXd durations;
         BoundaryGradient<DIM> start, end;
-        /** @brief Allocate output storage for a topology without initializing values.
-         * @param segments Positive segment count; output storage is exclusively owned. */
-        void resetTopology(int segments)
-        {
-            inner_points.resize(std::max(0, segments - 1), DIM);
-            durations.resize(segments);
-        }
+        /** @brief Query the segment count represented by these gradients.
+         * @return Number of duration entries; zero for a default-constructed output. */
+        int size() const noexcept { return static_cast<int>(durations.size()); }
+
+        /** @brief Clear all gradients while retaining their current sizes.
+         * @note Requires exclusive access; storage is reused, including fixed-size boundary fields. */
         void setZero()
         {
             inner_points.setZero(); durations.setZero();
             start = {}; end = {};
+        }
+
+        /** @brief Prepare zero gradients for additive accumulation over a segment count.
+         * @param segments Nonnegative segment count; zero prepares an empty output.
+         * @note Requires exclusive access. Matching sizes reuse existing storage. */
+        void setZero(int segments)
+        {
+            inner_points.resize(std::max(0, segments - 1), DIM);
+            durations.resize(segments);
+            setZero();
         }
 
         /** @brief Accumulate a position partial at an endpoint or interior waypoint.
@@ -1254,7 +1263,8 @@ namespace SplineTrajectory
          * @tparam Add Select accumulation or overwrite at compile time.
          * @tparam Scale Signed multiplier of the right-minus-left highest power coefficient.
          * @param polynomial Valid minimum-derivative spline in physical time; borrowed for this call.
-         * @param[in,out] gradient Pre-sized interior waypoint gradients in the caller's coordinates.
+         * @param[in,out] gradient Interior waypoint gradients in the caller's coordinates.
+         *        Overwrite resizes the output; accumulation requires matching initialized storage.
          * @param weight Multiplier of the energy contribution.
          * @pre The spline is valid.
          * @note Requires the per-order energy multiplier and exclusive access to gradient.
@@ -1264,6 +1274,8 @@ namespace SplineTrajectory
                                            typename PPolyND<DIM>::CoefficientMatrix &gradient, double weight)
         {
             const int segments = polynomial.numSegments();
+            if constexpr (!Add)
+                gradient.resize(segments - 1, DIM);
 
             // Integration by parts leaves only the highest-derivative jump at each interior knot.
             const auto &coefficients = polynomial.coefficients();
@@ -1283,12 +1295,12 @@ namespace SplineTrajectory
          * @param duration_partials Direct physical-duration partials; borrowed for this call.
          *        May refer to gradient.durations itself.
          * @param[out] gradient Receives duration partials and zero position/boundary gradients.
-         * @note Requires matching, already prepared topology and exclusive access to gradient.
-         *       Reuses storage and avoids zeroing durations immediately before overwriting them. */
-        template <typename Gradients>
-        inline void initializeGradients(const Eigen::VectorXd &duration_partials, Gradients &gradient)
+         * @note Sizes output storage to the duration partials and requires exclusive output access.
+         *       Matching sizes reuse storage; durations are overwritten without first zeroing them. */
+        template <int DIM>
+        inline void initializeGradients(const Eigen::VectorXd &duration_partials, SplineGradients<DIM> &gradient)
         {
-            gradient.inner_points.setZero();
+            gradient.inner_points.setZero(std::max<Eigen::Index>(0, duration_partials.size() - 1), DIM);
             gradient.durations = duration_partials;
             gradient.start = {};
             gradient.end = {};
@@ -1601,7 +1613,7 @@ namespace SplineTrajectory
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
      *       Energy and adjoint queries require successful construction and return plain values or void.
-     *       Reference gradient outputs must be pre-sized; resetTopology(N) prepares full gradients.
+     *       Overwritten gradient outputs resize automatically and reuse matching storage.
      *       Adjoint inputs must be finite with N*kCoefficientCount coefficient rows and N time partials.
      *       All public overloads use this single contract; callers perform input validation and
      *       guarantee a representable working range. Coefficients, energy and gradients are not
@@ -1795,12 +1807,12 @@ namespace SplineTrajectory
          *
          * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 4) × DIM.
          *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
-         * @note This computes only the direct partial derivative, not the full gradient.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
+         * @pre The spline is valid. */
         void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
             assert(trajectory_.isValid());
-            gdC.setZero();
+            gdC.setZero(num_segments_ * kCoefficientCount, DIM);
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -1820,7 +1832,7 @@ namespace SplineTrajectory
         /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
         CoefficientMatrix energyCoefficientPartials() const
         {
-            CoefficientMatrix gdC(num_segments_ * kCoefficientCount, DIM);
+            CoefficientMatrix gdC;
             energyCoefficientPartials(gdC);
             return gdC;
         }
@@ -1830,11 +1842,12 @@ namespace SplineTrajectory
          *
          * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
-         * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @note Local coefficients are held fixed. Output resizes automatically and reuses matching storage.
+         * @pre The spline is valid. */
         void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
             assert(trajectory_.isValid());
+            gdT.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -1852,7 +1865,7 @@ namespace SplineTrajectory
         /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
         Eigen::VectorXd energyDurationPartials() const
         {
-            Eigen::VectorXd gdT(num_segments_);
+            Eigen::VectorXd gdT;
             energyDurationPartials(gdT);
             return gdT;
         }
@@ -1861,8 +1874,9 @@ namespace SplineTrajectory
          * @brief Compute full gradient of energy w.r.t. segment durations.
          *
          * @param[out] grad Full gradient dE/dT, size num_segments.
-         *         Includes both direct and indirect dependencies via chain rule.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         *         Includes both direct and indirect dependencies via chain rule. Matching storage is reused;
+         *         otherwise the output is resized.
+         * @pre The spline is valid. */
         void energyDurationGradient(Eigen::VectorXd &grad) const
         {
             assert(trajectory_.isValid());
@@ -1872,7 +1886,7 @@ namespace SplineTrajectory
         /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
         Eigen::VectorXd energyDurationGradient() const
         {
-            Eigen::VectorXd grad(num_segments_);
+            Eigen::VectorXd grad;
             energyDurationGradient(grad);
             return grad;
         }
@@ -1880,8 +1894,8 @@ namespace SplineTrajectory
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
          * @param[out] grad Full gradient dE/dP for inner points only.
-         *         Size (N-1) × DIM (excludes boundary points P0 and PN).
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         *         Resized to (N-1) × DIM (excludes boundary points P0 and PN); matching storage is reused.
+         * @pre The spline is valid. */
         void energyWaypointGradient(CoefficientMatrix &grad) const
         {
             assert(trajectory_.isValid());
@@ -1891,7 +1905,7 @@ namespace SplineTrajectory
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
         CoefficientMatrix energyWaypointGradient() const
         {
-            CoefficientMatrix grad(num_segments_ - 1, DIM);
+            CoefficientMatrix grad;
             energyWaypointGradient(grad);
             return grad;
         }
@@ -1900,7 +1914,7 @@ namespace SplineTrajectory
          * @brief Compute energy gradients w.r.t. boundary position and velocity.
          * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
          *        physical-time derivative convention (seconds); acceleration and jerk are zero.
-         * @pre The spline is valid and reference outputs already have the required shapes.
+         * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
         void energyBoundaryGradient(BoundaryGradients &grad) const
@@ -1932,7 +1946,6 @@ namespace SplineTrajectory
         Gradients energyGradient() const
         {
             Gradients res;
-            res.resetTopology(num_segments_);
             energyGradient(res);
             return res;
         }
@@ -1940,9 +1953,9 @@ namespace SplineTrajectory
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
+         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
          * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @pre The spline is valid. */
         void energyGradient(Gradients &grads) const
         {
             assert(trajectory_.isValid());
@@ -1978,7 +1991,6 @@ namespace SplineTrajectory
                            const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
-            res.resetTopology(num_segments_);
 
             backward(partialGradByCoeffs, partialGradByTimes, res);
 
@@ -1990,10 +2002,10 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
+         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
          * @pre Input partials are finite and match the constructed spline; no input scan is performed.
          * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @pre The spline is valid. */
         void backward(const CoefficientMatrix &partialGradByCoeffs,
                       const Eigen::VectorXd &partialGradByTimes,
                       Gradients &grads)
@@ -2013,11 +2025,15 @@ namespace SplineTrajectory
     private:
         /** @brief Write duration terms from the endpoint energy identity.
          * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] grad Pre-sized duration partials in physical seconds.
+         * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
+         *        accumulation requires matching initialized storage.
          * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
         template<bool Add>
         void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
         {
+            if constexpr (!Add)
+                grad.resize(num_segments_);
+
             for (int i = 0; i < num_segments_; ++i)
             {
                 const RowVector c1 = trajectory_.coefficients_.row(i * 4 + 1);
@@ -2278,7 +2294,7 @@ namespace SplineTrajectory
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
      *       Energy and adjoint queries require successful construction and return plain values or void.
-     *       Reference gradient outputs must be pre-sized; resetTopology(N) prepares full gradients.
+     *       Overwritten gradient outputs resize automatically and reuse matching storage.
      *       Adjoint inputs must be finite with N*kCoefficientCount coefficient rows and N time partials.
      *       All public overloads use this single contract; callers perform input validation and
      *       guarantee a representable working range. Coefficients, energy and gradients are not
@@ -2484,12 +2500,12 @@ namespace SplineTrajectory
          *
          * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 6) × DIM.
          *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
-         * @note This computes only the direct partial derivative, not the full gradient.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
+         * @pre The spline is valid. */
         void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
             assert(trajectory_.isValid());
-            gdC.setZero();
+            gdC.setZero(num_segments_ * kCoefficientCount, DIM);
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -2520,7 +2536,7 @@ namespace SplineTrajectory
         /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
         CoefficientMatrix energyCoefficientPartials() const
         {
-            CoefficientMatrix gdC(num_segments_ * kCoefficientCount, DIM);
+            CoefficientMatrix gdC;
             energyCoefficientPartials(gdC);
             return gdC;
         }
@@ -2530,11 +2546,12 @@ namespace SplineTrajectory
          *
          * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
-         * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @note Local coefficients are held fixed. Output resizes automatically and reuses matching storage.
+         * @pre The spline is valid. */
         void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
             assert(trajectory_.isValid());
+            gdT.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -2553,7 +2570,7 @@ namespace SplineTrajectory
         /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
         Eigen::VectorXd energyDurationPartials() const
         {
-            Eigen::VectorXd gdT(num_segments_);
+            Eigen::VectorXd gdT;
             energyDurationPartials(gdT);
             return gdT;
         }
@@ -2562,8 +2579,9 @@ namespace SplineTrajectory
          * @brief Compute full gradient of energy w.r.t. segment durations.
          *
          * @param[out] grad Full gradient dE/dT, size num_segments.
-         *         Includes both direct and indirect dependencies via chain rule.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         *         Includes both direct and indirect dependencies via chain rule. Matching storage is reused;
+         *         otherwise the output is resized.
+         * @pre The spline is valid. */
         void energyDurationGradient(Eigen::VectorXd &grad) const
         {
             assert(trajectory_.isValid());
@@ -2573,7 +2591,7 @@ namespace SplineTrajectory
         /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
         Eigen::VectorXd energyDurationGradient() const
         {
-            Eigen::VectorXd grad(num_segments_);
+            Eigen::VectorXd grad;
             energyDurationGradient(grad);
             return grad;
         }
@@ -2581,8 +2599,8 @@ namespace SplineTrajectory
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
          * @param[out] grad Full gradient dE/dP for inner points only.
-         *         Size (N-1) × DIM (excludes boundary points P0 and PN).
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         *         Resized to (N-1) × DIM (excludes boundary points P0 and PN); matching storage is reused.
+         * @pre The spline is valid. */
         void energyWaypointGradient(CoefficientMatrix &grad) const
         {
             assert(trajectory_.isValid());
@@ -2592,7 +2610,7 @@ namespace SplineTrajectory
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
         CoefficientMatrix energyWaypointGradient() const
         {
-            CoefficientMatrix grad(num_segments_ - 1, DIM);
+            CoefficientMatrix grad;
             energyWaypointGradient(grad);
             return grad;
         }
@@ -2601,7 +2619,7 @@ namespace SplineTrajectory
          * @brief Compute energy gradients w.r.t. boundary position, velocity and acceleration.
          * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
          *        physical-time derivative convention (seconds); jerk gradients are zero.
-         * @pre The spline is valid and reference outputs already have the required shapes.
+         * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
         void energyBoundaryGradient(BoundaryGradients &grad) const
@@ -2633,7 +2651,6 @@ namespace SplineTrajectory
         Gradients energyGradient() const
         {
             Gradients res;
-            res.resetTopology(num_segments_);
             energyGradient(res);
             return res;
         }
@@ -2641,9 +2658,9 @@ namespace SplineTrajectory
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
+         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
          * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @pre The spline is valid. */
         void energyGradient(Gradients &grads) const
         {
             assert(trajectory_.isValid());
@@ -2679,7 +2696,6 @@ namespace SplineTrajectory
                            const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
-            res.resetTopology(num_segments_);
 
             backward(partialGradByCoeffs, partialGradByTimes, res);
 
@@ -2691,10 +2707,10 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
+         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
          * @pre Input partials are finite and match the constructed spline; no input scan is performed.
          * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @pre The spline is valid. */
         void backward(const CoefficientMatrix &partialGradByCoeffs,
                       const Eigen::VectorXd &partialGradByTimes,
                       Gradients &grads)
@@ -2714,11 +2730,15 @@ namespace SplineTrajectory
     private:
         /** @brief Write duration terms from the endpoint energy identity.
          * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] grad Pre-sized duration partials in physical seconds.
+         * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
+         *        accumulation requires matching initialized storage.
          * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
         template<bool Add>
         void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
         {
+            if constexpr (!Add)
+                grad.resize(num_segments_);
+
             for (int i = 0; i < num_segments_; ++i)
             {
                 const RowVector c1 = trajectory_.coefficients_.row(i * 6 + 1);
@@ -3096,7 +3116,7 @@ namespace SplineTrajectory
      *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
      *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
      *       Energy and adjoint queries require successful construction and return plain values or void.
-     *       Reference gradient outputs must be pre-sized; resetTopology(N) prepares full gradients.
+     *       Overwritten gradient outputs resize automatically and reuse matching storage.
      *       Adjoint inputs must be finite with N*kCoefficientCount coefficient rows and N time partials.
      *       All public overloads use this single contract; callers perform input validation and
      *       guarantee a representable working range. Coefficients, energy and gradients are not
@@ -3311,12 +3331,12 @@ namespace SplineTrajectory
          *
          * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 8) × DIM.
          *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
-         * @note This computes only the direct partial derivative, not the full gradient.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
+         * @pre The spline is valid. */
         void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
             assert(trajectory_.isValid());
-            gdC.setZero();
+            gdC.setZero(num_segments_ * kCoefficientCount, DIM);
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -3358,7 +3378,7 @@ namespace SplineTrajectory
         /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
         CoefficientMatrix energyCoefficientPartials() const
         {
-            CoefficientMatrix gdC(num_segments_ * kCoefficientCount, DIM);
+            CoefficientMatrix gdC;
             energyCoefficientPartials(gdC);
             return gdC;
         }
@@ -3368,11 +3388,12 @@ namespace SplineTrajectory
          *
          * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
          *         Element i is the direct partial derivative w.r.t. T[i].
-         * @note Local physical-time coefficients are held fixed; spline interpolation constraints are not differentiated.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @note Local coefficients are held fixed. Output resizes automatically and reuses matching storage.
+         * @pre The spline is valid. */
         void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
             assert(trajectory_.isValid());
+            gdT.resize(num_segments_);
 
             for (int i = 0; i < num_segments_; ++i)
             {
@@ -3392,7 +3413,7 @@ namespace SplineTrajectory
         /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
         Eigen::VectorXd energyDurationPartials() const
         {
-            Eigen::VectorXd gdT(num_segments_);
+            Eigen::VectorXd gdT;
             energyDurationPartials(gdT);
             return gdT;
         }
@@ -3401,8 +3422,9 @@ namespace SplineTrajectory
          * @brief Compute full gradient of energy w.r.t. segment durations.
          *
          * @param[out] grad Full gradient dE/dT, size num_segments.
-         *         Includes both direct and indirect dependencies via chain rule.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         *         Includes both direct and indirect dependencies via chain rule. Matching storage is reused;
+         *         otherwise the output is resized.
+         * @pre The spline is valid. */
         void energyDurationGradient(Eigen::VectorXd &grad) const
         {
             assert(trajectory_.isValid());
@@ -3412,7 +3434,7 @@ namespace SplineTrajectory
         /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
         Eigen::VectorXd energyDurationGradient() const
         {
-            Eigen::VectorXd grad(num_segments_);
+            Eigen::VectorXd grad;
             energyDurationGradient(grad);
             return grad;
         }
@@ -3420,8 +3442,8 @@ namespace SplineTrajectory
         /**
          * @brief Compute full gradient of energy w.r.t. inner waypoints only.
          * @param[out] grad Full gradient dE/dP for inner points only.
-         *         Size (N-1) × DIM (excludes boundary points P0 and PN).
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         *         Resized to (N-1) × DIM (excludes boundary points P0 and PN); matching storage is reused.
+         * @pre The spline is valid. */
         void energyWaypointGradient(CoefficientMatrix &grad) const
         {
             assert(trajectory_.isValid());
@@ -3431,7 +3453,7 @@ namespace SplineTrajectory
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
         CoefficientMatrix energyWaypointGradient() const
         {
-            CoefficientMatrix grad(num_segments_ - 1, DIM);
+            CoefficientMatrix grad;
             energyWaypointGradient(grad);
             return grad;
         }
@@ -3440,7 +3462,7 @@ namespace SplineTrajectory
          * @brief Compute energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
          * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
          *        physical-time derivative convention (seconds).
-         * @pre The spline is valid and reference outputs already have the required shapes.
+         * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
         void energyBoundaryGradient(BoundaryGradients &grad) const
@@ -3471,7 +3493,6 @@ namespace SplineTrajectory
         Gradients energyGradient() const
         {
             Gradients res;
-            res.resetTopology(num_segments_);
             energyGradient(res);
             return res;
         }
@@ -3479,9 +3500,9 @@ namespace SplineTrajectory
         /**
          * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
          *
-         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
+         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
          * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @pre The spline is valid. */
         void energyGradient(Gradients &grads) const
         {
             assert(trajectory_.isValid());
@@ -3517,7 +3538,6 @@ namespace SplineTrajectory
                            const Eigen::VectorXd &partialGradByTimes)
         {
             Gradients res;
-            res.resetTopology(num_segments_);
 
             backward(partialGradByCoeffs, partialGradByTimes, res);
 
@@ -3529,10 +3549,10 @@ namespace SplineTrajectory
          *
          * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param[out] grads Overwritten physical gradients; buffers must already match the spline topology.
+         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
          * @pre Input partials are finite and match the constructed spline; no input scan is performed.
          * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
-         * @pre The spline is valid and reference outputs already have the required shapes. */
+         * @pre The spline is valid. */
         void backward(const CoefficientMatrix &partialGradByCoeffs,
                       const Eigen::VectorXd &partialGradByTimes,
                       Gradients &grads)
@@ -3552,11 +3572,15 @@ namespace SplineTrajectory
     private:
         /** @brief Write duration terms from the endpoint energy identity.
          * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] grad Pre-sized duration partials in physical seconds.
+         * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
+         *        accumulation requires matching initialized storage.
          * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
         template<bool Add>
         void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
         {
+            if constexpr (!Add)
+                grad.resize(num_segments_);
+
             for (int i = 0; i < num_segments_; ++i)
             {
 

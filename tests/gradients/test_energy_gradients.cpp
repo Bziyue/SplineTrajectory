@@ -169,7 +169,6 @@ void testCubic(int N, int BENCH_ITERS)
         auto grads = cubic_spline.backward(gdC, gdT);
         // Test reference overload
         SplineTrajectory::CubicSpline3D::Gradients grads_ref;
-        grads_ref.resetTopology(cubic_spline.numSegments());
         cubic_spline.backward(gdC, gdT, grads_ref);
         printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
@@ -271,7 +270,6 @@ void testCubic(int N, int BENCH_ITERS)
     gdC_spline = cubic_spline.energyCoefficientPartials();
     gdT_spline = cubic_spline.energyDurationPartials();
     SplineTrajectory::CubicSpline3D::Gradients grads_ref;
-    grads_ref.resetTopology(cubic_spline.numSegments());
 
     const auto grad_minco_stats = runBenchmark([&]() {
         minco_s2.propogateGrad(gdC_minco, gdT_minco, gradP_minco_out, gradT_minco_out);
@@ -422,7 +420,6 @@ void testQuintic(int N, int BENCH_ITERS)
         auto grads = quintic_spline.backward(gdC, gdT);
         // Test reference overload
         SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
-        grads_ref.resetTopology(quintic_spline.numSegments());
         quintic_spline.backward(gdC, gdT, grads_ref);
         printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
@@ -530,7 +527,6 @@ void testQuintic(int N, int BENCH_ITERS)
     Eigen::VectorXd gradT_spline_out;
 
     SplineTrajectory::QuinticSpline3D::Gradients grads_ref;
-    grads_ref.resetTopology(quintic_spline.numSegments());
 
     minco_s3.getEnergyPartialGradByCoeffs(gdC_minco);
     minco_s3.getEnergyPartialGradByTimes(gdT_minco);
@@ -701,7 +697,6 @@ void testSeptic(int N, int BENCH_ITERS)
         auto grads = septic_spline.backward(gdC, gdT);
         // Test reference overload
         SplineTrajectory::SepticSpline3D::Gradients grads_ref;
-        grads_ref.resetTopology(septic_spline.numSegments());
         septic_spline.backward(gdC, gdT, grads_ref);
         printCheck("Reference overload", 0.0);
         // Reconstruct full point gradients from propagated results
@@ -813,7 +808,6 @@ void testSeptic(int N, int BENCH_ITERS)
     Eigen::VectorXd gradT_spline_out;
 
     SplineTrajectory::SepticSpline3D::Gradients grads_ref;
-    grads_ref.resetTopology(septic_spline.numSegments());
 
     minco_s4.getEnergyPartialGradByCoeffs(gdC_minco);
     minco_s4.getEnergyPartialGradByTimes(gdT_minco);

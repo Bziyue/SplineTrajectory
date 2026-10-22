@@ -59,7 +59,6 @@ int main(int argc, char **argv)
         Matrix gc = Matrix::Constant(n * (BENCH_DEGREE + 1), BENCH_DIMENSION, 0.01);
         Eigen::VectorXd gt = Eigen::VectorXd::Constant(n, 0.02);
         Spline::Gradients gradient;
-        gradient.resetTopology(n);
         auto backward = [&] {
 #ifdef BENCH_OLD
             spline.propagateGrad(gc, gt, gradient);

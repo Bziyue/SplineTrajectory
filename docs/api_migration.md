@@ -28,6 +28,7 @@ Use this guide when updating code written against `d504135` or earlier.
 | `propagateGrad()` | `backward()`; owning return or overwritten output overload |
 | `BoundaryStateGrads`, `BoundaryDualGrads` | `BoundaryGradient`, `BoundaryGradients` |
 | `Gradients::times` | `Gradients::durations` |
+| `Gradients::resetTopology(N)` (v1.0.0) | Overwrite calls size outputs automatically; use `setZero(N)` for zero-initialized accumulation and `size()` to query the segment count |
 
 There is one coefficient/knots owner: PPoly. Spline construction and adjoints access it through
 private controlled access. Copying a spline or polynomial still deep-copies its numerical data.
@@ -50,9 +51,10 @@ Operations that cannot reject caller-validated input now return values directly:
 - Polynomial, segment and sampler queries return values; query `Into` overloads return `void`.
   `at()` returns `Segment`. These views require an initialized source that stays alive and unchanged.
 - Spline energy/gradient/adjoint value overloads return plain values. Reference overloads
-  return `void` and require pre-sized outputs; call `resetTopology(N)` once for full gradients.
-- `energyGradientAdd(output, weight)` adds directly to existing physical gradients.
-- `resetTopology()` and `ParameterGradient::addWaypoint()` return `void`. Unused gradient
+  return `void` and automatically resize owned outputs, reusing storage when sizes match.
+- `energyGradientAdd(output, weight)` adds to matching initialized gradients. Use `output.setZero(N)`
+  to prepare a zero accumulator; `output.setZero()` clears its current values.
+- `SplineGradients::size()` reports the segment count. `ParameterGradient::addWaypoint()` returns `void`. Unused gradient
   `allFinite()` helpers and the scalar-coordinate `SplineGradients::addWaypoint()` overload are removed.
 - Built-in time/spatial maps return plain values or `void`; genuinely fallible custom maps
   may still return `StatusOr`/`Status` on the same statically bound protocol.

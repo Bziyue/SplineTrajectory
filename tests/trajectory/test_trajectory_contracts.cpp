@@ -27,7 +27,7 @@ template<class Spline> void checkSpline()
     auto snapshot = curve.copyPolynomial();
     const auto *storage = curve.polynomial().coefficients().data();
     typename Spline::Gradients gradient;
-    gradient.resetTopology(2);
+    curve.energyGradient(gradient);
     Matrix gc = Matrix::Ones(2 * Spline::kCoefficientCount, Spline::kDimension);
     Eigen::VectorXd gt = Eigen::VectorXd::Zero(2);
     Eigen::internal::set_is_malloc_allowed(false);

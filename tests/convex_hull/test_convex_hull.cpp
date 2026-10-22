@@ -297,7 +297,6 @@ void checkFixedTopologyEigenAllocationFree()
     Eigen::VectorXd duration_gradients =
         Eigen::VectorXd::Zero(spline.numSegments());
     typename Spline::Gradients gradients;
-    gradients.resetTopology(spline.numSegments());
     spline.backward(
         coefficient_gradients, duration_gradients, gradients);
 

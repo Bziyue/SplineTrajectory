@@ -59,12 +59,15 @@ auto gradient = spline.energyGradient();
 
 For a custom coefficient-space cost, accumulate coefficient and independent duration partials,
 then use `spline.backward(coefficient_partials, duration_partials, output)` to obtain physical
-waypoint, duration and boundary gradients. The output is overwritten. For repeated calls,
-prepare it once with `output.resetTopology(spline.numSegments())`. All spline energy and
-adjoint methods require successful construction and return values directly (or `void` for
-output-reference overloads). Reference outputs must be pre-sized; they are never resized.
-`energyGradientAdd(output, weight)` adds a weighted energy contribution without a temporary
-gradient. Other energy-gradient overloads overwrite their outputs.
+waypoint, duration and boundary gradients. Overwrite overloads resize their outputs automatically;
+unchanged segment counts reuse the existing storage. A default-constructed `Spline::Gradients`
+can be passed directly, and `output.size()` reports its segment count.
+
+`energyGradientAdd(output, weight)` adds a weighted energy contribution to matching initialized
+gradients. To start an accumulation from zero, use `output.setZero(spline.numSegments())`;
+`output.setZero()` clears the current gradients without changing their sizes.
+All spline energy and adjoint methods require successful construction and return values directly
+(or `void` for output-reference overloads).
 
 `energyDurationPartials()` holds local coefficients fixed; `energyDurationGradient()` includes
 the interpolation constraints. Use the latter for derivatives of the interpolating trajectory's energy.

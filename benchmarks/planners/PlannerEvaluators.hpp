@@ -86,7 +86,7 @@ public:
         flatmap_.reset(p.physical[0],p.physical[1],p.physical[2],p.physical[3],p.physical[4],p.physical[5]);
         if constexpr(UseSpline) {
             all_points_=p.waypoints; spline_times_=p.durations; boundary_=splineProblem(p).boundary;
-            spline_gradients_.resetTopology(n);
+            spline_gradients_.setZero(n);
             if (const auto status = kernel_.update(spline_times_,all_points_,0.0,boundary_); !status) { throw std::runtime_error(status.message); }
         } else {
             Eigen::Matrix<double,3,coefficients/2> head,tail;
