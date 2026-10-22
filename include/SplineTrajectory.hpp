@@ -186,6 +186,11 @@ namespace SplineTrajectory
         Pop = 6
     };
 
+    namespace detail
+    {
+        template<int DIM, int DEGREE> class SplineKernel;
+    }
+
     /** @brief Owning piecewise polynomial in caller-defined coordinates and seconds.
      * @tparam DIM Positive spatial dimension.
      * @tparam MaxCoefficients Compile-time coefficient capacity, or Eigen::Dynamic.
@@ -1082,9 +1087,8 @@ namespace SplineTrajectory
         }
 
     private:
-        template <int> friend class CubicSplineND;
-        template <int> friend class QuinticSplineND;
-        template <int> friend class SepticSplineND;
+        template <int, int> friend class SplineND;
+        template <int, int> friend class detail::SplineKernel;
 
         /** @brief Prepare owning polynomial storage for exclusive coefficient writes.
          * @param durations Positive physical piece durations in seconds.
@@ -1598,13 +1602,1643 @@ namespace SplineTrajectory
             // Reuse the same descending sweep as the construction solve.
             backSubstitute<DerivativesPerKnot>(factors, segments, values);
         }
+        /** @brief Physical input and polynomial storage owned once by the public spline.
+         * @note Kernels borrow this state during calls; their factor and derivative caches live separately. */
+        template<int DIM, int DEGREE>
+        struct SplineData
+        {
+            using Polynomial = PPolyND<DIM, DEGREE + 1>;
+            using CoefficientMatrix = typename Polynomial::CoefficientMatrix;
+            std::vector<double> time_segments_;
+            CoefficientMatrix spatial_points_;
+            BoundaryConditions<DIM> boundary_;
+            int num_segments_ = 0;
+            double start_time_ = 0.0;
+            Polynomial trajectory_;
+        };
+
+        /** @brief Specialized minimum-derivative numerical implementation for degree 3.
+         * @note Owns only reusable solve caches. Physical inputs and the polynomial are borrowed per call;
+         *       no pointer or reference to the enclosing spline survives a call. */
+        template<int DIM>
+        class SplineKernel<DIM, 3>
+        {
+        public:
+            using Vector = Eigen::Matrix<double, DIM, 1>;
+            using RowVector = Eigen::Matrix<double, 1, DIM>;
+            static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
+            using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+
+            static constexpr int kDimension = DIM;
+            static constexpr int kDegree = 3;
+            static constexpr int kCoefficientCount = 4;
+            static constexpr int kMinDerivativeOrder = 2;
+            using Polynomial = PPolyND<DIM, kCoefficientCount>;
+
+            using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
+            using BoundaryGradients = BoundaryGradientPair<DIM>;
+            using Gradients = SplineGradients<DIM>;
+
+            using Data = SplineData<DIM, 3>;
+            static constexpr int kWaypointGradientScale = 12;
+
+        private:
+            // Physical velocities at all knots; only the interior rows are solved.
+            CoefficientMatrix derivatives_;
+            CoefficientMatrix segment_slopes_;
+            // Normalized upper entries and physical inverse pivots are reused by the adjoint.
+            Eigen::VectorXd upper_multipliers_;
+            Eigen::VectorXd inverse_pivots_;
+            CoefficientMatrix adjoint_;
+
+            struct TimePowers
+            {
+                double h;
+                double h_inv;  // h^-1
+                double h2_inv; // h^-2
+                double h3_inv; // h^-3
+            };
+            std::vector<TimePowers> time_powers_;
+
+        public:
+            /** @brief Evaluate monomial bases in local physical time, through crackle.
+             * @param t Local time in seconds.
+             * @param[out] b_pos Position basis. @param[out] b_vel Velocity basis.
+             * @param[out] b_acc Acceleration basis. @param[out] b_jerk Jerk basis.
+             * @param[out] b_snap Snap basis. @param[out] b_crackle Crackle basis.
+             * @note Derivatives above this polynomial's degree are zero. No shared state is touched. */
+            static inline void computeBasisFunctions(double t,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_acc,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_jerk,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
+            {
+                double t1 = t, t2 = t1 * t1, t3 = t2 * t1;
+
+                b_pos << 1, t1, t2, t3;
+                b_vel << 0, 1, 2 * t1, 3 * t2;
+                b_acc << 0, 0, 2, 6 * t1;
+                b_jerk << 0, 0, 0, 6;
+                b_snap.setZero();
+                b_crackle.setZero();
+            }
+
+            /** @brief Integrate the squared minimum physical derivative.
+             * @return Energy in physical units; requires a successfully constructed spline. */
+            double energy(const Data &data) const
+            {
+                assert(data.trajectory_.isValid());
+
+                double total_energy = 0.0;
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const double T = data.time_segments_[i];
+
+                    const double T2 = T * T;
+                    const double T3 = T2 * T;
+
+                    RowVector c = data.trajectory_.coefficients_.row(i * 4 + 2);
+                    RowVector d = data.trajectory_.coefficients_.row(i * 4 + 3);
+
+                    total_energy += 12.0 * d.squaredNorm() * T3 +
+                                    12.0 * c.dot(d) * T2 +
+                                    4.0 * c.squaredNorm() * T;
+                }
+
+                return total_energy;
+            }
+
+            /**
+             * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
+             *
+             * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 4) × DIM.
+             *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
+             * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
+             * @pre The spline is valid. */
+            void energyCoefficientPartials(const Data &data, CoefficientMatrix &gdC) const
+            {
+                assert(data.trajectory_.isValid());
+                gdC.setZero(data.num_segments_ * kCoefficientCount, DIM);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const double T = data.time_segments_[i];
+                    double T2 = T * T;
+                    double T3 = T2 * T;
+
+                    const RowVector c2 = data.trajectory_.coefficients_.row(i * 4 + 2);
+                    const RowVector c3 = data.trajectory_.coefficients_.row(i * 4 + 3);
+
+                    gdC.row(i * 4 + 2) = 8.0 * c2 * T + 12.0 * c3 * T2;
+
+                    gdC.row(i * 4 + 3) = 12.0 * c2 * T2 + 24.0 * c3 * T3;
+                }
+            }
+
+            /**
+             * @brief Compute partial gradient of energy w.r.t. segment durations.
+             *
+             * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
+             *         Element i is the direct partial derivative w.r.t. T[i].
+             * @note Local coefficients are held fixed. Output resizes automatically and reuses matching storage.
+             * @pre The spline is valid. */
+            void energyDurationPartials(const Data &data, Eigen::VectorXd &gdT) const
+            {
+                assert(data.trajectory_.isValid());
+                gdT.resize(data.num_segments_);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const double T = data.time_segments_[i];
+
+                    const RowVector c2 = data.trajectory_.coefficients_.row(i * 4 + 2);
+                    const RowVector c3 = data.trajectory_.coefficients_.row(i * 4 + 3);
+
+                    RowVector acc_end = 2.0 * c2 + (6.0 * T) * c3;
+
+                    gdT(i) = acc_end.squaredNorm();
+                }
+            }
+
+            /** @brief Refresh cached factors and write prepared polynomial coefficients.
+             * @param[in,out] data Owned physical state borrowed only for this call; polynomial storage is prepared.
+             * @return False on factorization failure; the public spline owns invalidation and publication. */
+            bool update(Data &data)
+            {
+                prepareWorkspace(data);
+                precomputeTimePowers(data);
+                precomputeSlopes(data);
+                solveInternalDerivatives(data);
+                writeCoefficients(data);
+                return true;
+            }
+
+            /**
+             * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
+             *
+             * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
+             * @param[in,out] grads Prepared gradients initialized with independent duration partials.
+             * @pre Input partials are finite and match the constructed spline; no input scan is performed.
+             * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
+             * @pre The spline is valid. */
+            void backward(const Data &data, const CoefficientMatrix &partialGradByCoeffs,
+                          Gradients &grads)
+            {
+                adjoint_.setZero();
+
+                // Local Hermite map, cached velocity solve, then endpoint corrections.
+                pullbackCoefficients(data, partialGradByCoeffs, grads);
+                solveAdjoint(data, grads);
+                // A fully clamped segment has no free knot derivatives to correct.
+                if (data.num_segments_ > 1)
+                    accumulateAdjoint(data, grads);
+            }
+
+            /** @brief Write duration terms from the endpoint energy identity.
+             * @tparam Add Select accumulation or overwrite at compile time.
+             * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
+             *        accumulation requires matching initialized storage.
+             * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
+            template<bool Add>
+            void computeEnergyDurationGradient(const Data &data, Eigen::VectorXd &grad, double weight) const
+            {
+                if constexpr (!Add)
+                    grad.resize(data.num_segments_);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const RowVector c1 = data.trajectory_.coefficients_.row(i * 4 + 1);
+                    const RowVector c2 = data.trajectory_.coefficients_.row(i * 4 + 2);
+                    const RowVector c3 = data.trajectory_.coefficients_.row(i * 4 + 3);
+
+                    double term_acc = 4.0 * c2.squaredNorm();
+                    double term_jv = 12.0 * c1.dot(c3);
+
+                    detail::storeGradient<Add>(grad(i), weight * (-term_acc + term_jv));
+                }
+            }
+
+            /** @brief Write integration-by-parts terms at the two clamped endpoints.
+             * @tparam Add Select accumulation or overwrite at compile time.
+             * @param[in,out] start Start endpoint partials in physical coordinates.
+             * @param[in,out] end End endpoint partials in physical coordinates.
+             * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
+            template<bool Add>
+            void computeEnergyBoundaryGradient(const Data &data, BoundaryGradient &start, BoundaryGradient &end, double weight) const
+            {
+                if constexpr (!Add)
+                {
+                    start.a.setZero(); end.a.setZero();
+                    start.j.setZero(); end.j.setZero();
+                }
+
+                // Evaluate the start-boundary terms at local time zero.
+                const RowVector c2_first = data.trajectory_.coefficients_.row(2);
+                const RowVector c3_first = data.trajectory_.coefficients_.row(3);
+
+                detail::storeGradient<Add>(start.p, weight * (12.0 * c3_first.transpose()));
+                detail::storeGradient<Add>(start.v, weight * (-4.0 * c2_first.transpose()));
+
+                // Evaluate the end-boundary terms at the final segment's physical duration.
+                int last_idx = data.num_segments_ - 1;
+                double T = data.time_segments_[last_idx];
+
+                const RowVector c2_last = data.trajectory_.coefficients_.row(last_idx * 4 + 2);
+                const RowVector c3_last = data.trajectory_.coefficients_.row(last_idx * 4 + 3);
+
+                RowVector acc_end = 2.0 * c2_last + 6.0 * c3_last * T;
+                RowVector jerk_end = 6.0 * c3_last;
+
+                detail::storeGradient<Add>(end.p, weight * (-2.0 * jerk_end.transpose()));
+                detail::storeGradient<Add>(end.v, weight * (2.0 * acc_end.transpose()));
+            }
+
+        private:
+            /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
+             * @note Requires validated input. Same-topology updates skip all cache resizing;
+             *       the first adjoint reuses storage prepared during construction. */
+            void prepareWorkspace(const Data &data)
+            {
+                if (time_powers_.size() != data.time_segments_.size())
+                    resizeWorkspace(data);
+
+                // Boundary velocities change independently of the segment count.
+                derivatives_.row(0) = data.boundary_.start_velocity.transpose();
+                derivatives_.row(data.num_segments_) = data.boundary_.end_velocity.transpose();
+            }
+
+            /** @brief Resize primal, adjoint and factor caches after a segment-count change.
+             * @note Duration-cache size records the prepared topology and is committed last.
+             *       Allocation order is preserved; same-topology updates skip this function. */
+            void resizeWorkspace(const Data &data)
+            {
+                adjoint_.resize(data.num_segments_ + 1, DIM);
+                // Reserve in the original allocation order; publish the size after all caches are ready.
+                time_powers_.reserve(data.num_segments_);
+                segment_slopes_.resize(data.num_segments_, DIM);
+                derivatives_.resize(data.num_segments_ + 1, DIM);
+                upper_multipliers_.resize(data.num_segments_ - 1);
+                inverse_pivots_.resize(data.num_segments_ - 1);
+                time_powers_.resize(data.num_segments_);
+            }
+
+            /** @brief Cache physical duration reciprocals for interpolation and adjoints. */
+            void precomputeTimePowers(const Data &data)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    double h = data.time_segments_[i];
+                    double iv = 1.0 / h;
+                    double iv2 = iv * iv;
+                    double iv3 = iv2 * iv;
+
+                    time_powers_[i].h = h;
+                    time_powers_[i].h_inv = iv;
+                    time_powers_[i].h2_inv = iv2;
+                    time_powers_[i].h3_inv = iv3;
+                }
+            }
+
+            /** @brief Cache segment slopes in physical coordinate units per second. */
+            void precomputeSlopes(const Data &data)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                    segment_slopes_.row(i) =
+                        (data.spatial_points_.row(i + 1) - data.spatial_points_.row(i)) * time_powers_[i].h_inv;
+            }
+
+            /** @brief Solve the symmetric minimum-acceleration system for free interior velocities.
+             * @note Endpoint velocities are clamped. A single segment needs no linear solve.
+             *       Dividing each row by its upper coefficient removes a multiplication from
+             *       the scalar elimination dependency chain; cached pivots retain physical units. */
+            void solveInternalDerivatives(const Data &data)
+            {
+                // Half the energy has Hessian diagonal 4/T_left + 4/T_right and upper 2/T_right.
+                for (int knot = 1; knot < data.num_segments_; ++knot)
+                {
+                    const double duration_ratio = time_powers_[knot].h * time_powers_[knot - 1].h_inv;
+                    const double diagonal = 2.0 * (duration_ratio + 1.0);
+                    const double previous_upper = knot > 1 ? upper_multipliers_(knot - 2) : 0.0;
+                    const double inverse = 1.0 / (diagonal - duration_ratio * previous_upper);
+                    upper_multipliers_(knot - 1) = inverse;
+                    inverse_pivots_(knot - 1) = (0.5 * time_powers_[knot].h) * inverse;
+
+                    RowVector rhs = 3.0 * (duration_ratio * segment_slopes_.row(knot - 1) +
+                                          segment_slopes_.row(knot));
+                    // The preceding row is either clamped or already forward-substituted.
+                    rhs -= duration_ratio * derivatives_.row(knot - 1);
+                    if (knot + 1 == data.num_segments_)
+                        rhs -= derivatives_.row(data.num_segments_);
+                    derivatives_.row(knot) = inverse * rhs;
+                }
+                backSubstitute(data, derivatives_);
+            }
+
+            /** @brief Complete a primal or adjoint solve without changing the clamped endpoints.
+             * @param[in,out] values Forward-substituted knot rows; receives the physical solution. */
+            void backSubstitute(const Data &data, CoefficientMatrix &values) const
+            {
+                // The final boundary contribution was already moved to the RHS.
+                for (int knot = data.num_segments_ - 2; knot > 0; --knot)
+                    values.row(knot) -= upper_multipliers_(knot - 1) * values.row(knot + 1);
+            }
+
+            /** @brief Generate physical cubic coefficients from endpoint positions and velocities. */
+            void writeCoefficients(Data &data)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    data.trajectory_.coefficients_.row(i * 4) = data.spatial_points_.row(i);
+                    data.trajectory_.coefficients_.row(i * 4 + 1) = derivatives_.row(i);
+                    data.trajectory_.coefficients_.row(i * 4 + 2) = tp.h_inv *
+                        (3.0 * segment_slopes_.row(i) - 2.0 * derivatives_.row(i) - derivatives_.row(i + 1));
+                    data.trajectory_.coefficients_.row(i * 4 + 3) = tp.h2_inv *
+                        (-2.0 * segment_slopes_.row(i) + derivatives_.row(i) + derivatives_.row(i + 1));
+                }
+            }
+
+            /** @brief Pull back the cubic Hermite map at fixed physical knot velocities.
+             * @param coefficient_partials Piece-major physical coefficient partials, borrowed for this call.
+             * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives velocity seeds. */
+            void pullbackCoefficients(const Data &data, const CoefficientMatrix &coefficient_partials, Gradients &gradient)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    const RowVector grad_c2 = coefficient_partials.row(i * 4 + 2);
+                    const RowVector grad_c3 = coefficient_partials.row(i * 4 + 3);
+
+                    const RowVector point_partial = (3.0 * tp.h2_inv) * grad_c2 - (2.0 * tp.h3_inv) * grad_c3;
+                    gradient.addWaypoint(i, coefficient_partials.row(i * 4) - point_partial);
+                    gradient.addWaypoint(i + 1, point_partial);
+
+                    const RowVector left_partial = (-2.0 * tp.h_inv) * grad_c2 + tp.h2_inv * grad_c3;
+                    const RowVector right_partial = -tp.h_inv * grad_c2 + tp.h2_inv * grad_c3;
+                    adjoint_.row(i) += coefficient_partials.row(i * 4 + 1) + left_partial;
+                    adjoint_.row(i + 1) += right_partial;
+
+                    // Homogeneity accounts for coefficient powers and the T-scaled endpoint velocities.
+                    const double coefficient_scaling =
+                        2.0 * grad_c2.dot(data.trajectory_.coefficients_.row(i * 4 + 2)) +
+                        3.0 * grad_c3.dot(data.trajectory_.coefficients_.row(i * 4 + 3));
+                    const double velocity_scaling = left_partial.dot(derivatives_.row(i)) +
+                                                    right_partial.dot(derivatives_.row(i + 1));
+                    gradient.durations(i) += tp.h_inv * (velocity_scaling - coefficient_scaling);
+                }
+            }
+
+            /** @brief Preserve clamped velocity seeds and reuse the symmetric primal factorization.
+             * @param[in,out] gradient Receives direct endpoint velocity gradients.
+             * @note Only interior velocities are free; zero endpoint adjoints enforce those constraints. */
+            void solveAdjoint(const Data &data, Gradients &gradient)
+            {
+                gradient.start.v = adjoint_.row(0).transpose();
+                gradient.end.v = adjoint_.row(data.num_segments_).transpose();
+                adjoint_.row(0).setZero();
+                adjoint_.row(data.num_segments_).setZero();
+
+                for (int knot = 1; knot < data.num_segments_; ++knot)
+                {
+                    adjoint_.row(knot) -= (2.0 * time_powers_[knot - 1].h_inv) * adjoint_.row(knot - 1);
+                    adjoint_.row(knot) *= inverse_pivots_(knot - 1);
+                }
+                backSubstitute(data, adjoint_);
+            }
+
+            /** @brief Add cubic adjoint endpoint forces and the polarized Hamiltonian time correction.
+             * @param[in,out] gradient Total physical point, time and clamped velocity gradients. */
+            void accumulateAdjoint(const Data &data, Gradients &gradient) const
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    // The adjoint has zero positions and the solved knot velocity adjoints.
+                    const RowVector lambda_c2 = -tp.h_inv * (2.0 * adjoint_.row(i) + adjoint_.row(i + 1));
+                    const RowVector lambda_c3 = tp.h2_inv * (adjoint_.row(i) + adjoint_.row(i + 1));
+                    const RowVector point_partial = -6.0 * lambda_c3;
+                    gradient.addWaypoint(i, point_partial);
+                    gradient.addWaypoint(i + 1, -point_partial);
+
+                    gradient.durations(i) +=
+                        4.0 * data.trajectory_.coefficients_.row(i * 4 + 2).dot(lambda_c2) -
+                        6.0 * adjoint_.row(i).dot(data.trajectory_.coefficients_.row(i * 4 + 3)) -
+                        6.0 * derivatives_.row(i).dot(lambda_c3);
+
+                    if (i == 0)
+                        gradient.start.v += 2.0 * lambda_c2.transpose();
+                    if (i + 1 == data.num_segments_)
+                        gradient.end.v -= (2.0 * lambda_c2 + (6.0 * tp.h) * lambda_c3).transpose();
+                }
+            }
+        };
+
+
+        /** @brief Specialized minimum-derivative numerical implementation for degree 5.
+         * @note Owns only reusable solve caches. Physical inputs and the polynomial are borrowed per call;
+         *       no pointer or reference to the enclosing spline survives a call. */
+        template<int DIM>
+        class SplineKernel<DIM, 5>
+        {
+        public:
+            using Vector = Eigen::Matrix<double, DIM, 1>;
+            using RowVector = Eigen::Matrix<double, 1, DIM>;
+            static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
+            using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+
+            static constexpr int kDimension = DIM;
+            static constexpr int kDegree = 5;
+            static constexpr int kCoefficientCount = 6;
+            static constexpr int kMinDerivativeOrder = 3;
+            using Polynomial = PPolyND<DIM, kCoefficientCount>;
+
+            using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
+            using BoundaryGradients = BoundaryGradientPair<DIM>;
+            using Gradients = SplineGradients<DIM>;
+
+            using Data = SplineData<DIM, 5>;
+            static constexpr int kWaypointGradientScale = -240;
+
+        private:
+            // Knot-major rows: each knot's physical derivatives are adjacent in memory.
+            static constexpr int kDerivativesPerKnot = 2;
+            using Factor = detail::BlockLDLT2;
+            using Block = typename Factor::Block;
+            std::vector<Factor> factors_;
+            CoefficientMatrix derivatives_;
+            CoefficientMatrix adjoint_;
+
+            struct TimePowers
+            {
+                double h;
+                double h_inv;
+                double h2_inv;
+                double h3_inv;
+                double h4_inv;
+                double h5_inv;
+            };
+            std::vector<TimePowers> time_powers_;
+
+        public:
+            /** @brief Evaluate monomial bases in local physical time, through crackle.
+             * @param t Local time in seconds.
+             * @param[out] b_pos Position basis. @param[out] b_vel Velocity basis.
+             * @param[out] b_acc Acceleration basis. @param[out] b_jerk Jerk basis.
+             * @param[out] b_snap Snap basis. @param[out] b_crackle Crackle basis.
+             * @note Derivatives above this polynomial's degree are zero. No shared state is touched. */
+            static inline void computeBasisFunctions(double t,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_acc,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_jerk,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
+            {
+                double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1;
+
+                b_pos << 1, t1, t2, t3, t4, t5;
+                b_vel << 0, 1, 2 * t1, 3 * t2, 4 * t3, 5 * t4;
+                b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3;
+                b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2;
+                b_snap << 0, 0, 0, 0, 24, 120 * t1;
+                b_crackle << 0, 0, 0, 0, 0, 120;
+            }
+
+            /** @brief Integrate the squared minimum physical derivative.
+             * @return Energy in physical units; requires a successfully constructed spline. */
+            double energy(const Data &data) const
+            {
+                assert(data.trajectory_.isValid());
+
+                double total_energy = 0.0;
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const double T = data.time_segments_[i];
+
+                    const double T2 = T * T;
+                    const double T3 = T2 * T;
+                    const double T4 = T3 * T;
+                    const double T5 = T4 * T;
+
+                    RowVector c3 = data.trajectory_.coefficients_.row(i * 6 + 3);
+                    RowVector c4 = data.trajectory_.coefficients_.row(i * 6 + 4);
+                    RowVector c5 = data.trajectory_.coefficients_.row(i * 6 + 5);
+
+                    total_energy += 36.0 * c3.squaredNorm() * T +
+                                    144.0 * c4.dot(c3) * T2 +
+                                    192.0 * c4.squaredNorm() * T3 +
+                                    240.0 * c5.dot(c3) * T3 +
+                                    720.0 * c5.dot(c4) * T4 +
+                                    720.0 * c5.squaredNorm() * T5;
+                }
+
+                return total_energy;
+            }
+
+            /**
+             * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
+             *
+             * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 6) × DIM.
+             *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
+             * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
+             * @pre The spline is valid. */
+            void energyCoefficientPartials(const Data &data, CoefficientMatrix &gdC) const
+            {
+                assert(data.trajectory_.isValid());
+                gdC.setZero(data.num_segments_ * kCoefficientCount, DIM);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    double T = data.time_segments_[i];
+                    double T2 = T * T;
+                    double T3 = T2 * T;
+                    double T4 = T3 * T;
+                    double T5 = T4 * T;
+
+                    const RowVector c3 = data.trajectory_.coefficients_.row(i * 6 + 3);
+                    const RowVector c4 = data.trajectory_.coefficients_.row(i * 6 + 4);
+                    const RowVector c5 = data.trajectory_.coefficients_.row(i * 6 + 5);
+
+                    gdC.row(i * 6 + 3) = 72.0 * c3 * T +
+                                         144.0 * c4 * T2 +
+                                         240.0 * c5 * T3;
+
+                    gdC.row(i * 6 + 4) = 144.0 * c3 * T2 +
+                                         384.0 * c4 * T3 +
+                                         720.0 * c5 * T4;
+
+                    gdC.row(i * 6 + 5) = 240.0 * c3 * T3 +
+                                         720.0 * c4 * T4 +
+                                         1440.0 * c5 * T5;
+                }
+            }
+
+            /**
+             * @brief Compute partial gradient of energy w.r.t. segment durations.
+             *
+             * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
+             *         Element i is the direct partial derivative w.r.t. T[i].
+             * @note Local coefficients are held fixed. Output resizes automatically and reuses matching storage.
+             * @pre The spline is valid. */
+            void energyDurationPartials(const Data &data, Eigen::VectorXd &gdT) const
+            {
+                assert(data.trajectory_.isValid());
+                gdT.resize(data.num_segments_);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const double T = data.time_segments_[i];
+
+                    const RowVector c3 = data.trajectory_.coefficients_.row(i * 6 + 3);
+                    const RowVector c4 = data.trajectory_.coefficients_.row(i * 6 + 4);
+                    const RowVector c5 = data.trajectory_.coefficients_.row(i * 6 + 5);
+
+                    RowVector jerk_end = 6.0 * c3 + T * (24.0 * c4 + (60.0 * T) * c5);
+
+                    gdT(i) = jerk_end.squaredNorm();
+                }
+            }
+
+            /** @brief Refresh cached factors and write prepared polynomial coefficients.
+             * @param[in,out] data Owned physical state borrowed only for this call; polynomial storage is prepared.
+             * @return False on factorization failure; the public spline owns invalidation and publication. */
+            bool update(Data &data)
+            {
+                prepareWorkspace(data);
+                precomputeTimePowers(data);
+                if (!solveInternalDerivatives(data)) return false;
+                writeCoefficients(data);
+                return true;
+            }
+
+            /**
+             * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
+             *
+             * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
+             * @param[in,out] grads Prepared gradients initialized with independent duration partials.
+             * @pre Input partials are finite and match the constructed spline; no input scan is performed.
+             * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
+             * @pre The spline is valid. */
+            void backward(const Data &data, const CoefficientMatrix &partialGradByCoeffs,
+                          Gradients &grads)
+            {
+                adjoint_.setZero();
+
+                // Local map, cached linear solve, then endpoint corrections.
+                pullbackCoefficients(data, partialGradByCoeffs, grads);
+                solveAdjoint(data, grads);
+                // A fully clamped segment has no free knot derivatives to correct.
+                if (data.num_segments_ > 1)
+                    accumulateAdjoint(data, grads);
+            }
+
+            /** @brief Write duration terms from the endpoint energy identity.
+             * @tparam Add Select accumulation or overwrite at compile time.
+             * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
+             *        accumulation requires matching initialized storage.
+             * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
+            template<bool Add>
+            void computeEnergyDurationGradient(const Data &data, Eigen::VectorXd &grad, double weight) const
+            {
+                if constexpr (!Add)
+                    grad.resize(data.num_segments_);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const RowVector c1 = data.trajectory_.coefficients_.row(i * 6 + 1);
+                    const RowVector c2 = data.trajectory_.coefficients_.row(i * 6 + 2);
+                    const RowVector c3 = data.trajectory_.coefficients_.row(i * 6 + 3);
+                    const RowVector c4 = data.trajectory_.coefficients_.row(i * 6 + 4);
+                    const RowVector c5 = data.trajectory_.coefficients_.row(i * 6 + 5);
+
+                    double term_jerk = 36.0 * c3.squaredNorm();
+                    double term_sa = 96.0 * c2.dot(c4);
+                    double term_cv = 240.0 * c1.dot(c5);
+
+                    detail::storeGradient<Add>(grad(i), weight * (-term_jerk + term_sa - term_cv));
+                }
+            }
+
+            /** @brief Write integration-by-parts terms at the two clamped endpoints.
+             * @tparam Add Select accumulation or overwrite at compile time.
+             * @param[in,out] start Start endpoint partials in physical coordinates.
+             * @param[in,out] end End endpoint partials in physical coordinates.
+             * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
+            template<bool Add>
+            void computeEnergyBoundaryGradient(const Data &data, BoundaryGradient &start, BoundaryGradient &end, double weight) const
+            {
+                if constexpr (!Add)
+                {
+                    start.j.setZero(); end.j.setZero();
+                }
+
+                // Evaluate the start-boundary terms at local time zero.
+                const RowVector c3_first = data.trajectory_.coefficients_.row(3);
+                const RowVector c4_first = data.trajectory_.coefficients_.row(4);
+                const RowVector c5_first = data.trajectory_.coefficients_.row(5);
+
+                detail::storeGradient<Add>(start.p, weight * (-240.0 * c5_first.transpose()));
+                detail::storeGradient<Add>(start.v, weight * (48.0 * c4_first.transpose()));
+                detail::storeGradient<Add>(start.a, weight * (-12.0 * c3_first.transpose()));
+
+                // Evaluate the end-boundary terms at the final segment's physical duration.
+                int last_idx = data.num_segments_ - 1;
+                double T = data.time_segments_[last_idx];
+                double T2 = T * T;
+
+                const RowVector c3_last = data.trajectory_.coefficients_.row(last_idx * 6 + 3);
+                const RowVector c4_last = data.trajectory_.coefficients_.row(last_idx * 6 + 4);
+                const RowVector c5_last = data.trajectory_.coefficients_.row(last_idx * 6 + 5);
+
+                RowVector jerk_end = 6.0 * c3_last + 24.0 * c4_last * T + 60.0 * c5_last * T2;
+                RowVector snap_end = 24.0 * c4_last + 120.0 * c5_last * T;
+                RowVector crackle_end = 120.0 * c5_last;
+
+                detail::storeGradient<Add>(end.p, weight * (2.0 * crackle_end.transpose()));
+                detail::storeGradient<Add>(end.v, weight * (-2.0 * snap_end.transpose()));
+                detail::storeGradient<Add>(end.a, weight * (2.0 * jerk_end.transpose()));
+            }
+
+        private:
+            /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
+             * @note Requires validated input. Same-topology updates skip all cache resizing;
+             *       the first adjoint reuses storage prepared during construction. */
+            void prepareWorkspace(const Data &data)
+            {
+                if (time_powers_.size() != data.time_segments_.size())
+                    resizeWorkspace(data);
+
+                // Boundary values change independently of the segment count.
+                derivatives_.row(0) = data.boundary_.start_velocity.transpose();
+                derivatives_.row(data.num_segments_ * 2 + 0) = data.boundary_.end_velocity.transpose();
+                derivatives_.row(1) = data.boundary_.start_acceleration.transpose();
+                derivatives_.row(data.num_segments_ * 2 + 1) = data.boundary_.end_acceleration.transpose();
+            }
+
+            /** @brief Resize primal, adjoint and factor caches after a segment-count change.
+             * @note Duration-cache size records the prepared topology and is committed last.
+             *       Allocation order is preserved; same-topology updates skip this function. */
+            void resizeWorkspace(const Data &data)
+            {
+                adjoint_.resize((data.num_segments_ + 1) * kDerivativesPerKnot, DIM);
+                derivatives_.resize((data.num_segments_ + 1) * kDerivativesPerKnot, DIM);
+                factors_.resize(data.num_segments_ - 1);
+                time_powers_.resize(data.num_segments_);
+            }
+
+            /** @brief Cache reciprocal duration powers used by assembly, Hermite maps and adjoints. */
+            void precomputeTimePowers(const Data &data)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    auto &tp = time_powers_[i];
+                    tp.h = data.time_segments_[i];
+                    tp.h_inv = 1.0 / tp.h;
+                    tp.h2_inv = tp.h_inv * tp.h_inv;
+                    tp.h3_inv = tp.h2_inv * tp.h_inv;
+                    tp.h4_inv = tp.h3_inv * tp.h_inv;
+                    tp.h5_inv = tp.h4_inv * tp.h_inv;
+                }
+            }
+
+            /** @brief Assemble one knot's stationarity equation for half the integrated squared derivative.
+             * @param knot Interior knot index in [1, data.num_segments_).
+             * @param[out] diagonal Symmetric diagonal block of the physical energy Hessian.
+             * @param[out] previous Coupling to the preceding knot.
+             * @note Writes this knot's RHS to derivatives_; fixed endpoint terms move to that RHS. */
+            void assembleKnotSystem(const Data &data, int knot, Block &diagonal, Block &previous)
+            {
+                const auto &left = time_powers_[knot - 1];
+                const auto &right = time_powers_[knot];
+
+                // These constants are the exact unit-interval Hermite energy Gram matrix.
+                diagonal(0, 0) = 192.0 * left.h3_inv + 192.0 * right.h3_inv;
+                diagonal(1, 0) = -36.0 * left.h2_inv + 36.0 * right.h2_inv;
+                diagonal(1, 1) = 9.0 * left.h_inv + 9.0 * right.h_inv;
+                previous(0, 0) = 168.0 * left.h3_inv;
+                previous(0, 1) = 24.0 * left.h2_inv;
+                previous(1, 0) = -24.0 * left.h2_inv;
+                previous(1, 1) = -3.0 * left.h_inv;
+
+                const RowVector delta_left = data.spatial_points_.row(knot) - data.spatial_points_.row(knot - 1);
+                const RowVector delta_right = data.spatial_points_.row(knot + 1) - data.spatial_points_.row(knot);
+                RowVector rhs0 = 360.0 * left.h4_inv * delta_left + 360.0 * right.h4_inv * delta_right;
+                RowVector rhs1 = -60.0 * left.h3_inv * delta_left + 60.0 * right.h3_inv * delta_right;
+                if (knot == 1)
+                {
+                    rhs0 -= previous(0, 0) * derivatives_.row(0) + previous(0, 1) * derivatives_.row(1);
+                    rhs1 -= previous(1, 0) * derivatives_.row(0) + previous(1, 1) * derivatives_.row(1);
+                }
+                if (knot + 1 == data.num_segments_)
+                {
+                    rhs0 -= 168.0 * right.h3_inv * derivatives_.row(data.num_segments_ * 2)
+                        - 24.0 * right.h2_inv * derivatives_.row(data.num_segments_ * 2 + 1);
+                    rhs1 -= 24.0 * right.h2_inv * derivatives_.row(data.num_segments_ * 2)
+                        - 3.0 * right.h_inv * derivatives_.row(data.num_segments_ * 2 + 1);
+                }
+                derivatives_.row(knot * 2) = rhs0;
+                derivatives_.row(knot * 2 + 1) = rhs1;
+            }
+
+            /** @brief Factor and solve the block system in linear time.
+             * @return False on a nonpositive/nonfinite pivot; true after solving all free derivatives.
+             * @note Forward substitution is fused with assembly to avoid a separate RHS sweep. */
+            bool solveInternalDerivatives(const Data &data)
+            {
+                for (int knot = 1; knot < data.num_segments_; ++knot)
+                {
+                    Block diagonal, previous;
+                    assembleKnotSystem(data, knot, diagonal, previous);
+                    auto &factor = factors_[knot - 1];
+                    const Factor *prior = knot > 1 ? &factors_[knot - 2] : nullptr;
+                    if (!factor.factorize(diagonal, previous, prior))
+                        return false;
+                    factor.forward(derivatives_, knot * kDerivativesPerKnot);
+                }
+                backSubstitute(data, derivatives_);
+                return true;
+            }
+
+            /** @brief Finish a primal or adjoint solve using the stored diagonal/coupling factors.
+             * @param[in,out] values Knot-major forward-substituted RHS; receives the solution.
+             * @note Endpoint rows are preserved; the caller owns and exclusively supplies the matrix. */
+            void backSubstitute(const Data &data, CoefficientMatrix &values) const
+            {
+                detail::backSubstitute<kDerivativesPerKnot>(factors_, data.num_segments_, values);
+            }
+
+            /** @brief Generate coefficients from endpoint residuals in physical coordinates.
+             * @note Each row contains contiguous spatial coordinates, so the short expressions
+             *       can use Eigen packets without changing the per-order mathematical formula. */
+            void writeCoefficients(Data &data)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    const int coefficient_row = i * kCoefficientCount;
+                    const int left_row = i * kDerivativesPerKnot;
+                    const int right_row = left_row + kDerivativesPerKnot;
+                    const RowVector position = data.spatial_points_.row(i);
+                    const RowVector velocity = derivatives_.row(left_row);
+                    const RowVector acceleration = derivatives_.row(left_row + 1);
+                    const RowVector end_velocity = derivatives_.row(right_row);
+                    const RowVector end_acceleration = derivatives_.row(right_row + 1);
+                    const RowVector quadratic = 0.5 * acceleration;
+
+                    // Match the right endpoint after subtracting the left-end Taylor polynomial.
+                    const RowVector displacement = data.spatial_points_.row(i + 1) - position;
+                    const RowVector position_residual = displacement - tp.h * velocity - (tp.h * tp.h) * quadratic;
+                    const RowVector velocity_residual = end_velocity - velocity - tp.h * acceleration;
+                    const RowVector acceleration_residual = end_acceleration - acceleration;
+                    const RowVector cubic =
+                        (10.0 * tp.h3_inv) * position_residual - (4.0 * tp.h2_inv) * velocity_residual +
+                        (0.5 * tp.h_inv) * acceleration_residual;
+                    const RowVector quartic =
+                        (-15.0 * tp.h4_inv) * position_residual + (7.0 * tp.h3_inv) * velocity_residual -
+                        tp.h2_inv * acceleration_residual;
+                    const RowVector quintic =
+                        (6.0 * tp.h5_inv) * position_residual - (3.0 * tp.h4_inv) * velocity_residual +
+                        (0.5 * tp.h3_inv) * acceleration_residual;
+
+                    // Publish together, after all source rows and duration powers have been read.
+                    data.trajectory_.coefficients_.row(coefficient_row) = position;
+                    data.trajectory_.coefficients_.row(coefficient_row + 1) = velocity;
+                    data.trajectory_.coefficients_.row(coefficient_row + 2) = quadratic;
+                    data.trajectory_.coefficients_.row(coefficient_row + 3) = cubic;
+                    data.trajectory_.coefficients_.row(coefficient_row + 4) = quartic;
+                    data.trajectory_.coefficients_.row(coefficient_row + 5) = quintic;
+                }
+            }
+
+            /** @brief Differentiate each segment's explicit Hermite map at fixed knot derivatives.
+             * @param coefficient_partials Piece-major physical coefficient partials, valid for this call.
+             * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives derivative seeds.
+             * @note Homogeneity gives dC/dT without materializing derivative matrices. */
+            void pullbackCoefficients(const Data &data, const CoefficientMatrix &coefficient_partials, Gradients &gradient)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    const int coefficient_row = i * kCoefficientCount;
+                    const int left_row = i * kDerivativesPerKnot;
+                    const int right_row = left_row + kDerivativesPerKnot;
+
+                    // Reuse solved states; a fully clamped segment reads its inputs directly.
+                    const RowVector left_velocity = derivatives_.row(left_row);
+                    const RowVector left_acceleration = derivatives_.row(left_row + 1);
+                    const RowVector right_velocity = derivatives_.row(right_row);
+                    const RowVector right_acceleration = derivatives_.row(right_row + 1);
+
+                    // Apply the same Hermite map across coordinates, sharing the time multipliers.
+                    const RowVector g3 = coefficient_partials.row(coefficient_row + 3);
+                    const RowVector g4 = coefficient_partials.row(coefficient_row + 4);
+                    const RowVector g5 = coefficient_partials.row(coefficient_row + 5);
+                    const RowVector grad_v_left = (-6.0 * tp.h2_inv) * g3
+                        + (8.0 * tp.h3_inv) * g4 - (3.0 * tp.h4_inv) * g5;
+                    const RowVector grad_a_left = (-1.5 * tp.h_inv) * g3
+                        + (1.5 * tp.h2_inv) * g4 - (0.5 * tp.h3_inv) * g5;
+                    const RowVector point_partial = (10.0 * tp.h3_inv) * g3
+                        - (15.0 * tp.h4_inv) * g4 + (6.0 * tp.h5_inv) * g5;
+                    const RowVector grad_v_right = (-4.0 * tp.h2_inv) * g3
+                        + (7.0 * tp.h3_inv) * g4 - (3.0 * tp.h4_inv) * g5;
+                    const RowVector grad_a_right = (0.5 * tp.h_inv) * g3
+                        - tp.h2_inv * g4 + (0.5 * tp.h3_inv) * g5;
+
+                    gradient.addWaypoint(i, coefficient_partials.row(coefficient_row) - point_partial);
+                    gradient.addWaypoint(i + 1, point_partial);
+                    adjoint_.row(left_row) += grad_v_left + coefficient_partials.row(coefficient_row + 1);
+                    adjoint_.row(right_row) += grad_v_right;
+                    adjoint_.row(left_row + 1) += grad_a_left + 0.5 * coefficient_partials.row(coefficient_row + 2);
+                    adjoint_.row(right_row + 1) += grad_a_right;
+
+                    // c_k scales as T^-k; endpoint derivative order r scales as T^r.
+                    RowVector time_partials = -3.0 * g3.cwiseProduct(data.trajectory_.coefficients_.row(coefficient_row + 3))
+                        - 4.0 * g4.cwiseProduct(data.trajectory_.coefficients_.row(coefficient_row + 4))
+                        - 5.0 * g5.cwiseProduct(data.trajectory_.coefficients_.row(coefficient_row + 5));
+                    time_partials += grad_v_left.cwiseProduct(left_velocity)
+                        + grad_v_right.cwiseProduct(right_velocity)
+                        + 2.0 * grad_a_left.cwiseProduct(left_acceleration)
+                        + 2.0 * grad_a_right.cwiseProduct(right_acceleration);
+                    gradient.durations(i) += tp.h_inv * time_partials.sum();
+                }
+            }
+
+            /** @brief Preserve clamped boundary seeds and solve for free knot adjoints.
+             * @param[in,out] gradient Receives direct boundary derivative gradients.
+             * @note A is symmetric: the primal factors also solve A^T lambda = seed. */
+            void solveAdjoint(const Data &data, Gradients &gradient)
+            {
+                gradient.start.v = adjoint_.row(0).transpose();
+                gradient.end.v = adjoint_.row(data.num_segments_ * 2 + 0).transpose();
+                gradient.start.a = adjoint_.row(1).transpose();
+                gradient.end.a = adjoint_.row(data.num_segments_ * 2 + 1).transpose();
+                adjoint_.template topRows<2>().setZero();
+                adjoint_.template bottomRows<2>().setZero();
+
+                detail::solveWithFactors<kDerivativesPerKnot>(factors_, data.num_segments_, adjoint_);
+            }
+
+            /** @brief Add the interpolation constraint's contribution using endpoint identities.
+             * @param[in,out] gradient Physical point, time and clamped-boundary gradients.
+             * @note The adjoint polynomial has zero positions and knot derivatives from adjoint_.
+             *       Integration by parts gives point/boundary forces; the polarized Hamiltonian
+             *       gives time corrections without constructing dA/dT or differentiating the solver. */
+            void accumulateAdjoint(const Data &data, Gradients &gradient) const
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    const int coefficient_row = i * kCoefficientCount;
+                    const int left_row = i * kDerivativesPerKnot;
+                    const int right_row = left_row + kDerivativesPerKnot;
+
+                    // Map knot adjoints to a polynomial with zero endpoint positions.
+                    const RowVector adjoint_v_left = adjoint_.row(left_row);
+                    const RowVector adjoint_v_right = adjoint_.row(right_row);
+                    const RowVector adjoint_a_left = adjoint_.row(left_row + 1);
+                    const RowVector adjoint_a_right = adjoint_.row(right_row + 1);
+                    const RowVector lambda_c3 = (-6.0 * tp.h2_inv) * adjoint_v_left
+                        - (4.0 * tp.h2_inv) * adjoint_v_right
+                        - (1.5 * tp.h_inv) * adjoint_a_left
+                        + (0.5 * tp.h_inv) * adjoint_a_right;
+                    const RowVector lambda_c4 = (8.0 * tp.h3_inv) * adjoint_v_left
+                        + (7.0 * tp.h3_inv) * adjoint_v_right
+                        + (1.5 * tp.h2_inv) * adjoint_a_left
+                        - tp.h2_inv * adjoint_a_right;
+                    const RowVector lambda_c5 = (-3.0 * tp.h4_inv) * adjoint_v_left
+                        - (3.0 * tp.h4_inv) * adjoint_v_right
+                        - (0.5 * tp.h3_inv) * adjoint_a_left
+                        + (0.5 * tp.h3_inv) * adjoint_a_right;
+
+                    // Endpoint forces use physical derivatives of the adjoint polynomial.
+                    const RowVector adjoint_jerk = 6.0 * lambda_c3;
+                    const RowVector adjoint_snap = 24.0 * lambda_c4;
+                    const RowVector adjoint_crackle = 120.0 * lambda_c5;
+                    gradient.addWaypoint(i, adjoint_crackle);
+                    gradient.addWaypoint(i + 1, -adjoint_crackle);
+
+                    // The polarized Hamiltonian contracts matching physical derivatives.
+                    const RowVector velocity = data.trajectory_.coefficients_.row(coefficient_row + 1);
+                    const RowVector acceleration = 2.0 * data.trajectory_.coefficients_.row(coefficient_row + 2);
+                    const RowVector jerk = 6.0 * data.trajectory_.coefficients_.row(coefficient_row + 3);
+                    const RowVector snap = 24.0 * data.trajectory_.coefficients_.row(coefficient_row + 4);
+                    const RowVector crackle = 120.0 * data.trajectory_.coefficients_.row(coefficient_row + 5);
+                    const RowVector time_partials = jerk.cwiseProduct(adjoint_jerk)
+                        + adjoint_v_left.cwiseProduct(crackle) + velocity.cwiseProduct(adjoint_crackle)
+                        - adjoint_a_left.cwiseProduct(snap) - acceleration.cwiseProduct(adjoint_snap);
+                    gradient.durations(i) += time_partials.sum();
+
+                    // Only clamped endpoints contribute boundary derivative corrections.
+                    if (i == 0)
+                    {
+                        gradient.start.v -= adjoint_snap.transpose();
+                        gradient.start.a += adjoint_jerk.transpose();
+                    }
+                    if (i + 1 == data.num_segments_)
+                    {
+                        const RowVector end_v = tp.h * adjoint_crackle + adjoint_snap;
+                        const RowVector end_a = ((60.0 * tp.h) * lambda_c5 + adjoint_snap) * tp.h + adjoint_jerk;
+                        gradient.end.v += end_v.transpose();
+                        gradient.end.a -= end_a.transpose();
+                    }
+                }
+            }
+        };
+
+
+        /** @brief Specialized minimum-derivative numerical implementation for degree 7.
+         * @note Owns only reusable solve caches. Physical inputs and the polynomial are borrowed per call;
+         *       no pointer or reference to the enclosing spline survives a call. */
+        template<int DIM>
+        class SplineKernel<DIM, 7>
+        {
+        public:
+            using Vector = Eigen::Matrix<double, DIM, 1>;
+            using RowVector = Eigen::Matrix<double, 1, DIM>;
+            static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
+            using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+
+            static constexpr int kDimension = DIM;
+            static constexpr int kDegree = 7;
+            static constexpr int kCoefficientCount = 8;
+            static constexpr int kMinDerivativeOrder = 4;
+            using Polynomial = PPolyND<DIM, kCoefficientCount>;
+
+            using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
+            using BoundaryGradients = BoundaryGradientPair<DIM>;
+            using Gradients = SplineGradients<DIM>;
+
+            using Data = SplineData<DIM, 7>;
+            static constexpr int kWaypointGradientScale = 10080;
+
+        private:
+            // Knot-major rows: each knot's physical derivatives are adjacent in memory.
+            static constexpr int kDerivativesPerKnot = 3;
+            using Factor = detail::BlockLDLT3;
+            using Block = typename Factor::Block;
+            std::vector<Factor> factors_;
+            CoefficientMatrix derivatives_;
+            CoefficientMatrix adjoint_;
+
+            struct TimePowers
+            {
+                double h;
+                double h_inv;
+                double h2_inv;
+                double h3_inv;
+                double h4_inv;
+                double h5_inv;
+                double h6_inv;
+                double h7_inv;
+            };
+            std::vector<TimePowers> time_powers_;
+
+        public:
+            /** @brief Evaluate monomial bases in local physical time, through crackle.
+             * @param t Local time in seconds.
+             * @param[out] b_pos Position basis. @param[out] b_vel Velocity basis.
+             * @param[out] b_acc Acceleration basis. @param[out] b_jerk Jerk basis.
+             * @param[out] b_snap Snap basis. @param[out] b_crackle Crackle basis.
+             * @note Derivatives above this polynomial's degree are zero. No shared state is touched. */
+            static inline void computeBasisFunctions(double t,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_acc,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_jerk,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
+                                                     Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
+            {
+                double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1, t6 = t5 * t1, t7 = t6 * t1;
+
+                b_pos << 1, t1, t2, t3, t4, t5, t6, t7;
+                b_vel << 0, 1, 2 * t1, 3 * t2, 4 * t3, 5 * t4, 6 * t5, 7 * t6;
+                b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3, 30 * t4, 42 * t5;
+                b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2, 120 * t3, 210 * t4;
+                b_snap << 0, 0, 0, 0, 24, 120 * t1, 360 * t2, 840 * t3;
+                b_crackle << 0, 0, 0, 0, 0, 120, 720 * t1, 2520 * t2;
+            }
+
+            /** @brief Integrate the squared minimum physical derivative.
+             * @return Energy in physical units; requires a successfully constructed spline. */
+            double energy(const Data &data) const
+            {
+                assert(data.trajectory_.isValid());
+
+                double total_energy = 0.0;
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const double T = data.time_segments_[i];
+
+                    const double T2 = T * T;
+                    const double T3 = T2 * T;
+                    const double T4 = T3 * T;
+                    const double T5 = T4 * T;
+                    const double T6 = T4 * T2;
+                    const double T7 = T4 * T3;
+
+                    RowVector c4 = data.trajectory_.coefficients_.row(i * 8 + 4);
+                    RowVector c5 = data.trajectory_.coefficients_.row(i * 8 + 5);
+                    RowVector c6 = data.trajectory_.coefficients_.row(i * 8 + 6);
+                    RowVector c7 = data.trajectory_.coefficients_.row(i * 8 + 7);
+
+                    total_energy += 576.0 * c4.squaredNorm() * T +
+                                    2880.0 * c4.dot(c5) * T2 +
+                                    4800.0 * c5.squaredNorm() * T3 +
+                                    5760.0 * c4.dot(c6) * T3 +
+                                    21600.0 * c5.dot(c6) * T4 +
+                                    10080.0 * c4.dot(c7) * T4 +
+                                    25920.0 * c6.squaredNorm() * T5 +
+                                    40320.0 * c5.dot(c7) * T5 +
+                                    100800.0 * c6.dot(c7) * T6 +
+                                    100800.0 * c7.squaredNorm() * T7;
+                }
+
+                return total_energy;
+            }
+
+            /**
+             * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
+             *
+             * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 8) × DIM.
+             *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
+             * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
+             * @pre The spline is valid. */
+            void energyCoefficientPartials(const Data &data, CoefficientMatrix &gdC) const
+            {
+                assert(data.trajectory_.isValid());
+                gdC.setZero(data.num_segments_ * kCoefficientCount, DIM);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    double T = data.time_segments_[i];
+                    double T2 = T * T;
+                    double T3 = T2 * T;
+                    double T4 = T3 * T;
+                    double T5 = T4 * T;
+                    double T6 = T5 * T;
+                    double T7 = T6 * T;
+
+                    const RowVector c4 = data.trajectory_.coefficients_.row(i * 8 + 4);
+                    const RowVector c5 = data.trajectory_.coefficients_.row(i * 8 + 5);
+                    const RowVector c6 = data.trajectory_.coefficients_.row(i * 8 + 6);
+                    const RowVector c7 = data.trajectory_.coefficients_.row(i * 8 + 7);
+
+                    gdC.row(i * 8 + 4) = 1152.0 * c4 * T +
+                                         2880.0 * c5 * T2 +
+                                         5760.0 * c6 * T3 +
+                                         10080.0 * c7 * T4;
+
+                    gdC.row(i * 8 + 5) = 2880.0 * c4 * T2 +
+                                         9600.0 * c5 * T3 +
+                                         21600.0 * c6 * T4 +
+                                         40320.0 * c7 * T5;
+
+                    gdC.row(i * 8 + 6) = 5760.0 * c4 * T3 +
+                                         21600.0 * c5 * T4 +
+                                         51840.0 * c6 * T5 +
+                                         100800.0 * c7 * T6;
+
+                    gdC.row(i * 8 + 7) = 10080.0 * c4 * T4 +
+                                         40320.0 * c5 * T5 +
+                                         100800.0 * c6 * T6 +
+                                         201600.0 * c7 * T7;
+                }
+            }
+
+            /**
+             * @brief Compute partial gradient of energy w.r.t. segment durations.
+             *
+             * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
+             *         Element i is the direct partial derivative w.r.t. T[i].
+             * @note Local coefficients are held fixed. Output resizes automatically and reuses matching storage.
+             * @pre The spline is valid. */
+            void energyDurationPartials(const Data &data, Eigen::VectorXd &gdT) const
+            {
+                assert(data.trajectory_.isValid());
+                gdT.resize(data.num_segments_);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const double T = data.time_segments_[i];
+
+                    const RowVector c4 = data.trajectory_.coefficients_.row(i * 8 + 4);
+                    const RowVector c5 = data.trajectory_.coefficients_.row(i * 8 + 5);
+                    const RowVector c6 = data.trajectory_.coefficients_.row(i * 8 + 6);
+                    const RowVector c7 = data.trajectory_.coefficients_.row(i * 8 + 7);
+
+                    RowVector snap_end = 24.0 * c4 + T * (120.0 * c5 + T * (360.0 * c6 + (840.0 * T) * c7));
+
+                    gdT(i) = snap_end.squaredNorm();
+                }
+            }
+
+            /** @brief Refresh cached factors and write prepared polynomial coefficients.
+             * @param[in,out] data Owned physical state borrowed only for this call; polynomial storage is prepared.
+             * @return False on factorization failure; the public spline owns invalidation and publication. */
+            bool update(Data &data)
+            {
+                prepareWorkspace(data);
+                precomputeTimePowers(data);
+                if (!solveInternalDerivatives(data)) return false;
+                writeCoefficients(data);
+                return true;
+            }
+
+            /**
+             * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
+             *
+             * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
+             * @param[in,out] grads Prepared gradients initialized with independent duration partials.
+             * @pre Input partials are finite and match the constructed spline; no input scan is performed.
+             * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
+             * @pre The spline is valid. */
+            void backward(const Data &data, const CoefficientMatrix &partialGradByCoeffs,
+                          Gradients &grads)
+            {
+                adjoint_.setZero();
+
+                // Local map, cached linear solve, then endpoint corrections.
+                pullbackCoefficients(data, partialGradByCoeffs, grads);
+                solveAdjoint(data, grads);
+                // A fully clamped segment has no free knot derivatives to correct.
+                if (data.num_segments_ > 1)
+                    accumulateAdjoint(data, grads);
+            }
+
+            /** @brief Write duration terms from the endpoint energy identity.
+             * @tparam Add Select accumulation or overwrite at compile time.
+             * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
+             *        accumulation requires matching initialized storage.
+             * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
+            template<bool Add>
+            void computeEnergyDurationGradient(const Data &data, Eigen::VectorXd &grad, double weight) const
+            {
+                if constexpr (!Add)
+                    grad.resize(data.num_segments_);
+
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+
+                    const int offset = i * 8;
+                    const RowVector c1 = data.trajectory_.coefficients_.row(offset + 1);
+                    const RowVector c2 = data.trajectory_.coefficients_.row(offset + 2);
+                    const RowVector c3 = data.trajectory_.coefficients_.row(offset + 3);
+                    const RowVector c4 = data.trajectory_.coefficients_.row(offset + 4);
+                    const RowVector c5 = data.trajectory_.coefficients_.row(offset + 5);
+                    const RowVector c6 = data.trajectory_.coefficients_.row(offset + 6);
+                    const RowVector c7 = data.trajectory_.coefficients_.row(offset + 7);
+
+                    double term_snap = 576.0 * c4.squaredNorm();
+                    double term_cj = 1440.0 * c3.dot(c5);
+                    double term_pa = 2880.0 * c2.dot(c6);
+                    double term_dv = 10080.0 * c1.dot(c7);
+
+                    detail::storeGradient<Add>(grad(i), weight * (-term_snap + term_cj - term_pa + term_dv));
+                }
+            }
+
+            /** @brief Write integration-by-parts terms at the two clamped endpoints.
+             * @tparam Add Select accumulation or overwrite at compile time.
+             * @param[in,out] start Start endpoint partials in physical coordinates.
+             * @param[in,out] end End endpoint partials in physical coordinates.
+             * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
+            template<bool Add>
+            void computeEnergyBoundaryGradient(const Data &data, BoundaryGradient &start, BoundaryGradient &end, double weight) const
+            {
+                // Evaluate the start-boundary terms at local time zero.
+                const RowVector c4_first = data.trajectory_.coefficients_.row(4);
+                const RowVector c5_first = data.trajectory_.coefficients_.row(5);
+                const RowVector c6_first = data.trajectory_.coefficients_.row(6);
+                const RowVector c7_first = data.trajectory_.coefficients_.row(7);
+
+                detail::storeGradient<Add>(start.p, weight * (10080.0 * c7_first.transpose()));
+                detail::storeGradient<Add>(start.v, weight * (-1440.0 * c6_first.transpose()));
+                detail::storeGradient<Add>(start.a, weight * (240.0 * c5_first.transpose()));
+                detail::storeGradient<Add>(start.j, weight * (-48.0 * c4_first.transpose()));
+
+                // Evaluate the end-boundary terms at the final segment's physical duration.
+                int last_idx = data.num_segments_ - 1;
+                double T = data.time_segments_[last_idx];
+                double T2 = T * T;
+                double T3 = T2 * T;
+
+                const RowVector c4_last = data.trajectory_.coefficients_.row(last_idx * 8 + 4);
+                const RowVector c5_last = data.trajectory_.coefficients_.row(last_idx * 8 + 5);
+                const RowVector c6_last = data.trajectory_.coefficients_.row(last_idx * 8 + 6);
+                const RowVector c7_last = data.trajectory_.coefficients_.row(last_idx * 8 + 7);
+
+                RowVector snap_end = 24.0 * c4_last + 120.0 * c5_last * T +
+                                         360.0 * c6_last * T2 + 840.0 * c7_last * T3;
+                RowVector crackle_end = 120.0 * c5_last + 720.0 * c6_last * T + 2520.0 * c7_last * T2;
+                RowVector pop_end = 720.0 * c6_last + 5040.0 * c7_last * T;
+                RowVector d7_end = 5040.0 * c7_last;
+
+                detail::storeGradient<Add>(end.p, weight * (-2.0 * d7_end.transpose()));
+                detail::storeGradient<Add>(end.v, weight * (2.0 * pop_end.transpose()));
+                detail::storeGradient<Add>(end.a, weight * (-2.0 * crackle_end.transpose()));
+                detail::storeGradient<Add>(end.j, weight * (2.0 * snap_end.transpose()));
+            }
+
+        private:
+            /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
+             * @note Requires validated input. Same-topology updates skip all cache resizing;
+             *       the first adjoint reuses storage prepared during construction. */
+            void prepareWorkspace(const Data &data)
+            {
+                if (time_powers_.size() != data.time_segments_.size())
+                    resizeWorkspace(data);
+
+                // Boundary values change independently of the segment count.
+                derivatives_.row(0) = data.boundary_.start_velocity.transpose();
+                derivatives_.row(data.num_segments_ * 3 + 0) = data.boundary_.end_velocity.transpose();
+                derivatives_.row(1) = data.boundary_.start_acceleration.transpose();
+                derivatives_.row(data.num_segments_ * 3 + 1) = data.boundary_.end_acceleration.transpose();
+                derivatives_.row(2) = data.boundary_.start_jerk.transpose();
+                derivatives_.row(data.num_segments_ * 3 + 2) = data.boundary_.end_jerk.transpose();
+            }
+
+            /** @brief Resize primal, adjoint and factor caches after a segment-count change.
+             * @note Duration-cache size records the prepared topology and is committed last.
+             *       Allocation order is preserved; same-topology updates skip this function. */
+            void resizeWorkspace(const Data &data)
+            {
+                adjoint_.resize((data.num_segments_ + 1) * kDerivativesPerKnot, DIM);
+                derivatives_.resize((data.num_segments_ + 1) * kDerivativesPerKnot, DIM);
+                factors_.resize(data.num_segments_ - 1);
+                time_powers_.resize(data.num_segments_);
+            }
+
+            /** @brief Cache reciprocal duration powers used by assembly, Hermite maps and adjoints. */
+            void precomputeTimePowers(const Data &data)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    auto &tp = time_powers_[i];
+                    tp.h = data.time_segments_[i];
+                    tp.h_inv = 1.0 / tp.h;
+                    tp.h2_inv = tp.h_inv * tp.h_inv;
+                    tp.h3_inv = tp.h2_inv * tp.h_inv;
+                    tp.h4_inv = tp.h3_inv * tp.h_inv;
+                    tp.h5_inv = tp.h4_inv * tp.h_inv;
+                    tp.h6_inv = tp.h5_inv * tp.h_inv;
+                    tp.h7_inv = tp.h6_inv * tp.h_inv;
+                }
+            }
+
+            /** @brief Assemble one knot's stationarity equation for half the integrated squared derivative.
+             * @param knot Interior knot index in [1, data.num_segments_).
+             * @param[out] diagonal Symmetric diagonal block of the physical energy Hessian.
+             * @param[out] previous Coupling to the preceding knot.
+             * @note Writes this knot's RHS to derivatives_; fixed endpoint terms move to that RHS. */
+            void assembleKnotSystem(const Data &data, int knot, Block &diagonal, Block &previous)
+            {
+                const auto &left = time_powers_[knot - 1];
+                const auto &right = time_powers_[knot];
+
+                // These constants are the exact unit-interval Hermite energy Gram matrix.
+                diagonal(0, 0) = 25920.0 * left.h5_inv + 25920.0 * right.h5_inv;
+                diagonal(1, 0) = -5400.0 * left.h4_inv + 5400.0 * right.h4_inv;
+                diagonal(1, 1) = 1200.0 * left.h3_inv + 1200.0 * right.h3_inv;
+                diagonal(2, 0) = 480.0 * left.h3_inv + 480.0 * right.h3_inv;
+                diagonal(2, 1) = -120.0 * left.h2_inv + 120.0 * right.h2_inv;
+                diagonal(2, 2) = 16.0 * left.h_inv + 16.0 * right.h_inv;
+                previous(0, 0) = 24480.0 * left.h5_inv;
+                previous(0, 1) = 4680.0 * left.h4_inv;
+                previous(0, 2) = 360.0 * left.h3_inv;
+                previous(1, 0) = -4680.0 * left.h4_inv;
+                previous(1, 1) = -840.0 * left.h3_inv;
+                previous(1, 2) = -60.0 * left.h2_inv;
+                previous(2, 0) = 360.0 * left.h3_inv;
+                previous(2, 1) = 60.0 * left.h2_inv;
+                previous(2, 2) = 4.0 * left.h_inv;
+
+                const RowVector delta_left = data.spatial_points_.row(knot) - data.spatial_points_.row(knot - 1);
+                const RowVector delta_right = data.spatial_points_.row(knot + 1) - data.spatial_points_.row(knot);
+                RowVector rhs0 = 50400.0 * left.h6_inv * delta_left + 50400.0 * right.h6_inv * delta_right;
+                RowVector rhs1 = -10080.0 * left.h5_inv * delta_left + 10080.0 * right.h5_inv * delta_right;
+                RowVector rhs2 = 840.0 * left.h4_inv * delta_left + 840.0 * right.h4_inv * delta_right;
+                if (knot == 1)
+                {
+                    rhs0 -= previous(0, 0) * derivatives_.row(0)
+                        + previous(0, 1) * derivatives_.row(1)
+                        + previous(0, 2) * derivatives_.row(2);
+                    rhs1 -= previous(1, 0) * derivatives_.row(0)
+                        + previous(1, 1) * derivatives_.row(1)
+                        + previous(1, 2) * derivatives_.row(2);
+                    rhs2 -= previous(2, 0) * derivatives_.row(0)
+                        + previous(2, 1) * derivatives_.row(1)
+                        + previous(2, 2) * derivatives_.row(2);
+                }
+                if (knot + 1 == data.num_segments_)
+                {
+                    rhs0 -= 24480.0 * right.h5_inv * derivatives_.row(data.num_segments_ * 3)
+                        - 4680.0 * right.h4_inv * derivatives_.row(data.num_segments_ * 3 + 1)
+                        + 360.0 * right.h3_inv * derivatives_.row(data.num_segments_ * 3 + 2);
+                    rhs1 -= 4680.0 * right.h4_inv * derivatives_.row(data.num_segments_ * 3)
+                        - 840.0 * right.h3_inv * derivatives_.row(data.num_segments_ * 3 + 1)
+                        + 60.0 * right.h2_inv * derivatives_.row(data.num_segments_ * 3 + 2);
+                    rhs2 -= 360.0 * right.h3_inv * derivatives_.row(data.num_segments_ * 3)
+                        - 60.0 * right.h2_inv * derivatives_.row(data.num_segments_ * 3 + 1)
+                        + 4.0 * right.h_inv * derivatives_.row(data.num_segments_ * 3 + 2);
+                }
+                derivatives_.row(knot * 3) = rhs0;
+                derivatives_.row(knot * 3 + 1) = rhs1;
+                derivatives_.row(knot * 3 + 2) = rhs2;
+            }
+
+            /** @brief Factor and solve the block system in linear time.
+             * @return False on a nonpositive/nonfinite pivot; true after solving all free derivatives.
+             * @note Forward substitution is fused with assembly to avoid a separate RHS sweep. */
+            bool solveInternalDerivatives(const Data &data)
+            {
+                for (int knot = 1; knot < data.num_segments_; ++knot)
+                {
+                    Block diagonal, previous;
+                    assembleKnotSystem(data, knot, diagonal, previous);
+                    auto &factor = factors_[knot - 1];
+                    const Factor *prior = knot > 1 ? &factors_[knot - 2] : nullptr;
+                    if (!factor.factorize(diagonal, previous, prior))
+                        return false;
+                    factor.forward(derivatives_, knot * kDerivativesPerKnot);
+                }
+                backSubstitute(data, derivatives_);
+                return true;
+            }
+
+            /** @brief Finish a primal or adjoint solve using the stored diagonal/coupling factors.
+             * @param[in,out] values Knot-major forward-substituted RHS; receives the solution.
+             * @note Endpoint rows are preserved; the caller owns and exclusively supplies the matrix. */
+            void backSubstitute(const Data &data, CoefficientMatrix &values) const
+            {
+                detail::backSubstitute<kDerivativesPerKnot>(factors_, data.num_segments_, values);
+            }
+
+            /** @brief Generate physical-time coefficients from normalized endpoint residuals.
+             * @note Each row contains contiguous spatial coordinates. The four residuals
+             *       remove the left-end Taylor polynomial on the unit interval before the
+             *       coefficients are converted back to physical time. */
+            void writeCoefficients(Data &data)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    const int coefficient_row = i * kCoefficientCount;
+                    const int left_row = i * kDerivativesPerKnot;
+                    const int right_row = left_row + kDerivativesPerKnot;
+                    const RowVector position = data.spatial_points_.row(i);
+
+                    const RowVector velocity = derivatives_.row(left_row);
+                    const RowVector acceleration = derivatives_.row(left_row + 1);
+                    const RowVector jerk = derivatives_.row(left_row + 2);
+                    const RowVector end_velocity = derivatives_.row(right_row);
+                    const RowVector end_acceleration = derivatives_.row(right_row + 1);
+                    const RowVector end_jerk = derivatives_.row(right_row + 2);
+                    const RowVector quadratic = 0.5 * acceleration;
+                    const RowVector cubic = (1.0 / 6.0) * jerk;
+                    const double duration2 = tp.h * tp.h;
+                    const double duration3 = duration2 * tp.h;
+
+                    // Scale endpoint residuals to the unit interval; shared powers stay outside the map.
+                    const RowVector displacement = data.spatial_points_.row(i + 1) - position;
+                    const RowVector scaled_acceleration = duration2 * acceleration;
+                    const RowVector scaled_jerk = duration3 * jerk;
+                    const RowVector position_residual = displacement - tp.h * velocity -
+                        0.5 * scaled_acceleration - (1.0 / 6.0) * scaled_jerk;
+                    const RowVector velocity_residual = tp.h * (end_velocity - velocity) -
+                        scaled_acceleration - 0.5 * scaled_jerk;
+                    const RowVector acceleration_residual = duration2 * (end_acceleration - acceleration) - scaled_jerk;
+                    const RowVector jerk_residual = duration3 * (end_jerk - jerk);
+
+                    // Four explicit Hermite rows determine the high coefficients in physical time.
+                    const RowVector quartic = (35.0 * position_residual - 15.0 * velocity_residual +
+                        2.5 * acceleration_residual - (1.0 / 6.0) * jerk_residual) * tp.h4_inv;
+                    const RowVector quintic = (-84.0 * position_residual + 39.0 * velocity_residual -
+                        7.0 * acceleration_residual + 0.5 * jerk_residual) * tp.h5_inv;
+                    const RowVector sextic = (70.0 * position_residual - 34.0 * velocity_residual +
+                        6.5 * acceleration_residual - 0.5 * jerk_residual) * tp.h6_inv;
+                    const RowVector septic = (-20.0 * position_residual + 10.0 * velocity_residual -
+                        2.0 * acceleration_residual + (1.0 / 6.0) * jerk_residual) * tp.h7_inv;
+
+                    // Publish together, after all source rows and duration powers have been read.
+                    data.trajectory_.coefficients_.row(coefficient_row) = position;
+                    data.trajectory_.coefficients_.row(coefficient_row + 1) = velocity;
+                    data.trajectory_.coefficients_.row(coefficient_row + 2) = quadratic;
+                    data.trajectory_.coefficients_.row(coefficient_row + 3) = cubic;
+                    data.trajectory_.coefficients_.row(coefficient_row + 4) = quartic;
+                    data.trajectory_.coefficients_.row(coefficient_row + 5) = quintic;
+                    data.trajectory_.coefficients_.row(coefficient_row + 6) = sextic;
+                    data.trajectory_.coefficients_.row(coefficient_row + 7) = septic;
+                }
+            }
+
+            /** @brief Differentiate each segment's explicit Hermite map at fixed knot derivatives.
+             * @param coefficient_partials Piece-major physical coefficient partials, valid for this call.
+             * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives derivative seeds.
+             * @note Homogeneity gives dC/dT without materializing derivative matrices. */
+            void pullbackCoefficients(const Data &data, const CoefficientMatrix &coefficient_partials, Gradients &gradient)
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    const int coefficient_row = i * kCoefficientCount;
+                    const int left_row = i * kDerivativesPerKnot;
+                    const int right_row = left_row + kDerivativesPerKnot;
+
+                    // Borrow the same contiguous endpoint rows for every segment count.
+                    const auto left_velocity = derivatives_.row(left_row);
+                    const auto left_acceleration = derivatives_.row(left_row + 1);
+                    const auto left_jerk = derivatives_.row(left_row + 2);
+                    const auto right_velocity = derivatives_.row(right_row);
+                    const auto right_acceleration = derivatives_.row(right_row + 1);
+                    const auto right_jerk = derivatives_.row(right_row + 2);
+
+                    // Apply the same Hermite map across coordinates, sharing the time multipliers.
+                    const RowVector g4 = coefficient_partials.row(coefficient_row + 4);
+                    const RowVector g5 = coefficient_partials.row(coefficient_row + 5);
+                    const RowVector g6 = coefficient_partials.row(coefficient_row + 6);
+                    const RowVector g7 = coefficient_partials.row(coefficient_row + 7);
+                    const RowVector grad_v_left = (-20.0 * tp.h3_inv) * g4
+                        + (45.0 * tp.h4_inv) * g5 - (36.0 * tp.h5_inv) * g6 + (10.0 * tp.h6_inv) * g7;
+                    const RowVector grad_a_left = (-5.0 * tp.h2_inv) * g4
+                        + (10.0 * tp.h3_inv) * g5 - (7.5 * tp.h4_inv) * g6 + (2.0 * tp.h5_inv) * g7;
+                    const RowVector grad_j_left = (-(2.0 / 3.0) * tp.h_inv) * g4 + tp.h2_inv * g5
+                        - ((2.0 / 3.0) * tp.h3_inv) * g6 + ((1.0 / 6.0) * tp.h4_inv) * g7;
+                    const RowVector point_partial = (35.0 * tp.h4_inv) * g4
+                        - (84.0 * tp.h5_inv) * g5 + (70.0 * tp.h6_inv) * g6 - (20.0 * tp.h7_inv) * g7;
+                    const RowVector grad_v_right = (-15.0 * tp.h3_inv) * g4
+                        + (39.0 * tp.h4_inv) * g5 - (34.0 * tp.h5_inv) * g6 + (10.0 * tp.h6_inv) * g7;
+                    const RowVector grad_a_right = (2.5 * tp.h2_inv) * g4
+                        - (7.0 * tp.h3_inv) * g5 + (6.5 * tp.h4_inv) * g6 - (2.0 * tp.h5_inv) * g7;
+                    const RowVector grad_j_right = (-(1.0 / 6.0) * tp.h_inv) * g4
+                        + (0.5 * tp.h2_inv) * g5 - (0.5 * tp.h3_inv) * g6 + ((1.0 / 6.0) * tp.h4_inv) * g7;
+
+                    gradient.addWaypoint(i, coefficient_partials.row(coefficient_row) - point_partial);
+                    gradient.addWaypoint(i + 1, point_partial);
+                    adjoint_.row(left_row) += grad_v_left + coefficient_partials.row(coefficient_row + 1);
+                    adjoint_.row(right_row) += grad_v_right;
+                    adjoint_.row(left_row + 1) += grad_a_left + 0.5 * coefficient_partials.row(coefficient_row + 2);
+                    adjoint_.row(right_row + 1) += grad_a_right;
+                    adjoint_.row(left_row + 2) += grad_j_left + (1.0 / 6.0) * coefficient_partials.row(coefficient_row + 3);
+                    adjoint_.row(right_row + 2) += grad_j_right;
+
+                    // c_k scales as T^-k; endpoint derivative order r scales as T^r.
+                    RowVector time_partials = -4.0 * g4.cwiseProduct(data.trajectory_.coefficients_.row(coefficient_row + 4))
+                        - 5.0 * g5.cwiseProduct(data.trajectory_.coefficients_.row(coefficient_row + 5))
+                        - 6.0 * g6.cwiseProduct(data.trajectory_.coefficients_.row(coefficient_row + 6))
+                        - 7.0 * g7.cwiseProduct(data.trajectory_.coefficients_.row(coefficient_row + 7));
+                    time_partials += grad_v_left.cwiseProduct(left_velocity) + grad_v_right.cwiseProduct(right_velocity)
+                        + 2.0 * grad_a_left.cwiseProduct(left_acceleration) + 2.0 * grad_a_right.cwiseProduct(right_acceleration)
+                        + 3.0 * grad_j_left.cwiseProduct(left_jerk) + 3.0 * grad_j_right.cwiseProduct(right_jerk);
+                    gradient.durations(i) += tp.h_inv * time_partials.sum();
+                }
+            }
+
+            /** @brief Preserve clamped boundary seeds and solve for free knot adjoints.
+             * @param[in,out] gradient Receives direct boundary derivative gradients.
+             * @note A is symmetric: the primal factors also solve A^T lambda = seed. */
+            void solveAdjoint(const Data &data, Gradients &gradient)
+            {
+                gradient.start.v = adjoint_.row(0).transpose();
+                gradient.end.v = adjoint_.row(data.num_segments_ * 3 + 0).transpose();
+                gradient.start.a = adjoint_.row(1).transpose();
+                gradient.end.a = adjoint_.row(data.num_segments_ * 3 + 1).transpose();
+                gradient.start.j = adjoint_.row(2).transpose();
+                gradient.end.j = adjoint_.row(data.num_segments_ * 3 + 2).transpose();
+                adjoint_.template topRows<3>().setZero();
+                adjoint_.template bottomRows<3>().setZero();
+
+                detail::solveWithFactors<kDerivativesPerKnot>(factors_, data.num_segments_, adjoint_);
+            }
+
+            /** @brief Add the interpolation constraint's contribution using endpoint identities.
+             * @param[in,out] gradient Physical point, time and clamped-boundary gradients.
+             * @note The adjoint polynomial has zero positions and knot derivatives from adjoint_.
+             *       Integration by parts gives point/boundary forces; the polarized Hamiltonian
+             *       gives time corrections without constructing dA/dT or differentiating the solver. */
+            void accumulateAdjoint(const Data &data, Gradients &gradient) const
+            {
+                for (int i = 0; i < data.num_segments_; ++i)
+                {
+                    const auto &tp = time_powers_[i];
+                    const int coefficient_row = i * kCoefficientCount;
+                    const int left_row = i * kDerivativesPerKnot;
+                    const int right_row = left_row + kDerivativesPerKnot;
+
+                    // Map knot adjoints to a polynomial with zero endpoint positions.
+                    const RowVector adjoint_v_left = adjoint_.row(left_row);
+                    const RowVector adjoint_v_right = adjoint_.row(right_row);
+                    const RowVector adjoint_a_left = adjoint_.row(left_row + 1);
+                    const RowVector adjoint_a_right = adjoint_.row(right_row + 1);
+                    const RowVector adjoint_j_left = adjoint_.row(left_row + 2);
+                    const RowVector adjoint_j_right = adjoint_.row(right_row + 2);
+                    const RowVector lambda_c4 = (-20.0 * tp.h3_inv) * adjoint_v_left
+                        - (15.0 * tp.h3_inv) * adjoint_v_right
+                        - (5.0 * tp.h2_inv) * adjoint_a_left + (2.5 * tp.h2_inv) * adjoint_a_right
+                        - ((2.0 / 3.0) * tp.h_inv) * adjoint_j_left - ((1.0 / 6.0) * tp.h_inv) * adjoint_j_right;
+                    const RowVector lambda_c5 = (45.0 * tp.h4_inv) * adjoint_v_left
+                        + (39.0 * tp.h4_inv) * adjoint_v_right
+                        + (10.0 * tp.h3_inv) * adjoint_a_left - (7.0 * tp.h3_inv) * adjoint_a_right
+                        + tp.h2_inv * adjoint_j_left + (0.5 * tp.h2_inv) * adjoint_j_right;
+                    const RowVector lambda_c6 = (-36.0 * tp.h5_inv) * adjoint_v_left
+                        - (34.0 * tp.h5_inv) * adjoint_v_right
+                        - (7.5 * tp.h4_inv) * adjoint_a_left + (6.5 * tp.h4_inv) * adjoint_a_right
+                        - ((2.0 / 3.0) * tp.h3_inv) * adjoint_j_left - (0.5 * tp.h3_inv) * adjoint_j_right;
+                    const RowVector lambda_c7 = (10.0 * tp.h6_inv) * adjoint_v_left
+                        + (10.0 * tp.h6_inv) * adjoint_v_right
+                        + (2.0 * tp.h5_inv) * adjoint_a_left - (2.0 * tp.h5_inv) * adjoint_a_right
+                        + ((1.0 / 6.0) * tp.h4_inv) * adjoint_j_left + ((1.0 / 6.0) * tp.h4_inv) * adjoint_j_right;
+
+                    // Endpoint forces use physical derivatives of the adjoint polynomial.
+                    const RowVector adjoint_snap = 24.0 * lambda_c4;
+                    const RowVector adjoint_crackle = 120.0 * lambda_c5;
+                    const RowVector adjoint_pop = 720.0 * lambda_c6;
+                    const RowVector adjoint_seventh = 5040.0 * lambda_c7;
+                    gradient.addWaypoint(i, -adjoint_seventh);
+                    gradient.addWaypoint(i + 1, adjoint_seventh);
+
+                    // The polarized Hamiltonian contracts matching physical derivatives.
+                    const RowVector velocity = data.trajectory_.coefficients_.row(coefficient_row + 1);
+                    const RowVector acceleration = 2.0 * data.trajectory_.coefficients_.row(coefficient_row + 2);
+                    const RowVector jerk = 6.0 * data.trajectory_.coefficients_.row(coefficient_row + 3);
+                    const RowVector snap = 24.0 * data.trajectory_.coefficients_.row(coefficient_row + 4);
+                    const RowVector crackle = 120.0 * data.trajectory_.coefficients_.row(coefficient_row + 5);
+                    const RowVector pop = 720.0 * data.trajectory_.coefficients_.row(coefficient_row + 6);
+                    const RowVector seventh = 5040.0 * data.trajectory_.coefficients_.row(coefficient_row + 7);
+                    const RowVector time_partials = snap.cwiseProduct(adjoint_snap)
+                        - adjoint_v_left.cwiseProduct(seventh) - velocity.cwiseProduct(adjoint_seventh)
+                        + adjoint_a_left.cwiseProduct(pop) + acceleration.cwiseProduct(adjoint_pop)
+                        - adjoint_j_left.cwiseProduct(crackle) - jerk.cwiseProduct(adjoint_crackle);
+                    gradient.durations(i) += time_partials.sum();
+
+                    // Only clamped endpoints contribute boundary derivative corrections.
+                    if (i == 0)
+                    {
+                        gradient.start.v += adjoint_pop.transpose();
+                        gradient.start.a -= adjoint_crackle.transpose();
+                        gradient.start.j += adjoint_snap.transpose();
+                    }
+                    if (i + 1 == data.num_segments_)
+                    {
+                        const RowVector end_v = tp.h * adjoint_seventh + adjoint_pop;
+                        const RowVector end_a = ((2520.0 * tp.h) * lambda_c7 + adjoint_pop) * tp.h + adjoint_crackle;
+                        const RowVector end_j = (((840.0 * tp.h) * lambda_c7 + 360.0 * lambda_c6) * tp.h
+                            + adjoint_crackle) * tp.h + adjoint_snap;
+                        gradient.end.v -= end_v.transpose();
+                        gradient.end.a += end_a.transpose();
+                        gradient.end.j -= end_j.transpose();
+                    }
+                }
+            }
+        };
     } // namespace detail
 
-    // Cubic splines: minimum acceleration.
-
-    /** @brief Minimum-acceleration interpolation with a specialized O(N) scalar tridiagonal solver.
-     * @note Minimize the squared second physical derivative integral with fixed waypoint
-     *       positions and endpoint derivatives of orders 1 through 1. Coordinates
+    /** @brief Minimum-derivative interpolation with a shared interface and specialized O(N) kernels.
+     * @tparam DIM Positive spatial dimension.
+     * @tparam DEGREE Polynomial degree: 3 (acceleration), 5 (jerk), or 7 (snap).
+     * @note Minimize the squared order-(DEGREE+1)/2 physical derivative integral with fixed waypoint
+     *       positions and endpoint derivatives of orders 1 through (DEGREE-1)/2. Coordinates
      *       are caller-defined; durations use seconds. Polynomial coefficients and knots
      *       have one owner. Updates and backward() require exclusive access; const energy
      *       and polynomial queries may run concurrently on an unchanged valid object.
@@ -1618,19 +3252,20 @@ namespace SplineTrajectory
      *       All public overloads use this single contract; callers perform input validation and
      *       guarantee a representable working range. Coefficients, energy and gradients are not
      *       rescanned for overflow; construction still reports knot or factorization failure. */
-    template <int DIM>
-    class CubicSplineND
+    template <int DIM, int DEGREE>
+    class SplineND
     {
     public:
+        static_assert(DEGREE == 3 || DEGREE == 5 || DEGREE == 7, "Spline degree must be 3, 5, or 7");
         using Vector = Eigen::Matrix<double, DIM, 1>;
         using RowVector = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
 
         static constexpr int kDimension = DIM;
-        static constexpr int kDegree = 3;
-        static constexpr int kCoefficientCount = 4;
-        static constexpr int kMinDerivativeOrder = 2;
+        static constexpr int kDegree = DEGREE;
+        static constexpr int kCoefficientCount = DEGREE + 1;
+        static constexpr int kMinDerivativeOrder = (DEGREE + 1) / 2;
         using Polynomial = PPolyND<DIM, kCoefficientCount>;
 
         using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
@@ -1638,35 +3273,16 @@ namespace SplineTrajectory
         using Gradients = SplineGradients<DIM>;
 
     private:
-        std::vector<double> time_segments_;
-        CoefficientMatrix spatial_points_;
-        BoundaryConditions<DIM> boundary_;
-        int num_segments_;
-        double start_time_;
-        Polynomial trajectory_;
-
-        // Physical velocities at all knots; only the interior rows are solved.
-        CoefficientMatrix derivatives_;
-        CoefficientMatrix segment_slopes_;
-        // Normalized upper entries and physical inverse pivots are reused by the adjoint.
-        Eigen::VectorXd upper_multipliers_;
-        Eigen::VectorXd inverse_pivots_;
-        CoefficientMatrix adjoint_;
-
-        struct TimePowers
-        {
-            double h;
-            double h_inv;  // h^-1
-            double h2_inv; // h^-2
-            double h3_inv; // h^-3
-        };
-        std::vector<TimePowers> time_powers_;
+        using Data = detail::SplineData<DIM, DEGREE>;
+        using Kernel = detail::SplineKernel<DIM, DEGREE>;
+        Data data_;
+        Kernel kernel_;
 
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
         /** @brief Construct an empty, invalid spline with independent storage. */
-        CubicSplineND() : num_segments_(0), start_time_(0.0) {}
+        SplineND() = default;
 
         /** @brief Replace interpolation data using caller-validated absolute knots.
          * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
@@ -1678,8 +3294,8 @@ namespace SplineTrajectory
                     const CoefficientMatrix &spatial_points,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            detail::durationsFromKnots(t_points, time_segments_, start_time_);
-            return update(time_segments_, spatial_points, start_time_, boundary);
+            detail::durationsFromKnots(t_points, data_.time_segments_, data_.start_time_);
+            return update(data_.time_segments_, spatial_points, data_.start_time_, boundary);
         }
 
         /** @brief Replace interpolation data using positive durations and a common time origin.
@@ -1695,63 +3311,63 @@ namespace SplineTrajectory
                     double start_time,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            time_segments_ = time_segments;
-            spatial_points_ = spatial_points;
-            start_time_ = start_time;
-            boundary_ = boundary;
+            data_.time_segments_ = time_segments;
+            data_.spatial_points_ = spatial_points;
+            data_.start_time_ = start_time;
+            data_.boundary_ = boundary;
             return updateSplineInternal();
         }
 
         /** @brief Inspect the published polynomial. @return True after successful construction; numerical range is a caller precondition. */
-        bool isValid() const { return trajectory_.isValid(); }
+        bool isValid() const { return data_.trajectory_.isValid(); }
         /** @brief Inspect spatial dimension. @return Compile-time DIM. */
         int dimension() const { return DIM; }
 
         /** @brief Inspect the absolute start time. @return Seconds, or zero for an invalid spline. */
         double startTime() const
         {
-            return trajectory_.startTime();
+            return data_.trajectory_.startTime();
         }
 
         /** @brief Inspect the absolute end time. @return Seconds, or zero for an invalid spline. */
         double endTime() const
         {
-            return trajectory_.endTime();
+            return data_.trajectory_.endTime();
         }
 
         /** @brief Inspect total duration. @return Seconds, or zero for an invalid spline. */
         double duration() const
         {
-            return trajectory_.duration();
+            return data_.trajectory_.duration();
         }
 
         /** @brief Inspect input topology. @return Number of stored waypoints. */
         size_t numPoints() const
         {
-            return static_cast<size_t>(spatial_points_.rows());
+            return static_cast<size_t>(data_.spatial_points_.rows());
         }
 
         /** @brief Inspect the polynomial topology. @return Segment count, or zero when invalid. */
         int numSegments() const
         {
-            return trajectory_.numSegments();
+            return data_.trajectory_.numSegments();
         }
 
         /** @brief Borrow physical waypoints. @return Storage valid until update, assignment or move. */
-        const CoefficientMatrix &waypoints() const { return spatial_points_; }
+        const CoefficientMatrix &waypoints() const { return data_.spatial_points_; }
         /** @brief Borrow segment durations in seconds. @return Storage valid until the next mutation. */
-        const std::vector<double> &durations() const { return time_segments_; }
+        const std::vector<double> &durations() const { return data_.time_segments_; }
         /** @brief Borrow absolute knots in seconds. @return Storage valid until the next mutation. */
-        const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
+        const std::vector<double> &breakpoints() const { return data_.trajectory_.breakpoints_; }
         /** @brief Borrow physical boundary data. @return Storage valid until the next mutation. */
-        const BoundaryConditions<DIM> &boundary() const { return boundary_; }
+        const BoundaryConditions<DIM> &boundary() const { return data_.boundary_; }
 
         /** @brief Borrow the polynomial. @return View valid until the next update, assignment or move. */
-        const Polynomial &polynomial() const & { return trajectory_; }
+        const Polynomial &polynomial() const & { return data_.trajectory_; }
         /** @brief Prevent polynomial borrowing from a temporary spline. @return No callable rvalue overload. */
         const Polynomial &polynomial() const && = delete;
         /** @brief Make an independent owning snapshot. @return Polynomial with its own storage and lifetime. */
-        Polynomial copyPolynomial() const { return trajectory_; }
+        Polynomial copyPolynomial() const { return data_.trajectory_; }
 
         /** @brief Evaluate monomial bases in local physical time, through crackle.
          * @param t Local time in seconds.
@@ -1767,66 +3383,26 @@ namespace SplineTrajectory
                                                  Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
                                                  Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
         {
-            double t1 = t, t2 = t1 * t1, t3 = t2 * t1;
-
-            b_pos << 1, t1, t2, t3;
-            b_vel << 0, 1, 2 * t1, 3 * t2;
-            b_acc << 0, 0, 2, 6 * t1;
-            b_jerk << 0, 0, 0, 6;
-            b_snap.setZero();
-            b_crackle.setZero();
+            Kernel::computeBasisFunctions(t, b_pos, b_vel, b_acc, b_jerk, b_snap, b_crackle);
         }
 
         /** @brief Integrate the squared minimum physical derivative.
          * @return Energy in physical units; requires a successfully constructed spline. */
         double energy() const
         {
-            assert(trajectory_.isValid());
-
-            double total_energy = 0.0;
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const double T = time_segments_[i];
-
-                const double T2 = T * T;
-                const double T3 = T2 * T;
-
-                RowVector c = trajectory_.coefficients_.row(i * 4 + 2);
-                RowVector d = trajectory_.coefficients_.row(i * 4 + 3);
-
-                total_energy += 12.0 * d.squaredNorm() * T3 +
-                                12.0 * c.dot(d) * T2 +
-                                4.0 * c.squaredNorm() * T;
-            }
-
-            return total_energy;
+            return kernel_.energy(data_);
         }
 
         /**
          * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
          *
-         * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 4) × DIM.
+         * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * kCoefficientCount) × DIM.
          *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
          * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
          * @pre The spline is valid. */
         void energyCoefficientPartials(CoefficientMatrix &gdC) const
         {
-            assert(trajectory_.isValid());
-            gdC.setZero(num_segments_ * kCoefficientCount, DIM);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const double T = time_segments_[i];
-                double T2 = T * T;
-                double T3 = T2 * T;
-
-                const RowVector c2 = trajectory_.coefficients_.row(i * 4 + 2);
-                const RowVector c3 = trajectory_.coefficients_.row(i * 4 + 3);
-
-                gdC.row(i * 4 + 2) = 8.0 * c2 * T + 12.0 * c3 * T2;
-
-                gdC.row(i * 4 + 3) = 12.0 * c2 * T2 + 24.0 * c3 * T3;
-            }
+            kernel_.energyCoefficientPartials(data_, gdC);
         }
 
         /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
@@ -1846,20 +3422,7 @@ namespace SplineTrajectory
          * @pre The spline is valid. */
         void energyDurationPartials(Eigen::VectorXd &gdT) const
         {
-            assert(trajectory_.isValid());
-            gdT.resize(num_segments_);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const double T = time_segments_[i];
-
-                const RowVector c2 = trajectory_.coefficients_.row(i * 4 + 2);
-                const RowVector c3 = trajectory_.coefficients_.row(i * 4 + 3);
-
-                RowVector acc_end = 2.0 * c2 + (6.0 * T) * c3;
-
-                gdT(i) = acc_end.squaredNorm();
-            }
+            kernel_.energyDurationPartials(data_, gdT);
         }
 
         /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
@@ -1879,8 +3442,8 @@ namespace SplineTrajectory
          * @pre The spline is valid. */
         void energyDurationGradient(Eigen::VectorXd &grad) const
         {
-            assert(trajectory_.isValid());
-            computeEnergyDurationGradient<false>(grad, 1.0);
+            assert(data_.trajectory_.isValid());
+            kernel_.template computeEnergyDurationGradient<false>(data_, grad, 1.0);
         }
 
         /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
@@ -1898,1556 +3461,8 @@ namespace SplineTrajectory
          * @pre The spline is valid. */
         void energyWaypointGradient(CoefficientMatrix &grad) const
         {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<12>(trajectory_, grad, 1.0);
-        }
-
-        /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
-        CoefficientMatrix energyWaypointGradient() const
-        {
-            CoefficientMatrix grad;
-            energyWaypointGradient(grad);
-            return grad;
-        }
-
-        /**
-         * @brief Compute energy gradients w.r.t. boundary position and velocity.
-         * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
-         *        physical-time derivative convention (seconds); acceleration and jerk are zero.
-         * @pre The spline is valid.
-         * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
-         */
-        void energyBoundaryGradient(BoundaryGradients &grad) const
-        {
-            assert(trajectory_.isValid());
-            computeEnergyBoundaryGradient<false>(grad.start, grad.end, 1.0);
-        }
-
-        /** @brief Return energy gradients w.r.t. boundary position and velocity.
-         * @return Owned start/end gradients using physical seconds and the caller's coordinates;
-         *         acceleration and jerk gradients are zero.
-         * @pre The spline is valid.
-         * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
-        BoundaryGradients energyBoundaryGradient() const
-        {
-            BoundaryGradients res;
-            energyBoundaryGradient(res);
-            return res;
-        }
-
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
-         *
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - durations: gradient w.r.t. physical segment durations, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity)
-         */
-        Gradients energyGradient() const
-        {
-            Gradients res;
-            energyGradient(res);
-            return res;
-        }
-
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
-         *
-         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
-         * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
-         * @pre The spline is valid. */
-        void energyGradient(Gradients &grads) const
-        {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<12>(trajectory_, grads.inner_points, 1.0);
-            computeEnergyDurationGradient<false>(grads.durations, 1.0);
-            computeEnergyBoundaryGradient<false>(grads.start, grads.end, 1.0);
-        }
-
-        /** @brief Add weighted minimum-derivative energy gradients to existing physical partials.
-         * @param[in,out] grads Prepared, initialized gradients matching this spline's topology.
-         * @param weight Energy multiplier; uses the same physical units as energy().
-         * @pre The latest construction succeeded and arithmetic is representable.
-         * @note No allocation or resizing; requires exclusive output access and no spline mutation. */
-        void energyGradientAdd(Gradients &grads, double weight = 1.0) const
-        {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<12, true>(trajectory_, grads.inner_points, weight);
-            computeEnergyDurationGradient<true>(grads.durations, weight);
-            computeEnergyBoundaryGradient<true>(grads.start, grads.end, weight);
-        }
-
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - durations: gradient w.r.t. physical segment durations, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity)
-         */
-        Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes)
-        {
-            Gradients res;
-
-            backward(partialGradByCoeffs, partialGradByTimes, res);
-
-            return res;
-        }
-
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (4N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
-         * @pre Input partials are finite and match the constructed spline; no input scan is performed.
-         * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
-         * @pre The spline is valid. */
-        void backward(const CoefficientMatrix &partialGradByCoeffs,
-                      const Eigen::VectorXd &partialGradByTimes,
-                      Gradients &grads)
-        {
-            assert(trajectory_.isValid());
-            detail::initializeGradients(partialGradByTimes, grads);
-            adjoint_.setZero();
-
-            // Local Hermite map, cached velocity solve, then endpoint corrections.
-            pullbackCoefficients(partialGradByCoeffs, grads);
-            solveAdjoint(grads);
-            // A fully clamped segment has no free knot derivatives to correct.
-            if (num_segments_ > 1)
-                accumulateAdjoint(grads);
-        }
-
-    private:
-        /** @brief Write duration terms from the endpoint energy identity.
-         * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
-         *        accumulation requires matching initialized storage.
-         * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
-        template<bool Add>
-        void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
-        {
-            if constexpr (!Add)
-                grad.resize(num_segments_);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const RowVector c1 = trajectory_.coefficients_.row(i * 4 + 1);
-                const RowVector c2 = trajectory_.coefficients_.row(i * 4 + 2);
-                const RowVector c3 = trajectory_.coefficients_.row(i * 4 + 3);
-
-                double term_acc = 4.0 * c2.squaredNorm();
-                double term_jv = 12.0 * c1.dot(c3);
-
-                detail::storeGradient<Add>(grad(i), weight * (-term_acc + term_jv));
-            }
-        }
-
-        /** @brief Write integration-by-parts terms at the two clamped endpoints.
-         * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] start Start endpoint partials in physical coordinates.
-         * @param[in,out] end End endpoint partials in physical coordinates.
-         * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
-        template<bool Add>
-        void computeEnergyBoundaryGradient(BoundaryGradient &start, BoundaryGradient &end, double weight) const
-        {
-            if constexpr (!Add)
-            {
-                start.a.setZero(); end.a.setZero();
-                start.j.setZero(); end.j.setZero();
-            }
-
-            // Evaluate the start-boundary terms at local time zero.
-            const RowVector c2_first = trajectory_.coefficients_.row(2);
-            const RowVector c3_first = trajectory_.coefficients_.row(3);
-
-            detail::storeGradient<Add>(start.p, weight * (12.0 * c3_first.transpose()));
-            detail::storeGradient<Add>(start.v, weight * (-4.0 * c2_first.transpose()));
-
-            // Evaluate the end-boundary terms at the final segment's physical duration.
-            int last_idx = num_segments_ - 1;
-            double T = time_segments_[last_idx];
-
-            const RowVector c2_last = trajectory_.coefficients_.row(last_idx * 4 + 2);
-            const RowVector c3_last = trajectory_.coefficients_.row(last_idx * 4 + 3);
-
-            RowVector acc_end = 2.0 * c2_last + 6.0 * c3_last * T;
-            RowVector jerk_end = 6.0 * c3_last;
-
-            detail::storeGradient<Add>(end.p, weight * (-2.0 * jerk_end.transpose()));
-            detail::storeGradient<Add>(end.v, weight * (2.0 * acc_end.transpose()));
-        }
-
-        // Construction: prepare caches, solve knot derivatives, publish coefficients.
-        /** @brief Rebuild from physical data; failed construction clears the published polynomial.
-         * @note Requires exclusive access. Storage is reused when the topology is unchanged.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status updateSplineInternal()
-        {
-            trajectory_.is_initialized_ = false;
-            const auto times = trajectory_.prepareCoefficients(time_segments_, start_time_, kCoefficientCount);
-            if (!times) { num_segments_ = 0; return times; }
-            num_segments_ = static_cast<int>(time_segments_.size());
-
-            prepareWorkspace();
-            precomputeTimePowers();
-            precomputeSlopes();
-            solveInternalDerivatives();
-            writeCoefficients();
-            trajectory_.publishCoefficients();
-            return Status::success();
-        }
-
-        /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
-         * @note Requires validated input. Same-topology updates skip all cache resizing;
-         *       the first adjoint reuses storage prepared during construction. */
-        void prepareWorkspace()
-        {
-            if (time_powers_.size() != time_segments_.size())
-                resizeWorkspace();
-
-            // Boundary velocities change independently of the segment count.
-            derivatives_.row(0) = boundary_.start_velocity.transpose();
-            derivatives_.row(num_segments_) = boundary_.end_velocity.transpose();
-        }
-
-        /** @brief Resize primal, adjoint and factor caches after a segment-count change.
-         * @note Duration-cache size records the prepared topology and is committed last.
-         *       Allocation order is preserved; same-topology updates skip this function. */
-        void resizeWorkspace()
-        {
-            adjoint_.resize(num_segments_ + 1, DIM);
-            // Reserve in the original allocation order; publish the size after all caches are ready.
-            time_powers_.reserve(num_segments_);
-            segment_slopes_.resize(num_segments_, DIM);
-            derivatives_.resize(num_segments_ + 1, DIM);
-            upper_multipliers_.resize(num_segments_ - 1);
-            inverse_pivots_.resize(num_segments_ - 1);
-            time_powers_.resize(num_segments_);
-        }
-
-        /** @brief Cache physical duration reciprocals for interpolation and adjoints. */
-        void precomputeTimePowers()
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                double h = time_segments_[i];
-                double iv = 1.0 / h;
-                double iv2 = iv * iv;
-                double iv3 = iv2 * iv;
-
-                time_powers_[i].h = h;
-                time_powers_[i].h_inv = iv;
-                time_powers_[i].h2_inv = iv2;
-                time_powers_[i].h3_inv = iv3;
-            }
-        }
-
-        /** @brief Cache segment slopes in physical coordinate units per second. */
-        void precomputeSlopes()
-        {
-            for (int i = 0; i < num_segments_; ++i)
-                segment_slopes_.row(i) =
-                    (spatial_points_.row(i + 1) - spatial_points_.row(i)) * time_powers_[i].h_inv;
-        }
-
-        /** @brief Solve the symmetric minimum-acceleration system for free interior velocities.
-         * @note Endpoint velocities are clamped. A single segment needs no linear solve.
-         *       Dividing each row by its upper coefficient removes a multiplication from
-         *       the scalar elimination dependency chain; cached pivots retain physical units. */
-        void solveInternalDerivatives()
-        {
-            // Half the energy has Hessian diagonal 4/T_left + 4/T_right and upper 2/T_right.
-            for (int knot = 1; knot < num_segments_; ++knot)
-            {
-                const double duration_ratio = time_powers_[knot].h * time_powers_[knot - 1].h_inv;
-                const double diagonal = 2.0 * (duration_ratio + 1.0);
-                const double previous_upper = knot > 1 ? upper_multipliers_(knot - 2) : 0.0;
-                const double inverse = 1.0 / (diagonal - duration_ratio * previous_upper);
-                upper_multipliers_(knot - 1) = inverse;
-                inverse_pivots_(knot - 1) = (0.5 * time_powers_[knot].h) * inverse;
-
-                RowVector rhs = 3.0 * (duration_ratio * segment_slopes_.row(knot - 1) +
-                                      segment_slopes_.row(knot));
-                // The preceding row is either clamped or already forward-substituted.
-                rhs -= duration_ratio * derivatives_.row(knot - 1);
-                if (knot + 1 == num_segments_)
-                    rhs -= derivatives_.row(num_segments_);
-                derivatives_.row(knot) = inverse * rhs;
-            }
-            backSubstitute(derivatives_);
-        }
-
-        /** @brief Complete a primal or adjoint solve without changing the clamped endpoints.
-         * @param[in,out] values Forward-substituted knot rows; receives the physical solution. */
-        void backSubstitute(CoefficientMatrix &values) const
-        {
-            // The final boundary contribution was already moved to the RHS.
-            for (int knot = num_segments_ - 2; knot > 0; --knot)
-                values.row(knot) -= upper_multipliers_(knot - 1) * values.row(knot + 1);
-        }
-
-        /** @brief Generate physical cubic coefficients from endpoint positions and velocities. */
-        void writeCoefficients()
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                trajectory_.coefficients_.row(i * 4) = spatial_points_.row(i);
-                trajectory_.coefficients_.row(i * 4 + 1) = derivatives_.row(i);
-                trajectory_.coefficients_.row(i * 4 + 2) = tp.h_inv *
-                    (3.0 * segment_slopes_.row(i) - 2.0 * derivatives_.row(i) - derivatives_.row(i + 1));
-                trajectory_.coefficients_.row(i * 4 + 3) = tp.h2_inv *
-                    (-2.0 * segment_slopes_.row(i) + derivatives_.row(i) + derivatives_.row(i + 1));
-            }
-        }
-
-        /** @brief Pull back the cubic Hermite map at fixed physical knot velocities.
-         * @param coefficient_partials Piece-major physical coefficient partials, borrowed for this call.
-         * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives velocity seeds. */
-        void pullbackCoefficients(const CoefficientMatrix &coefficient_partials, Gradients &gradient)
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const RowVector grad_c2 = coefficient_partials.row(i * 4 + 2);
-                const RowVector grad_c3 = coefficient_partials.row(i * 4 + 3);
-
-                const RowVector point_partial = (3.0 * tp.h2_inv) * grad_c2 - (2.0 * tp.h3_inv) * grad_c3;
-                gradient.addWaypoint(i, coefficient_partials.row(i * 4) - point_partial);
-                gradient.addWaypoint(i + 1, point_partial);
-
-                const RowVector left_partial = (-2.0 * tp.h_inv) * grad_c2 + tp.h2_inv * grad_c3;
-                const RowVector right_partial = -tp.h_inv * grad_c2 + tp.h2_inv * grad_c3;
-                adjoint_.row(i) += coefficient_partials.row(i * 4 + 1) + left_partial;
-                adjoint_.row(i + 1) += right_partial;
-
-                // Homogeneity accounts for coefficient powers and the T-scaled endpoint velocities.
-                const double coefficient_scaling =
-                    2.0 * grad_c2.dot(trajectory_.coefficients_.row(i * 4 + 2)) +
-                    3.0 * grad_c3.dot(trajectory_.coefficients_.row(i * 4 + 3));
-                const double velocity_scaling = left_partial.dot(derivatives_.row(i)) +
-                                                right_partial.dot(derivatives_.row(i + 1));
-                gradient.durations(i) += tp.h_inv * (velocity_scaling - coefficient_scaling);
-            }
-        }
-
-        /** @brief Preserve clamped velocity seeds and reuse the symmetric primal factorization.
-         * @param[in,out] gradient Receives direct endpoint velocity gradients.
-         * @note Only interior velocities are free; zero endpoint adjoints enforce those constraints. */
-        void solveAdjoint(Gradients &gradient)
-        {
-            gradient.start.v = adjoint_.row(0).transpose();
-            gradient.end.v = adjoint_.row(num_segments_).transpose();
-            adjoint_.row(0).setZero();
-            adjoint_.row(num_segments_).setZero();
-
-            for (int knot = 1; knot < num_segments_; ++knot)
-            {
-                adjoint_.row(knot) -= (2.0 * time_powers_[knot - 1].h_inv) * adjoint_.row(knot - 1);
-                adjoint_.row(knot) *= inverse_pivots_(knot - 1);
-            }
-            backSubstitute(adjoint_);
-        }
-
-        /** @brief Add cubic adjoint endpoint forces and the polarized Hamiltonian time correction.
-         * @param[in,out] gradient Total physical point, time and clamped velocity gradients. */
-        void accumulateAdjoint(Gradients &gradient) const
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                // The adjoint has zero positions and the solved knot velocity adjoints.
-                const RowVector lambda_c2 = -tp.h_inv * (2.0 * adjoint_.row(i) + adjoint_.row(i + 1));
-                const RowVector lambda_c3 = tp.h2_inv * (adjoint_.row(i) + adjoint_.row(i + 1));
-                const RowVector point_partial = -6.0 * lambda_c3;
-                gradient.addWaypoint(i, point_partial);
-                gradient.addWaypoint(i + 1, -point_partial);
-
-                gradient.durations(i) +=
-                    4.0 * trajectory_.coefficients_.row(i * 4 + 2).dot(lambda_c2) -
-                    6.0 * adjoint_.row(i).dot(trajectory_.coefficients_.row(i * 4 + 3)) -
-                    6.0 * derivatives_.row(i).dot(lambda_c3);
-
-                if (i == 0)
-                    gradient.start.v += 2.0 * lambda_c2.transpose();
-                if (i + 1 == num_segments_)
-                    gradient.end.v -= (2.0 * lambda_c2 + (6.0 * tp.h) * lambda_c3).transpose();
-            }
-        }
-    };
-
-    // Quintic splines: minimum jerk.
-
-    /** @brief Minimum-jerk interpolation with a specialized O(N) 2-by-2 block tridiagonal solver.
-     * @note Minimize the squared third physical derivative integral with fixed waypoint
-     *       positions and endpoint derivatives of orders 1 through 2. Coordinates
-     *       are caller-defined; durations use seconds. Polynomial coefficients and knots
-     *       have one owner. Updates and backward() require exclusive access; const energy
-     *       and polynomial queries may run concurrently on an unchanged valid object.
-     *       Copies own independent data. Moving invalidates borrowed views and the source polynomial.
-     *       Initialize and reuse default-constructed objects with update(); numerical failure invalidates the polynomial.
-     *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
-     *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
-     *       Energy and adjoint queries require successful construction and return plain values or void.
-     *       Overwritten gradient outputs resize automatically and reuse matching storage.
-     *       Adjoint inputs must be finite with N*kCoefficientCount coefficient rows and N time partials.
-     *       All public overloads use this single contract; callers perform input validation and
-     *       guarantee a representable working range. Coefficients, energy and gradients are not
-     *       rescanned for overflow; construction still reports knot or factorization failure. */
-    template <int DIM>
-    class QuinticSplineND
-    {
-    public:
-        using Vector = Eigen::Matrix<double, DIM, 1>;
-        using RowVector = Eigen::Matrix<double, 1, DIM>;
-        static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
-
-        static constexpr int kDimension = DIM;
-        static constexpr int kDegree = 5;
-        static constexpr int kCoefficientCount = 6;
-        static constexpr int kMinDerivativeOrder = 3;
-        using Polynomial = PPolyND<DIM, kCoefficientCount>;
-
-        using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
-        using BoundaryGradients = BoundaryGradientPair<DIM>;
-        using Gradients = SplineGradients<DIM>;
-
-    private:
-        std::vector<double> time_segments_;
-        double start_time_{0.0};
-
-        CoefficientMatrix spatial_points_;
-
-        BoundaryConditions<DIM> boundary_;
-
-        int num_segments_{0};
-
-        Polynomial trajectory_;
-
-        // Knot-major rows: each knot's physical derivatives are adjacent in memory.
-        static constexpr int kDerivativesPerKnot = 2;
-        using Factor = detail::BlockLDLT2;
-        using Block = typename Factor::Block;
-        std::vector<Factor> factors_;
-        CoefficientMatrix derivatives_;
-        CoefficientMatrix adjoint_;
-
-        struct TimePowers
-        {
-            double h;
-            double h_inv;
-            double h2_inv;
-            double h3_inv;
-            double h4_inv;
-            double h5_inv;
-        };
-        std::vector<TimePowers> time_powers_;
-
-    public:
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-        /** @brief Construct an empty, invalid spline with independent storage. */
-        QuinticSplineND() = default;
-
-        /** @brief Replace interpolation data using caller-validated absolute knots.
-         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @pre Inputs satisfy the class contract; no input validation is performed.
-         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status update(const std::vector<double> &t_points,
-                    const CoefficientMatrix &spatial_points,
-                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-        {
-            detail::durationsFromKnots(t_points, time_segments_, start_time_);
-            return update(time_segments_, spatial_points, start_time_, boundary);
-        }
-
-        /** @brief Replace interpolation data using positive durations and a common time origin.
-         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
-         * @param start_time Absolute time origin in seconds.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @pre Inputs satisfy the class contract; no input validation is performed.
-         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
-         *       Numeric construction failures clear the polynomial; inputs are not validated here.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status update(const std::vector<double> &time_segments,
-                    const CoefficientMatrix &spatial_points,
-                    double start_time,
-                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-        {
-            time_segments_ = time_segments;
-            spatial_points_ = spatial_points;
-            start_time_ = start_time;
-            boundary_ = boundary;
-            return updateSplineInternal();
-        }
-
-        /** @brief Inspect the published polynomial. @return True after successful construction; numerical range is a caller precondition. */
-        bool isValid() const { return trajectory_.isValid(); }
-        /** @brief Inspect spatial dimension. @return Compile-time DIM. */
-        int dimension() const { return DIM; }
-
-        /** @brief Inspect the absolute start time. @return Seconds, or zero for an invalid spline. */
-        double startTime() const
-        {
-            return trajectory_.startTime();
-        }
-
-        /** @brief Inspect the absolute end time. @return Seconds, or zero for an invalid spline. */
-        double endTime() const
-        {
-            return trajectory_.endTime();
-        }
-
-        /** @brief Inspect total duration. @return Seconds, or zero for an invalid spline. */
-        double duration() const
-        {
-            return trajectory_.duration();
-        }
-
-        /** @brief Inspect input topology. @return Number of stored waypoints. */
-        size_t numPoints() const
-        {
-            return static_cast<size_t>(spatial_points_.rows());
-        }
-
-        /** @brief Inspect the polynomial topology. @return Segment count, or zero when invalid. */
-        int numSegments() const
-        {
-            return trajectory_.numSegments();
-        }
-
-        /** @brief Borrow physical waypoints. @return Storage valid until update, assignment or move. */
-        const CoefficientMatrix &waypoints() const { return spatial_points_; }
-        /** @brief Borrow segment durations in seconds. @return Storage valid until the next mutation. */
-        const std::vector<double> &durations() const { return time_segments_; }
-        /** @brief Borrow absolute knots in seconds. @return Storage valid until the next mutation. */
-        const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
-        /** @brief Borrow physical boundary data. @return Storage valid until the next mutation. */
-        const BoundaryConditions<DIM> &boundary() const { return boundary_; }
-
-        /** @brief Borrow the polynomial. @return View valid until the next update, assignment or move. */
-        const Polynomial &polynomial() const & { return trajectory_; }
-        /** @brief Prevent polynomial borrowing from a temporary spline. @return No callable rvalue overload. */
-        const Polynomial &polynomial() const && = delete;
-        /** @brief Make an independent owning snapshot. @return Polynomial with its own storage and lifetime. */
-        Polynomial copyPolynomial() const { return trajectory_; }
-
-        /** @brief Evaluate monomial bases in local physical time, through crackle.
-         * @param t Local time in seconds.
-         * @param[out] b_pos Position basis. @param[out] b_vel Velocity basis.
-         * @param[out] b_acc Acceleration basis. @param[out] b_jerk Jerk basis.
-         * @param[out] b_snap Snap basis. @param[out] b_crackle Crackle basis.
-         * @note Derivatives above this polynomial's degree are zero. No shared state is touched. */
-        static inline void computeBasisFunctions(double t,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_acc,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_jerk,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
-        {
-            double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1;
-
-            b_pos << 1, t1, t2, t3, t4, t5;
-            b_vel << 0, 1, 2 * t1, 3 * t2, 4 * t3, 5 * t4;
-            b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3;
-            b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2;
-            b_snap << 0, 0, 0, 0, 24, 120 * t1;
-            b_crackle << 0, 0, 0, 0, 0, 120;
-        }
-
-        /** @brief Integrate the squared minimum physical derivative.
-         * @return Energy in physical units; requires a successfully constructed spline. */
-        double energy() const
-        {
-            assert(trajectory_.isValid());
-
-            double total_energy = 0.0;
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const double T = time_segments_[i];
-
-                const double T2 = T * T;
-                const double T3 = T2 * T;
-                const double T4 = T3 * T;
-                const double T5 = T4 * T;
-
-                RowVector c3 = trajectory_.coefficients_.row(i * 6 + 3);
-                RowVector c4 = trajectory_.coefficients_.row(i * 6 + 4);
-                RowVector c5 = trajectory_.coefficients_.row(i * 6 + 5);
-
-                total_energy += 36.0 * c3.squaredNorm() * T +
-                                144.0 * c4.dot(c3) * T2 +
-                                192.0 * c4.squaredNorm() * T3 +
-                                240.0 * c5.dot(c3) * T3 +
-                                720.0 * c5.dot(c4) * T4 +
-                                720.0 * c5.squaredNorm() * T5;
-            }
-
-            return total_energy;
-        }
-
-        /**
-         * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
-         *
-         * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 6) × DIM.
-         *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
-         * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
-         * @pre The spline is valid. */
-        void energyCoefficientPartials(CoefficientMatrix &gdC) const
-        {
-            assert(trajectory_.isValid());
-            gdC.setZero(num_segments_ * kCoefficientCount, DIM);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                double T = time_segments_[i];
-                double T2 = T * T;
-                double T3 = T2 * T;
-                double T4 = T3 * T;
-                double T5 = T4 * T;
-
-                const RowVector c3 = trajectory_.coefficients_.row(i * 6 + 3);
-                const RowVector c4 = trajectory_.coefficients_.row(i * 6 + 4);
-                const RowVector c5 = trajectory_.coefficients_.row(i * 6 + 5);
-
-                gdC.row(i * 6 + 3) = 72.0 * c3 * T +
-                                     144.0 * c4 * T2 +
-                                     240.0 * c5 * T3;
-
-                gdC.row(i * 6 + 4) = 144.0 * c3 * T2 +
-                                     384.0 * c4 * T3 +
-                                     720.0 * c5 * T4;
-
-                gdC.row(i * 6 + 5) = 240.0 * c3 * T3 +
-                                     720.0 * c4 * T4 +
-                                     1440.0 * c5 * T5;
-            }
-        }
-
-        /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
-        CoefficientMatrix energyCoefficientPartials() const
-        {
-            CoefficientMatrix gdC;
-            energyCoefficientPartials(gdC);
-            return gdC;
-        }
-
-        /**
-         * @brief Compute partial gradient of energy w.r.t. segment durations.
-         *
-         * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
-         *         Element i is the direct partial derivative w.r.t. T[i].
-         * @note Local coefficients are held fixed. Output resizes automatically and reuses matching storage.
-         * @pre The spline is valid. */
-        void energyDurationPartials(Eigen::VectorXd &gdT) const
-        {
-            assert(trajectory_.isValid());
-            gdT.resize(num_segments_);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const double T = time_segments_[i];
-
-                const RowVector c3 = trajectory_.coefficients_.row(i * 6 + 3);
-                const RowVector c4 = trajectory_.coefficients_.row(i * 6 + 4);
-                const RowVector c5 = trajectory_.coefficients_.row(i * 6 + 5);
-
-                RowVector jerk_end = 6.0 * c3 + T * (24.0 * c4 + (60.0 * T) * c5);
-
-                gdT(i) = jerk_end.squaredNorm();
-            }
-        }
-
-        /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
-        Eigen::VectorXd energyDurationPartials() const
-        {
-            Eigen::VectorXd gdT;
-            energyDurationPartials(gdT);
-            return gdT;
-        }
-
-        /**
-         * @brief Compute full gradient of energy w.r.t. segment durations.
-         *
-         * @param[out] grad Full gradient dE/dT, size num_segments.
-         *         Includes both direct and indirect dependencies via chain rule. Matching storage is reused;
-         *         otherwise the output is resized.
-         * @pre The spline is valid. */
-        void energyDurationGradient(Eigen::VectorXd &grad) const
-        {
-            assert(trajectory_.isValid());
-            computeEnergyDurationGradient<false>(grad, 1.0);
-        }
-
-        /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
-        Eigen::VectorXd energyDurationGradient() const
-        {
-            Eigen::VectorXd grad;
-            energyDurationGradient(grad);
-            return grad;
-        }
-
-        /**
-         * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @param[out] grad Full gradient dE/dP for inner points only.
-         *         Resized to (N-1) × DIM (excludes boundary points P0 and PN); matching storage is reused.
-         * @pre The spline is valid. */
-        void energyWaypointGradient(CoefficientMatrix &grad) const
-        {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<-240>(trajectory_, grad, 1.0);
-        }
-
-        /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
-        CoefficientMatrix energyWaypointGradient() const
-        {
-            CoefficientMatrix grad;
-            energyWaypointGradient(grad);
-            return grad;
-        }
-
-        /**
-         * @brief Compute energy gradients w.r.t. boundary position, velocity and acceleration.
-         * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
-         *        physical-time derivative convention (seconds); jerk gradients are zero.
-         * @pre The spline is valid.
-         * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
-         */
-        void energyBoundaryGradient(BoundaryGradients &grad) const
-        {
-            assert(trajectory_.isValid());
-            computeEnergyBoundaryGradient<false>(grad.start, grad.end, 1.0);
-        }
-
-        /** @brief Return energy gradients w.r.t. boundary position, velocity and acceleration.
-         * @return Owned start/end gradients using physical seconds and the caller's coordinates;
-         *         jerk gradients are zero.
-         * @pre The spline is valid.
-         * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
-        BoundaryGradients energyBoundaryGradient() const
-        {
-            BoundaryGradients res;
-            energyBoundaryGradient(res);
-            return res;
-        }
-
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients.
-         *
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - durations: gradient w.r.t. physical segment durations, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
-         */
-        Gradients energyGradient() const
-        {
-            Gradients res;
-            energyGradient(res);
-            return res;
-        }
-
-        /**
-         * @brief Compute full energy gradient combining time, inner point, and boundary gradients (reference overload).
-         *
-         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
-         * @note Computes waypoint jumps, endpoint terms and duration contributions using the current spline.
-         * @pre The spline is valid. */
-        void energyGradient(Gradients &grads) const
-        {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<-240>(trajectory_, grads.inner_points, 1.0);
-            computeEnergyDurationGradient<false>(grads.durations, 1.0);
-            computeEnergyBoundaryGradient<false>(grads.start, grads.end, 1.0);
-        }
-
-        /** @brief Add weighted minimum-derivative energy gradients to existing physical partials.
-         * @param[in,out] grads Prepared, initialized gradients matching this spline's topology.
-         * @param weight Energy multiplier; uses the same physical units as energy().
-         * @pre The latest construction succeeded and arithmetic is representable.
-         * @note No allocation or resizing; requires exclusive output access and no spline mutation. */
-        void energyGradientAdd(Gradients &grads, double weight = 1.0) const
-        {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<-240, true>(trajectory_, grads.inner_points, weight);
-            computeEnergyDurationGradient<true>(grads.durations, weight);
-            computeEnergyBoundaryGradient<true>(grads.start, grads.end, weight);
-        }
-
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @return Gradients Structure containing:
-         *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
-         *       - durations: gradient w.r.t. physical segment durations, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration)
-         */
-        Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
-                           const Eigen::VectorXd &partialGradByTimes)
-        {
-            Gradients res;
-
-            backward(partialGradByCoeffs, partialGradByTimes, res);
-
-            return res;
-        }
-
-        /**
-         * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
-         *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (6N) × DIM.
-         * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
-         * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
-         * @pre Input partials are finite and match the constructed spline; no input scan is performed.
-         * @note Pulls back the Hermite map, reuses the cached knot solve, then adds endpoint corrections.
-         * @pre The spline is valid. */
-        void backward(const CoefficientMatrix &partialGradByCoeffs,
-                      const Eigen::VectorXd &partialGradByTimes,
-                      Gradients &grads)
-        {
-            assert(trajectory_.isValid());
-            detail::initializeGradients(partialGradByTimes, grads);
-            adjoint_.setZero();
-
-            // Local map, cached linear solve, then endpoint corrections.
-            pullbackCoefficients(partialGradByCoeffs, grads);
-            solveAdjoint(grads);
-            // A fully clamped segment has no free knot derivatives to correct.
-            if (num_segments_ > 1)
-                accumulateAdjoint(grads);
-        }
-
-    private:
-        /** @brief Write duration terms from the endpoint energy identity.
-         * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
-         *        accumulation requires matching initialized storage.
-         * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
-        template<bool Add>
-        void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
-        {
-            if constexpr (!Add)
-                grad.resize(num_segments_);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const RowVector c1 = trajectory_.coefficients_.row(i * 6 + 1);
-                const RowVector c2 = trajectory_.coefficients_.row(i * 6 + 2);
-                const RowVector c3 = trajectory_.coefficients_.row(i * 6 + 3);
-                const RowVector c4 = trajectory_.coefficients_.row(i * 6 + 4);
-                const RowVector c5 = trajectory_.coefficients_.row(i * 6 + 5);
-
-                double term_jerk = 36.0 * c3.squaredNorm();
-                double term_sa = 96.0 * c2.dot(c4);
-                double term_cv = 240.0 * c1.dot(c5);
-
-                detail::storeGradient<Add>(grad(i), weight * (-term_jerk + term_sa - term_cv));
-            }
-        }
-
-        /** @brief Write integration-by-parts terms at the two clamped endpoints.
-         * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] start Start endpoint partials in physical coordinates.
-         * @param[in,out] end End endpoint partials in physical coordinates.
-         * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
-        template<bool Add>
-        void computeEnergyBoundaryGradient(BoundaryGradient &start, BoundaryGradient &end, double weight) const
-        {
-            if constexpr (!Add)
-            {
-                start.j.setZero(); end.j.setZero();
-            }
-
-            // Evaluate the start-boundary terms at local time zero.
-            const RowVector c3_first = trajectory_.coefficients_.row(3);
-            const RowVector c4_first = trajectory_.coefficients_.row(4);
-            const RowVector c5_first = trajectory_.coefficients_.row(5);
-
-            detail::storeGradient<Add>(start.p, weight * (-240.0 * c5_first.transpose()));
-            detail::storeGradient<Add>(start.v, weight * (48.0 * c4_first.transpose()));
-            detail::storeGradient<Add>(start.a, weight * (-12.0 * c3_first.transpose()));
-
-            // Evaluate the end-boundary terms at the final segment's physical duration.
-            int last_idx = num_segments_ - 1;
-            double T = time_segments_[last_idx];
-            double T2 = T * T;
-
-            const RowVector c3_last = trajectory_.coefficients_.row(last_idx * 6 + 3);
-            const RowVector c4_last = trajectory_.coefficients_.row(last_idx * 6 + 4);
-            const RowVector c5_last = trajectory_.coefficients_.row(last_idx * 6 + 5);
-
-            RowVector jerk_end = 6.0 * c3_last + 24.0 * c4_last * T + 60.0 * c5_last * T2;
-            RowVector snap_end = 24.0 * c4_last + 120.0 * c5_last * T;
-            RowVector crackle_end = 120.0 * c5_last;
-
-            detail::storeGradient<Add>(end.p, weight * (2.0 * crackle_end.transpose()));
-            detail::storeGradient<Add>(end.v, weight * (-2.0 * snap_end.transpose()));
-            detail::storeGradient<Add>(end.a, weight * (2.0 * jerk_end.transpose()));
-        }
-
-        // Construction: prepare caches, solve knot derivatives, publish coefficients.
-        /** @brief Rebuild from physical data; failed construction clears the published polynomial.
-         * @note Requires exclusive access. Storage is reused when the topology is unchanged.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status updateSplineInternal()
-        {
-            trajectory_.is_initialized_ = false;
-            const auto times = trajectory_.prepareCoefficients(time_segments_, start_time_, kCoefficientCount);
-            if (!times) { num_segments_ = 0; return times; }
-            num_segments_ = static_cast<int>(time_segments_.size());
-
-            prepareWorkspace();
-            precomputeTimePowers();
-            if (!solveInternalDerivatives())
-            {
-                trajectory_.clear();
-                return {ErrorCode::NumericalFailure, "Spline factorization failed"};
-            }
-            writeCoefficients();
-            trajectory_.publishCoefficients();
-            return Status::success();
-        }
-
-        /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
-         * @note Requires validated input. Same-topology updates skip all cache resizing;
-         *       the first adjoint reuses storage prepared during construction. */
-        void prepareWorkspace()
-        {
-            if (time_powers_.size() != time_segments_.size())
-                resizeWorkspace();
-
-            // Boundary values change independently of the segment count.
-            derivatives_.row(0) = boundary_.start_velocity.transpose();
-            derivatives_.row(num_segments_ * 2 + 0) = boundary_.end_velocity.transpose();
-            derivatives_.row(1) = boundary_.start_acceleration.transpose();
-            derivatives_.row(num_segments_ * 2 + 1) = boundary_.end_acceleration.transpose();
-        }
-
-        /** @brief Resize primal, adjoint and factor caches after a segment-count change.
-         * @note Duration-cache size records the prepared topology and is committed last.
-         *       Allocation order is preserved; same-topology updates skip this function. */
-        void resizeWorkspace()
-        {
-            adjoint_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
-            derivatives_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
-            factors_.resize(num_segments_ - 1);
-            time_powers_.resize(num_segments_);
-        }
-
-        /** @brief Cache reciprocal duration powers used by assembly, Hermite maps and adjoints. */
-        void precomputeTimePowers()
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                auto &tp = time_powers_[i];
-                tp.h = time_segments_[i];
-                tp.h_inv = 1.0 / tp.h;
-                tp.h2_inv = tp.h_inv * tp.h_inv;
-                tp.h3_inv = tp.h2_inv * tp.h_inv;
-                tp.h4_inv = tp.h3_inv * tp.h_inv;
-                tp.h5_inv = tp.h4_inv * tp.h_inv;
-            }
-        }
-
-        /** @brief Assemble one knot's stationarity equation for half the integrated squared derivative.
-         * @param knot Interior knot index in [1, num_segments_).
-         * @param[out] diagonal Symmetric diagonal block of the physical energy Hessian.
-         * @param[out] previous Coupling to the preceding knot.
-         * @note Writes this knot's RHS to derivatives_; fixed endpoint terms move to that RHS. */
-        void assembleKnotSystem(int knot, Block &diagonal, Block &previous)
-        {
-            const auto &left = time_powers_[knot - 1];
-            const auto &right = time_powers_[knot];
-
-            // These constants are the exact unit-interval Hermite energy Gram matrix.
-            diagonal(0, 0) = 192.0 * left.h3_inv + 192.0 * right.h3_inv;
-            diagonal(1, 0) = -36.0 * left.h2_inv + 36.0 * right.h2_inv;
-            diagonal(1, 1) = 9.0 * left.h_inv + 9.0 * right.h_inv;
-            previous(0, 0) = 168.0 * left.h3_inv;
-            previous(0, 1) = 24.0 * left.h2_inv;
-            previous(1, 0) = -24.0 * left.h2_inv;
-            previous(1, 1) = -3.0 * left.h_inv;
-
-            const RowVector delta_left = spatial_points_.row(knot) - spatial_points_.row(knot - 1);
-            const RowVector delta_right = spatial_points_.row(knot + 1) - spatial_points_.row(knot);
-            RowVector rhs0 = 360.0 * left.h4_inv * delta_left + 360.0 * right.h4_inv * delta_right;
-            RowVector rhs1 = -60.0 * left.h3_inv * delta_left + 60.0 * right.h3_inv * delta_right;
-            if (knot == 1)
-            {
-                rhs0 -= previous(0, 0) * derivatives_.row(0) + previous(0, 1) * derivatives_.row(1);
-                rhs1 -= previous(1, 0) * derivatives_.row(0) + previous(1, 1) * derivatives_.row(1);
-            }
-            if (knot + 1 == num_segments_)
-            {
-                rhs0 -= 168.0 * right.h3_inv * derivatives_.row(num_segments_ * 2)
-                    - 24.0 * right.h2_inv * derivatives_.row(num_segments_ * 2 + 1);
-                rhs1 -= 24.0 * right.h2_inv * derivatives_.row(num_segments_ * 2)
-                    - 3.0 * right.h_inv * derivatives_.row(num_segments_ * 2 + 1);
-            }
-            derivatives_.row(knot * 2) = rhs0;
-            derivatives_.row(knot * 2 + 1) = rhs1;
-        }
-
-        /** @brief Factor and solve the block system in linear time.
-         * @return False on a nonpositive/nonfinite pivot; true after solving all free derivatives.
-         * @note Forward substitution is fused with assembly to avoid a separate RHS sweep. */
-        bool solveInternalDerivatives()
-        {
-            for (int knot = 1; knot < num_segments_; ++knot)
-            {
-                Block diagonal, previous;
-                assembleKnotSystem(knot, diagonal, previous);
-                auto &factor = factors_[knot - 1];
-                const Factor *prior = knot > 1 ? &factors_[knot - 2] : nullptr;
-                if (!factor.factorize(diagonal, previous, prior))
-                    return false;
-                factor.forward(derivatives_, knot * kDerivativesPerKnot);
-            }
-            backSubstitute(derivatives_);
-            return true;
-        }
-
-        /** @brief Finish a primal or adjoint solve using the stored diagonal/coupling factors.
-         * @param[in,out] values Knot-major forward-substituted RHS; receives the solution.
-         * @note Endpoint rows are preserved; the caller owns and exclusively supplies the matrix. */
-        void backSubstitute(CoefficientMatrix &values) const
-        {
-            detail::backSubstitute<kDerivativesPerKnot>(factors_, num_segments_, values);
-        }
-
-        /** @brief Generate coefficients from endpoint residuals in physical coordinates.
-         * @note Each row contains contiguous spatial coordinates, so the short expressions
-         *       can use Eigen packets without changing the per-order mathematical formula. */
-        void writeCoefficients()
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const int coefficient_row = i * kCoefficientCount;
-                const int left_row = i * kDerivativesPerKnot;
-                const int right_row = left_row + kDerivativesPerKnot;
-                const RowVector position = spatial_points_.row(i);
-                const RowVector velocity = derivatives_.row(left_row);
-                const RowVector acceleration = derivatives_.row(left_row + 1);
-                const RowVector end_velocity = derivatives_.row(right_row);
-                const RowVector end_acceleration = derivatives_.row(right_row + 1);
-                const RowVector quadratic = 0.5 * acceleration;
-
-                // Match the right endpoint after subtracting the left-end Taylor polynomial.
-                const RowVector displacement = spatial_points_.row(i + 1) - position;
-                const RowVector position_residual = displacement - tp.h * velocity - (tp.h * tp.h) * quadratic;
-                const RowVector velocity_residual = end_velocity - velocity - tp.h * acceleration;
-                const RowVector acceleration_residual = end_acceleration - acceleration;
-                const RowVector cubic =
-                    (10.0 * tp.h3_inv) * position_residual - (4.0 * tp.h2_inv) * velocity_residual +
-                    (0.5 * tp.h_inv) * acceleration_residual;
-                const RowVector quartic =
-                    (-15.0 * tp.h4_inv) * position_residual + (7.0 * tp.h3_inv) * velocity_residual -
-                    tp.h2_inv * acceleration_residual;
-                const RowVector quintic =
-                    (6.0 * tp.h5_inv) * position_residual - (3.0 * tp.h4_inv) * velocity_residual +
-                    (0.5 * tp.h3_inv) * acceleration_residual;
-
-                // Publish together, after all source rows and duration powers have been read.
-                trajectory_.coefficients_.row(coefficient_row) = position;
-                trajectory_.coefficients_.row(coefficient_row + 1) = velocity;
-                trajectory_.coefficients_.row(coefficient_row + 2) = quadratic;
-                trajectory_.coefficients_.row(coefficient_row + 3) = cubic;
-                trajectory_.coefficients_.row(coefficient_row + 4) = quartic;
-                trajectory_.coefficients_.row(coefficient_row + 5) = quintic;
-            }
-        }
-
-        /** @brief Differentiate each segment's explicit Hermite map at fixed knot derivatives.
-         * @param coefficient_partials Piece-major physical coefficient partials, valid for this call.
-         * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives derivative seeds.
-         * @note Homogeneity gives dC/dT without materializing derivative matrices. */
-        void pullbackCoefficients(const CoefficientMatrix &coefficient_partials, Gradients &gradient)
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const int coefficient_row = i * kCoefficientCount;
-                const int left_row = i * kDerivativesPerKnot;
-                const int right_row = left_row + kDerivativesPerKnot;
-
-                // Reuse solved states; a fully clamped segment reads its inputs directly.
-                const RowVector left_velocity = derivatives_.row(left_row);
-                const RowVector left_acceleration = derivatives_.row(left_row + 1);
-                const RowVector right_velocity = derivatives_.row(right_row);
-                const RowVector right_acceleration = derivatives_.row(right_row + 1);
-
-                // Apply the same Hermite map across coordinates, sharing the time multipliers.
-                const RowVector g3 = coefficient_partials.row(coefficient_row + 3);
-                const RowVector g4 = coefficient_partials.row(coefficient_row + 4);
-                const RowVector g5 = coefficient_partials.row(coefficient_row + 5);
-                const RowVector grad_v_left = (-6.0 * tp.h2_inv) * g3
-                    + (8.0 * tp.h3_inv) * g4 - (3.0 * tp.h4_inv) * g5;
-                const RowVector grad_a_left = (-1.5 * tp.h_inv) * g3
-                    + (1.5 * tp.h2_inv) * g4 - (0.5 * tp.h3_inv) * g5;
-                const RowVector point_partial = (10.0 * tp.h3_inv) * g3
-                    - (15.0 * tp.h4_inv) * g4 + (6.0 * tp.h5_inv) * g5;
-                const RowVector grad_v_right = (-4.0 * tp.h2_inv) * g3
-                    + (7.0 * tp.h3_inv) * g4 - (3.0 * tp.h4_inv) * g5;
-                const RowVector grad_a_right = (0.5 * tp.h_inv) * g3
-                    - tp.h2_inv * g4 + (0.5 * tp.h3_inv) * g5;
-
-                gradient.addWaypoint(i, coefficient_partials.row(coefficient_row) - point_partial);
-                gradient.addWaypoint(i + 1, point_partial);
-                adjoint_.row(left_row) += grad_v_left + coefficient_partials.row(coefficient_row + 1);
-                adjoint_.row(right_row) += grad_v_right;
-                adjoint_.row(left_row + 1) += grad_a_left + 0.5 * coefficient_partials.row(coefficient_row + 2);
-                adjoint_.row(right_row + 1) += grad_a_right;
-
-                // c_k scales as T^-k; endpoint derivative order r scales as T^r.
-                RowVector time_partials = -3.0 * g3.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 3))
-                    - 4.0 * g4.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 4))
-                    - 5.0 * g5.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 5));
-                time_partials += grad_v_left.cwiseProduct(left_velocity)
-                    + grad_v_right.cwiseProduct(right_velocity)
-                    + 2.0 * grad_a_left.cwiseProduct(left_acceleration)
-                    + 2.0 * grad_a_right.cwiseProduct(right_acceleration);
-                gradient.durations(i) += tp.h_inv * time_partials.sum();
-            }
-        }
-
-        /** @brief Preserve clamped boundary seeds and solve for free knot adjoints.
-         * @param[in,out] gradient Receives direct boundary derivative gradients.
-         * @note A is symmetric: the primal factors also solve A^T lambda = seed. */
-        void solveAdjoint(Gradients &gradient)
-        {
-            gradient.start.v = adjoint_.row(0).transpose();
-            gradient.end.v = adjoint_.row(num_segments_ * 2 + 0).transpose();
-            gradient.start.a = adjoint_.row(1).transpose();
-            gradient.end.a = adjoint_.row(num_segments_ * 2 + 1).transpose();
-            adjoint_.template topRows<2>().setZero();
-            adjoint_.template bottomRows<2>().setZero();
-
-            detail::solveWithFactors<kDerivativesPerKnot>(factors_, num_segments_, adjoint_);
-        }
-
-        /** @brief Add the interpolation constraint's contribution using endpoint identities.
-         * @param[in,out] gradient Physical point, time and clamped-boundary gradients.
-         * @note The adjoint polynomial has zero positions and knot derivatives from adjoint_.
-         *       Integration by parts gives point/boundary forces; the polarized Hamiltonian
-         *       gives time corrections without constructing dA/dT or differentiating the solver. */
-        void accumulateAdjoint(Gradients &gradient) const
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const int coefficient_row = i * kCoefficientCount;
-                const int left_row = i * kDerivativesPerKnot;
-                const int right_row = left_row + kDerivativesPerKnot;
-
-                // Map knot adjoints to a polynomial with zero endpoint positions.
-                const RowVector adjoint_v_left = adjoint_.row(left_row);
-                const RowVector adjoint_v_right = adjoint_.row(right_row);
-                const RowVector adjoint_a_left = adjoint_.row(left_row + 1);
-                const RowVector adjoint_a_right = adjoint_.row(right_row + 1);
-                const RowVector lambda_c3 = (-6.0 * tp.h2_inv) * adjoint_v_left
-                    - (4.0 * tp.h2_inv) * adjoint_v_right
-                    - (1.5 * tp.h_inv) * adjoint_a_left
-                    + (0.5 * tp.h_inv) * adjoint_a_right;
-                const RowVector lambda_c4 = (8.0 * tp.h3_inv) * adjoint_v_left
-                    + (7.0 * tp.h3_inv) * adjoint_v_right
-                    + (1.5 * tp.h2_inv) * adjoint_a_left
-                    - tp.h2_inv * adjoint_a_right;
-                const RowVector lambda_c5 = (-3.0 * tp.h4_inv) * adjoint_v_left
-                    - (3.0 * tp.h4_inv) * adjoint_v_right
-                    - (0.5 * tp.h3_inv) * adjoint_a_left
-                    + (0.5 * tp.h3_inv) * adjoint_a_right;
-
-                // Endpoint forces use physical derivatives of the adjoint polynomial.
-                const RowVector adjoint_jerk = 6.0 * lambda_c3;
-                const RowVector adjoint_snap = 24.0 * lambda_c4;
-                const RowVector adjoint_crackle = 120.0 * lambda_c5;
-                gradient.addWaypoint(i, adjoint_crackle);
-                gradient.addWaypoint(i + 1, -adjoint_crackle);
-
-                // The polarized Hamiltonian contracts matching physical derivatives.
-                const RowVector velocity = trajectory_.coefficients_.row(coefficient_row + 1);
-                const RowVector acceleration = 2.0 * trajectory_.coefficients_.row(coefficient_row + 2);
-                const RowVector jerk = 6.0 * trajectory_.coefficients_.row(coefficient_row + 3);
-                const RowVector snap = 24.0 * trajectory_.coefficients_.row(coefficient_row + 4);
-                const RowVector crackle = 120.0 * trajectory_.coefficients_.row(coefficient_row + 5);
-                const RowVector time_partials = jerk.cwiseProduct(adjoint_jerk)
-                    + adjoint_v_left.cwiseProduct(crackle) + velocity.cwiseProduct(adjoint_crackle)
-                    - adjoint_a_left.cwiseProduct(snap) - acceleration.cwiseProduct(adjoint_snap);
-                gradient.durations(i) += time_partials.sum();
-
-                // Only clamped endpoints contribute boundary derivative corrections.
-                if (i == 0)
-                {
-                    gradient.start.v -= adjoint_snap.transpose();
-                    gradient.start.a += adjoint_jerk.transpose();
-                }
-                if (i + 1 == num_segments_)
-                {
-                    const RowVector end_v = tp.h * adjoint_crackle + adjoint_snap;
-                    const RowVector end_a = ((60.0 * tp.h) * lambda_c5 + adjoint_snap) * tp.h + adjoint_jerk;
-                    gradient.end.v += end_v.transpose();
-                    gradient.end.a -= end_a.transpose();
-                }
-            }
-        }
-    };
-
-    // Septic splines: minimum snap.
-
-    /** @brief Minimum-snap interpolation with a specialized O(N) 3-by-3 block tridiagonal solver.
-     * @note Minimize the squared fourth physical derivative integral with fixed waypoint
-     *       positions and endpoint derivatives of orders 1 through 3. Coordinates
-     *       are caller-defined; durations use seconds. Polynomial coefficients and knots
-     *       have one owner. Updates and backward() require exclusive access; const energy
-     *       and polynomial queries may run concurrently on an unchanged valid object.
-     *       Copies own independent data. Moving invalidates borrowed views and the source polynomial.
-     *       Initialize and reuse default-constructed objects with update(); numerical failure invalidates the polynomial.
-     *       Inputs are trusted: finite waypoints/boundaries/start, positive finite durations or strictly
-     *       increasing finite knots, N >= 1, N+1 waypoint rows, and N*kCoefficientCount within int range.
-     *       Energy and adjoint queries require successful construction and return plain values or void.
-     *       Overwritten gradient outputs resize automatically and reuse matching storage.
-     *       Adjoint inputs must be finite with N*kCoefficientCount coefficient rows and N time partials.
-     *       All public overloads use this single contract; callers perform input validation and
-     *       guarantee a representable working range. Coefficients, energy and gradients are not
-     *       rescanned for overflow; construction still reports knot or factorization failure. */
-    template <int DIM>
-    class SepticSplineND
-    {
-    public:
-        using Vector = Eigen::Matrix<double, DIM, 1>;
-        using RowVector = Eigen::Matrix<double, 1, DIM>;
-        static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
-        using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
-
-        static constexpr int kDimension = DIM;
-        static constexpr int kDegree = 7;
-        static constexpr int kCoefficientCount = 8;
-        static constexpr int kMinDerivativeOrder = 4;
-        using Polynomial = PPolyND<DIM, kCoefficientCount>;
-
-        using BoundaryGradient = SplineTrajectory::BoundaryGradient<DIM>;
-        using BoundaryGradients = BoundaryGradientPair<DIM>;
-        using Gradients = SplineGradients<DIM>;
-
-    private:
-        std::vector<double> time_segments_;
-        double start_time_{0.0};
-
-        CoefficientMatrix spatial_points_;
-
-        BoundaryConditions<DIM> boundary_;
-
-        int num_segments_{0};
-
-        Polynomial trajectory_;
-
-        // Knot-major rows: each knot's physical derivatives are adjacent in memory.
-        static constexpr int kDerivativesPerKnot = 3;
-        using Factor = detail::BlockLDLT3;
-        using Block = typename Factor::Block;
-        std::vector<Factor> factors_;
-        CoefficientMatrix derivatives_;
-        CoefficientMatrix adjoint_;
-
-        struct TimePowers
-        {
-            double h;
-            double h_inv;
-            double h2_inv;
-            double h3_inv;
-            double h4_inv;
-            double h5_inv;
-            double h6_inv;
-            double h7_inv;
-        };
-        std::vector<TimePowers> time_powers_;
-
-    public:
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-        /** @brief Construct an empty, invalid spline with independent storage. */
-        SepticSplineND() = default;
-
-        /** @brief Replace interpolation data using caller-validated absolute knots.
-         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @pre Inputs satisfy the class contract; no input validation is performed.
-         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status update(const std::vector<double> &t_points,
-                    const CoefficientMatrix &spatial_points,
-                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-        {
-            detail::durationsFromKnots(t_points, time_segments_, start_time_);
-            return update(time_segments_, spatial_points, start_time_, boundary);
-        }
-
-        /** @brief Replace interpolation data using positive durations and a common time origin.
-         * @param time_segments Durations in seconds. @param spatial_points Physical waypoint rows.
-         * @param start_time Absolute time origin in seconds.
-         * @param boundary Clamped physical endpoint derivatives in the caller's frame.
-         * @pre Inputs satisfy the class contract; no input validation is performed.
-         * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
-         *       Numeric construction failures clear the polynomial; inputs are not validated here.
-         * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status update(const std::vector<double> &time_segments,
-                    const CoefficientMatrix &spatial_points,
-                    double start_time,
-                    const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
-        {
-            time_segments_ = time_segments;
-            spatial_points_ = spatial_points;
-            start_time_ = start_time;
-            boundary_ = boundary;
-            return updateSplineInternal();
-        }
-
-        /** @brief Inspect the published polynomial. @return True after successful construction; numerical range is a caller precondition. */
-        bool isValid() const { return trajectory_.isValid(); }
-        /** @brief Inspect spatial dimension. @return Compile-time DIM. */
-        int dimension() const { return DIM; }
-
-        /** @brief Inspect the absolute start time. @return Seconds, or zero for an invalid spline. */
-        double startTime() const
-        {
-            return trajectory_.startTime();
-        }
-
-        /** @brief Inspect the absolute end time. @return Seconds, or zero for an invalid spline. */
-        double endTime() const
-        {
-            return trajectory_.endTime();
-        }
-
-        /** @brief Inspect total duration. @return Seconds, or zero for an invalid spline. */
-        double duration() const
-        {
-            return trajectory_.duration();
-        }
-
-        /** @brief Inspect input topology. @return Number of stored waypoints. */
-        size_t numPoints() const
-        {
-            return static_cast<size_t>(spatial_points_.rows());
-        }
-
-        /** @brief Inspect the polynomial topology. @return Segment count, or zero when invalid. */
-        int numSegments() const
-        {
-            return trajectory_.numSegments();
-        }
-
-        /** @brief Borrow physical waypoints. @return Storage valid until update, assignment or move. */
-        const CoefficientMatrix &waypoints() const { return spatial_points_; }
-        /** @brief Borrow segment durations in seconds. @return Storage valid until the next mutation. */
-        const std::vector<double> &durations() const { return time_segments_; }
-        /** @brief Borrow absolute knots in seconds. @return Storage valid until the next mutation. */
-        const std::vector<double> &breakpoints() const { return trajectory_.breakpoints_; }
-        /** @brief Borrow physical boundary data. @return Storage valid until the next mutation. */
-        const BoundaryConditions<DIM> &boundary() const { return boundary_; }
-
-        /** @brief Borrow the polynomial. @return View valid until the next update, assignment or move. */
-        const Polynomial &polynomial() const & { return trajectory_; }
-        /** @brief Prevent polynomial borrowing from a temporary spline. @return No callable rvalue overload. */
-        const Polynomial &polynomial() const && = delete;
-        /** @brief Make an independent owning snapshot. @return Polynomial with its own storage and lifetime. */
-        Polynomial copyPolynomial() const { return trajectory_; }
-
-        /** @brief Evaluate monomial bases in local physical time, through crackle.
-         * @param t Local time in seconds.
-         * @param[out] b_pos Position basis. @param[out] b_vel Velocity basis.
-         * @param[out] b_acc Acceleration basis. @param[out] b_jerk Jerk basis.
-         * @param[out] b_snap Snap basis. @param[out] b_crackle Crackle basis.
-         * @note Derivatives above this polynomial's degree are zero. No shared state is touched. */
-        static inline void computeBasisFunctions(double t,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_pos,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_vel,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_acc,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_jerk,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_snap,
-                                                 Eigen::Matrix<double, 1, kCoefficientCount> &b_crackle)
-        {
-            double t1 = t, t2 = t1 * t1, t3 = t2 * t1, t4 = t3 * t1, t5 = t4 * t1, t6 = t5 * t1, t7 = t6 * t1;
-
-            b_pos << 1, t1, t2, t3, t4, t5, t6, t7;
-            b_vel << 0, 1, 2 * t1, 3 * t2, 4 * t3, 5 * t4, 6 * t5, 7 * t6;
-            b_acc << 0, 0, 2, 6 * t1, 12 * t2, 20 * t3, 30 * t4, 42 * t5;
-            b_jerk << 0, 0, 0, 6, 24 * t1, 60 * t2, 120 * t3, 210 * t4;
-            b_snap << 0, 0, 0, 0, 24, 120 * t1, 360 * t2, 840 * t3;
-            b_crackle << 0, 0, 0, 0, 0, 120, 720 * t1, 2520 * t2;
-        }
-
-        /** @brief Integrate the squared minimum physical derivative.
-         * @return Energy in physical units; requires a successfully constructed spline. */
-        double energy() const
-        {
-            assert(trajectory_.isValid());
-
-            double total_energy = 0.0;
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const double T = time_segments_[i];
-
-                const double T2 = T * T;
-                const double T3 = T2 * T;
-                const double T4 = T3 * T;
-                const double T5 = T4 * T;
-                const double T6 = T4 * T2;
-                const double T7 = T4 * T3;
-
-                RowVector c4 = trajectory_.coefficients_.row(i * 8 + 4);
-                RowVector c5 = trajectory_.coefficients_.row(i * 8 + 5);
-                RowVector c6 = trajectory_.coefficients_.row(i * 8 + 6);
-                RowVector c7 = trajectory_.coefficients_.row(i * 8 + 7);
-
-                total_energy += 576.0 * c4.squaredNorm() * T +
-                                2880.0 * c4.dot(c5) * T2 +
-                                4800.0 * c5.squaredNorm() * T3 +
-                                5760.0 * c4.dot(c6) * T3 +
-                                21600.0 * c5.dot(c6) * T4 +
-                                10080.0 * c4.dot(c7) * T4 +
-                                25920.0 * c6.squaredNorm() * T5 +
-                                40320.0 * c5.dot(c7) * T5 +
-                                100800.0 * c6.dot(c7) * T6 +
-                                100800.0 * c7.squaredNorm() * T7;
-            }
-
-            return total_energy;
-        }
-
-        /**
-         * @brief Compute partial gradient of energy w.r.t. polynomial coefficients.
-         *
-         * @param[out] gdC Overwritten partial gradient ∂E/∂C, size (num_segments * 8) × DIM.
-         *         Rows follow the same piece-major ascending-power order as coefficients(). Durations are held fixed.
-         * @note Computes the direct partial derivative. Output resizes automatically and reuses matching storage.
-         * @pre The spline is valid. */
-        void energyCoefficientPartials(CoefficientMatrix &gdC) const
-        {
-            assert(trajectory_.isValid());
-            gdC.setZero(num_segments_ * kCoefficientCount, DIM);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                double T = time_segments_[i];
-                double T2 = T * T;
-                double T3 = T2 * T;
-                double T4 = T3 * T;
-                double T5 = T4 * T;
-                double T6 = T5 * T;
-                double T7 = T6 * T;
-
-                const RowVector c4 = trajectory_.coefficients_.row(i * 8 + 4);
-                const RowVector c5 = trajectory_.coefficients_.row(i * 8 + 5);
-                const RowVector c6 = trajectory_.coefficients_.row(i * 8 + 6);
-                const RowVector c7 = trajectory_.coefficients_.row(i * 8 + 7);
-
-                gdC.row(i * 8 + 4) = 1152.0 * c4 * T +
-                                     2880.0 * c5 * T2 +
-                                     5760.0 * c6 * T3 +
-                                     10080.0 * c7 * T4;
-
-                gdC.row(i * 8 + 5) = 2880.0 * c4 * T2 +
-                                     9600.0 * c5 * T3 +
-                                     21600.0 * c6 * T4 +
-                                     40320.0 * c7 * T5;
-
-                gdC.row(i * 8 + 6) = 5760.0 * c4 * T3 +
-                                     21600.0 * c5 * T4 +
-                                     51840.0 * c6 * T5 +
-                                     100800.0 * c7 * T6;
-
-                gdC.row(i * 8 + 7) = 10080.0 * c4 * T4 +
-                                     40320.0 * c5 * T5 +
-                                     100800.0 * c6 * T6 +
-                                     201600.0 * c7 * T7;
-            }
-        }
-
-        /** @brief Allocate direct energy coefficient partials. @return Piece-major physical coefficient gradients. */
-        CoefficientMatrix energyCoefficientPartials() const
-        {
-            CoefficientMatrix gdC;
-            energyCoefficientPartials(gdC);
-            return gdC;
-        }
-
-        /**
-         * @brief Compute partial gradient of energy w.r.t. segment durations.
-         *
-         * @param[out] gdT Overwritten partial gradient ∂E/∂T, size num_segments.
-         *         Element i is the direct partial derivative w.r.t. T[i].
-         * @note Local coefficients are held fixed. Output resizes automatically and reuses matching storage.
-         * @pre The spline is valid. */
-        void energyDurationPartials(Eigen::VectorXd &gdT) const
-        {
-            assert(trajectory_.isValid());
-            gdT.resize(num_segments_);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const double T = time_segments_[i];
-
-                const RowVector c4 = trajectory_.coefficients_.row(i * 8 + 4);
-                const RowVector c5 = trajectory_.coefficients_.row(i * 8 + 5);
-                const RowVector c6 = trajectory_.coefficients_.row(i * 8 + 6);
-                const RowVector c7 = trajectory_.coefficients_.row(i * 8 + 7);
-
-                RowVector snap_end = 24.0 * c4 + T * (120.0 * c5 + T * (360.0 * c6 + (840.0 * T) * c7));
-
-                gdT(i) = snap_end.squaredNorm();
-            }
-        }
-
-        /** @brief Allocate direct energy duration partials. @return Physical duration gradients at fixed coefficients. */
-        Eigen::VectorXd energyDurationPartials() const
-        {
-            Eigen::VectorXd gdT;
-            energyDurationPartials(gdT);
-            return gdT;
-        }
-
-        /**
-         * @brief Compute full gradient of energy w.r.t. segment durations.
-         *
-         * @param[out] grad Full gradient dE/dT, size num_segments.
-         *         Includes both direct and indirect dependencies via chain rule. Matching storage is reused;
-         *         otherwise the output is resized.
-         * @pre The spline is valid. */
-        void energyDurationGradient(Eigen::VectorXd &grad) const
-        {
-            assert(trajectory_.isValid());
-            computeEnergyDurationGradient<false>(grad, 1.0);
-        }
-
-        /** @brief Allocate total energy duration gradients. @return Gradients including interpolation dependence. */
-        Eigen::VectorXd energyDurationGradient() const
-        {
-            Eigen::VectorXd grad;
-            energyDurationGradient(grad);
-            return grad;
-        }
-
-        /**
-         * @brief Compute full gradient of energy w.r.t. inner waypoints only.
-         * @param[out] grad Full gradient dE/dP for inner points only.
-         *         Resized to (N-1) × DIM (excludes boundary points P0 and PN); matching storage is reused.
-         * @pre The spline is valid. */
-        void energyWaypointGradient(CoefficientMatrix &grad) const
-        {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<10080>(trajectory_, grad, 1.0);
+            assert(data_.trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale>(data_.trajectory_, grad, 1.0);
         }
 
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
@@ -3461,18 +3476,19 @@ namespace SplineTrajectory
         /**
          * @brief Compute energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
          * @param[out] grad Overwritten start/end gradients in the caller's coordinates and
-         *        physical-time derivative convention (seconds).
+         *        physical-time derivative convention (seconds); unsupported higher derivatives are zero.
          * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require separate outputs and no spline updates.
          */
         void energyBoundaryGradient(BoundaryGradients &grad) const
         {
-            assert(trajectory_.isValid());
-            computeEnergyBoundaryGradient<false>(grad.start, grad.end, 1.0);
+            assert(data_.trajectory_.isValid());
+            kernel_.template computeEnergyBoundaryGradient<false>(data_, grad.start, grad.end, 1.0);
         }
 
         /** @brief Return energy gradients w.r.t. boundary position, velocity, acceleration and jerk.
-         * @return Owned start/end gradients using physical seconds and the caller's coordinates.
+         * @return Owned start/end gradients using physical seconds and the caller's coordinates;
+         *         unsupported higher derivatives are zero.
          * @pre The spline is valid.
          * @note Valid calls do not allocate. Concurrent calls require no spline updates. */
         BoundaryGradients energyBoundaryGradient() const
@@ -3488,7 +3504,7 @@ namespace SplineTrajectory
          * @return Gradients Structure containing:
          *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
          *       - durations: gradient w.r.t. physical segment durations, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
+         *       - start/end: gradients w.r.t. position and supported endpoint derivatives
          */
         Gradients energyGradient() const
         {
@@ -3505,10 +3521,10 @@ namespace SplineTrajectory
          * @pre The spline is valid. */
         void energyGradient(Gradients &grads) const
         {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<10080>(trajectory_, grads.inner_points, 1.0);
-            computeEnergyDurationGradient<false>(grads.durations, 1.0);
-            computeEnergyBoundaryGradient<false>(grads.start, grads.end, 1.0);
+            assert(data_.trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale>(data_.trajectory_, grads.inner_points, 1.0);
+            kernel_.template computeEnergyDurationGradient<false>(data_, grads.durations, 1.0);
+            kernel_.template computeEnergyBoundaryGradient<false>(data_, grads.start, grads.end, 1.0);
         }
 
         /** @brief Add weighted minimum-derivative energy gradients to existing physical partials.
@@ -3518,21 +3534,21 @@ namespace SplineTrajectory
          * @note No allocation or resizing; requires exclusive output access and no spline mutation. */
         void energyGradientAdd(Gradients &grads, double weight = 1.0) const
         {
-            assert(trajectory_.isValid());
-            detail::computeEnergyWaypointGradient<10080, true>(trajectory_, grads.inner_points, weight);
-            computeEnergyDurationGradient<true>(grads.durations, weight);
-            computeEnergyBoundaryGradient<true>(grads.start, grads.end, weight);
+            assert(data_.trajectory_.isValid());
+            detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale, true>(data_.trajectory_, grads.inner_points, weight);
+            kernel_.template computeEnergyDurationGradient<true>(data_, grads.durations, weight);
+            kernel_.template computeEnergyBoundaryGradient<true>(data_, grads.start, grads.end, weight);
         }
 
         /**
          * @brief Propagate gradients from coefficients/times to waypoints and boundaries.
          *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
+         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (N*kCoefficientCount) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @return Gradients Structure containing:
          *       - inner_points: gradient w.r.t. inner waypoints, size (N-1) × DIM
          *       - durations: gradient w.r.t. physical segment durations, size N
-         *       - start/end: gradients w.r.t. boundary states (position, velocity, acceleration, jerk)
+         *       - start/end: gradients w.r.t. position and supported endpoint derivatives
          */
         Gradients backward(const CoefficientMatrix &partialGradByCoeffs,
                            const Eigen::VectorXd &partialGradByTimes)
@@ -3547,7 +3563,7 @@ namespace SplineTrajectory
         /**
          * @brief Propagate gradients from coefficients/times to waypoints and boundaries (reference overload).
          *
-         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (8N) × DIM.
+         * @param partialGradByCoeffs Input partial gradient ∂L/∂C, size (N*kCoefficientCount) × DIM.
          * @param partialGradByTimes  Input partial gradient ∂L/∂T, size N.
          * @param[out] grads Overwritten physical gradients; sizes adapt to the spline and matching storage is reused.
          * @pre Input partials are finite and match the constructed spline; no input scan is performed.
@@ -3557,466 +3573,38 @@ namespace SplineTrajectory
                       const Eigen::VectorXd &partialGradByTimes,
                       Gradients &grads)
         {
-            assert(trajectory_.isValid());
+            assert(data_.trajectory_.isValid());
             detail::initializeGradients(partialGradByTimes, grads);
-            adjoint_.setZero();
-
-            // Local map, cached linear solve, then endpoint corrections.
-            pullbackCoefficients(partialGradByCoeffs, grads);
-            solveAdjoint(grads);
-            // A fully clamped segment has no free knot derivatives to correct.
-            if (num_segments_ > 1)
-                accumulateAdjoint(grads);
+            kernel_.backward(data_, partialGradByCoeffs, grads);
         }
 
     private:
-        /** @brief Write duration terms from the endpoint energy identity.
-         * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] grad Duration gradients in physical seconds; overwrite resizes the output,
-         *        accumulation requires matching initialized storage.
-         * @param weight Energy multiplier. @pre The spline is valid; arithmetic is representable. */
-        template<bool Add>
-        void computeEnergyDurationGradient(Eigen::VectorXd &grad, double weight) const
-        {
-            if constexpr (!Add)
-                grad.resize(num_segments_);
-
-            for (int i = 0; i < num_segments_; ++i)
-            {
-
-                const int offset = i * 8;
-                const RowVector c1 = trajectory_.coefficients_.row(offset + 1);
-                const RowVector c2 = trajectory_.coefficients_.row(offset + 2);
-                const RowVector c3 = trajectory_.coefficients_.row(offset + 3);
-                const RowVector c4 = trajectory_.coefficients_.row(offset + 4);
-                const RowVector c5 = trajectory_.coefficients_.row(offset + 5);
-                const RowVector c6 = trajectory_.coefficients_.row(offset + 6);
-                const RowVector c7 = trajectory_.coefficients_.row(offset + 7);
-
-                double term_snap = 576.0 * c4.squaredNorm();
-                double term_cj = 1440.0 * c3.dot(c5);
-                double term_pa = 2880.0 * c2.dot(c6);
-                double term_dv = 10080.0 * c1.dot(c7);
-
-                detail::storeGradient<Add>(grad(i), weight * (-term_snap + term_cj - term_pa + term_dv));
-            }
-        }
-
-        /** @brief Write integration-by-parts terms at the two clamped endpoints.
-         * @tparam Add Select accumulation or overwrite at compile time.
-         * @param[in,out] start Start endpoint partials in physical coordinates.
-         * @param[in,out] end End endpoint partials in physical coordinates.
-         * @param weight Energy multiplier. @pre The spline is valid; outputs are exclusive. */
-        template<bool Add>
-        void computeEnergyBoundaryGradient(BoundaryGradient &start, BoundaryGradient &end, double weight) const
-        {
-            // Evaluate the start-boundary terms at local time zero.
-            const RowVector c4_first = trajectory_.coefficients_.row(4);
-            const RowVector c5_first = trajectory_.coefficients_.row(5);
-            const RowVector c6_first = trajectory_.coefficients_.row(6);
-            const RowVector c7_first = trajectory_.coefficients_.row(7);
-
-            detail::storeGradient<Add>(start.p, weight * (10080.0 * c7_first.transpose()));
-            detail::storeGradient<Add>(start.v, weight * (-1440.0 * c6_first.transpose()));
-            detail::storeGradient<Add>(start.a, weight * (240.0 * c5_first.transpose()));
-            detail::storeGradient<Add>(start.j, weight * (-48.0 * c4_first.transpose()));
-
-            // Evaluate the end-boundary terms at the final segment's physical duration.
-            int last_idx = num_segments_ - 1;
-            double T = time_segments_[last_idx];
-            double T2 = T * T;
-            double T3 = T2 * T;
-
-            const RowVector c4_last = trajectory_.coefficients_.row(last_idx * 8 + 4);
-            const RowVector c5_last = trajectory_.coefficients_.row(last_idx * 8 + 5);
-            const RowVector c6_last = trajectory_.coefficients_.row(last_idx * 8 + 6);
-            const RowVector c7_last = trajectory_.coefficients_.row(last_idx * 8 + 7);
-
-            RowVector snap_end = 24.0 * c4_last + 120.0 * c5_last * T +
-                                     360.0 * c6_last * T2 + 840.0 * c7_last * T3;
-            RowVector crackle_end = 120.0 * c5_last + 720.0 * c6_last * T + 2520.0 * c7_last * T2;
-            RowVector pop_end = 720.0 * c6_last + 5040.0 * c7_last * T;
-            RowVector d7_end = 5040.0 * c7_last;
-
-            detail::storeGradient<Add>(end.p, weight * (-2.0 * d7_end.transpose()));
-            detail::storeGradient<Add>(end.v, weight * (2.0 * pop_end.transpose()));
-            detail::storeGradient<Add>(end.a, weight * (-2.0 * crackle_end.transpose()));
-            detail::storeGradient<Add>(end.j, weight * (2.0 * snap_end.transpose()));
-        }
-
-        // Construction: prepare caches, solve knot derivatives, publish coefficients.
         /** @brief Rebuild from physical data; failed construction clears the published polynomial.
          * @note Requires exclusive access. Storage is reused when the topology is unchanged.
          * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
         Status updateSplineInternal()
         {
-            trajectory_.is_initialized_ = false;
-            const auto times = trajectory_.prepareCoefficients(time_segments_, start_time_, kCoefficientCount);
-            if (!times) { num_segments_ = 0; return times; }
-            num_segments_ = static_cast<int>(time_segments_.size());
+            data_.trajectory_.is_initialized_ = false;
+            const auto times = data_.trajectory_.prepareCoefficients(data_.time_segments_, data_.start_time_, kCoefficientCount);
+            if (!times) { data_.num_segments_ = 0; return times; }
+            data_.num_segments_ = static_cast<int>(data_.time_segments_.size());
 
-            prepareWorkspace();
-            precomputeTimePowers();
-            if (!solveInternalDerivatives())
+            if (!kernel_.update(data_))
             {
-                trajectory_.clear();
+                data_.trajectory_.clear();
                 return {ErrorCode::NumericalFailure, "Spline factorization failed"};
             }
-            writeCoefficients();
-            trajectory_.publishCoefficients();
+            data_.trajectory_.publishCoefficients();
             return Status::success();
         }
-
-        /** @brief Reuse topology-dependent storage and refresh the clamped endpoint derivatives.
-         * @note Requires validated input. Same-topology updates skip all cache resizing;
-         *       the first adjoint reuses storage prepared during construction. */
-        void prepareWorkspace()
-        {
-            if (time_powers_.size() != time_segments_.size())
-                resizeWorkspace();
-
-            // Boundary values change independently of the segment count.
-            derivatives_.row(0) = boundary_.start_velocity.transpose();
-            derivatives_.row(num_segments_ * 3 + 0) = boundary_.end_velocity.transpose();
-            derivatives_.row(1) = boundary_.start_acceleration.transpose();
-            derivatives_.row(num_segments_ * 3 + 1) = boundary_.end_acceleration.transpose();
-            derivatives_.row(2) = boundary_.start_jerk.transpose();
-            derivatives_.row(num_segments_ * 3 + 2) = boundary_.end_jerk.transpose();
-        }
-
-        /** @brief Resize primal, adjoint and factor caches after a segment-count change.
-         * @note Duration-cache size records the prepared topology and is committed last.
-         *       Allocation order is preserved; same-topology updates skip this function. */
-        void resizeWorkspace()
-        {
-            adjoint_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
-            derivatives_.resize((num_segments_ + 1) * kDerivativesPerKnot, DIM);
-            factors_.resize(num_segments_ - 1);
-            time_powers_.resize(num_segments_);
-        }
-
-        /** @brief Cache reciprocal duration powers used by assembly, Hermite maps and adjoints. */
-        void precomputeTimePowers()
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                auto &tp = time_powers_[i];
-                tp.h = time_segments_[i];
-                tp.h_inv = 1.0 / tp.h;
-                tp.h2_inv = tp.h_inv * tp.h_inv;
-                tp.h3_inv = tp.h2_inv * tp.h_inv;
-                tp.h4_inv = tp.h3_inv * tp.h_inv;
-                tp.h5_inv = tp.h4_inv * tp.h_inv;
-                tp.h6_inv = tp.h5_inv * tp.h_inv;
-                tp.h7_inv = tp.h6_inv * tp.h_inv;
-            }
-        }
-
-        /** @brief Assemble one knot's stationarity equation for half the integrated squared derivative.
-         * @param knot Interior knot index in [1, num_segments_).
-         * @param[out] diagonal Symmetric diagonal block of the physical energy Hessian.
-         * @param[out] previous Coupling to the preceding knot.
-         * @note Writes this knot's RHS to derivatives_; fixed endpoint terms move to that RHS. */
-        void assembleKnotSystem(int knot, Block &diagonal, Block &previous)
-        {
-            const auto &left = time_powers_[knot - 1];
-            const auto &right = time_powers_[knot];
-
-            // These constants are the exact unit-interval Hermite energy Gram matrix.
-            diagonal(0, 0) = 25920.0 * left.h5_inv + 25920.0 * right.h5_inv;
-            diagonal(1, 0) = -5400.0 * left.h4_inv + 5400.0 * right.h4_inv;
-            diagonal(1, 1) = 1200.0 * left.h3_inv + 1200.0 * right.h3_inv;
-            diagonal(2, 0) = 480.0 * left.h3_inv + 480.0 * right.h3_inv;
-            diagonal(2, 1) = -120.0 * left.h2_inv + 120.0 * right.h2_inv;
-            diagonal(2, 2) = 16.0 * left.h_inv + 16.0 * right.h_inv;
-            previous(0, 0) = 24480.0 * left.h5_inv;
-            previous(0, 1) = 4680.0 * left.h4_inv;
-            previous(0, 2) = 360.0 * left.h3_inv;
-            previous(1, 0) = -4680.0 * left.h4_inv;
-            previous(1, 1) = -840.0 * left.h3_inv;
-            previous(1, 2) = -60.0 * left.h2_inv;
-            previous(2, 0) = 360.0 * left.h3_inv;
-            previous(2, 1) = 60.0 * left.h2_inv;
-            previous(2, 2) = 4.0 * left.h_inv;
-
-            const RowVector delta_left = spatial_points_.row(knot) - spatial_points_.row(knot - 1);
-            const RowVector delta_right = spatial_points_.row(knot + 1) - spatial_points_.row(knot);
-            RowVector rhs0 = 50400.0 * left.h6_inv * delta_left + 50400.0 * right.h6_inv * delta_right;
-            RowVector rhs1 = -10080.0 * left.h5_inv * delta_left + 10080.0 * right.h5_inv * delta_right;
-            RowVector rhs2 = 840.0 * left.h4_inv * delta_left + 840.0 * right.h4_inv * delta_right;
-            if (knot == 1)
-            {
-                rhs0 -= previous(0, 0) * derivatives_.row(0)
-                    + previous(0, 1) * derivatives_.row(1)
-                    + previous(0, 2) * derivatives_.row(2);
-                rhs1 -= previous(1, 0) * derivatives_.row(0)
-                    + previous(1, 1) * derivatives_.row(1)
-                    + previous(1, 2) * derivatives_.row(2);
-                rhs2 -= previous(2, 0) * derivatives_.row(0)
-                    + previous(2, 1) * derivatives_.row(1)
-                    + previous(2, 2) * derivatives_.row(2);
-            }
-            if (knot + 1 == num_segments_)
-            {
-                rhs0 -= 24480.0 * right.h5_inv * derivatives_.row(num_segments_ * 3)
-                    - 4680.0 * right.h4_inv * derivatives_.row(num_segments_ * 3 + 1)
-                    + 360.0 * right.h3_inv * derivatives_.row(num_segments_ * 3 + 2);
-                rhs1 -= 4680.0 * right.h4_inv * derivatives_.row(num_segments_ * 3)
-                    - 840.0 * right.h3_inv * derivatives_.row(num_segments_ * 3 + 1)
-                    + 60.0 * right.h2_inv * derivatives_.row(num_segments_ * 3 + 2);
-                rhs2 -= 360.0 * right.h3_inv * derivatives_.row(num_segments_ * 3)
-                    - 60.0 * right.h2_inv * derivatives_.row(num_segments_ * 3 + 1)
-                    + 4.0 * right.h_inv * derivatives_.row(num_segments_ * 3 + 2);
-            }
-            derivatives_.row(knot * 3) = rhs0;
-            derivatives_.row(knot * 3 + 1) = rhs1;
-            derivatives_.row(knot * 3 + 2) = rhs2;
-        }
-
-        /** @brief Factor and solve the block system in linear time.
-         * @return False on a nonpositive/nonfinite pivot; true after solving all free derivatives.
-         * @note Forward substitution is fused with assembly to avoid a separate RHS sweep. */
-        bool solveInternalDerivatives()
-        {
-            for (int knot = 1; knot < num_segments_; ++knot)
-            {
-                Block diagonal, previous;
-                assembleKnotSystem(knot, diagonal, previous);
-                auto &factor = factors_[knot - 1];
-                const Factor *prior = knot > 1 ? &factors_[knot - 2] : nullptr;
-                if (!factor.factorize(diagonal, previous, prior))
-                    return false;
-                factor.forward(derivatives_, knot * kDerivativesPerKnot);
-            }
-            backSubstitute(derivatives_);
-            return true;
-        }
-
-        /** @brief Finish a primal or adjoint solve using the stored diagonal/coupling factors.
-         * @param[in,out] values Knot-major forward-substituted RHS; receives the solution.
-         * @note Endpoint rows are preserved; the caller owns and exclusively supplies the matrix. */
-        void backSubstitute(CoefficientMatrix &values) const
-        {
-            detail::backSubstitute<kDerivativesPerKnot>(factors_, num_segments_, values);
-        }
-
-        /** @brief Generate physical-time coefficients from normalized endpoint residuals.
-         * @note Each row contains contiguous spatial coordinates. The four residuals
-         *       remove the left-end Taylor polynomial on the unit interval before the
-         *       coefficients are converted back to physical time. */
-        void writeCoefficients()
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const int coefficient_row = i * kCoefficientCount;
-                const int left_row = i * kDerivativesPerKnot;
-                const int right_row = left_row + kDerivativesPerKnot;
-                const RowVector position = spatial_points_.row(i);
-
-                const RowVector velocity = derivatives_.row(left_row);
-                const RowVector acceleration = derivatives_.row(left_row + 1);
-                const RowVector jerk = derivatives_.row(left_row + 2);
-                const RowVector end_velocity = derivatives_.row(right_row);
-                const RowVector end_acceleration = derivatives_.row(right_row + 1);
-                const RowVector end_jerk = derivatives_.row(right_row + 2);
-                const RowVector quadratic = 0.5 * acceleration;
-                const RowVector cubic = (1.0 / 6.0) * jerk;
-                const double duration2 = tp.h * tp.h;
-                const double duration3 = duration2 * tp.h;
-
-                // Scale endpoint residuals to the unit interval; shared powers stay outside the map.
-                const RowVector displacement = spatial_points_.row(i + 1) - position;
-                const RowVector scaled_acceleration = duration2 * acceleration;
-                const RowVector scaled_jerk = duration3 * jerk;
-                const RowVector position_residual = displacement - tp.h * velocity -
-                    0.5 * scaled_acceleration - (1.0 / 6.0) * scaled_jerk;
-                const RowVector velocity_residual = tp.h * (end_velocity - velocity) -
-                    scaled_acceleration - 0.5 * scaled_jerk;
-                const RowVector acceleration_residual = duration2 * (end_acceleration - acceleration) - scaled_jerk;
-                const RowVector jerk_residual = duration3 * (end_jerk - jerk);
-
-                // Four explicit Hermite rows determine the high coefficients in physical time.
-                const RowVector quartic = (35.0 * position_residual - 15.0 * velocity_residual +
-                    2.5 * acceleration_residual - (1.0 / 6.0) * jerk_residual) * tp.h4_inv;
-                const RowVector quintic = (-84.0 * position_residual + 39.0 * velocity_residual -
-                    7.0 * acceleration_residual + 0.5 * jerk_residual) * tp.h5_inv;
-                const RowVector sextic = (70.0 * position_residual - 34.0 * velocity_residual +
-                    6.5 * acceleration_residual - 0.5 * jerk_residual) * tp.h6_inv;
-                const RowVector septic = (-20.0 * position_residual + 10.0 * velocity_residual -
-                    2.0 * acceleration_residual + (1.0 / 6.0) * jerk_residual) * tp.h7_inv;
-
-                // Publish together, after all source rows and duration powers have been read.
-                trajectory_.coefficients_.row(coefficient_row) = position;
-                trajectory_.coefficients_.row(coefficient_row + 1) = velocity;
-                trajectory_.coefficients_.row(coefficient_row + 2) = quadratic;
-                trajectory_.coefficients_.row(coefficient_row + 3) = cubic;
-                trajectory_.coefficients_.row(coefficient_row + 4) = quartic;
-                trajectory_.coefficients_.row(coefficient_row + 5) = quintic;
-                trajectory_.coefficients_.row(coefficient_row + 6) = sextic;
-                trajectory_.coefficients_.row(coefficient_row + 7) = septic;
-            }
-        }
-
-        /** @brief Differentiate each segment's explicit Hermite map at fixed knot derivatives.
-         * @param coefficient_partials Piece-major physical coefficient partials, valid for this call.
-         * @param[in,out] gradient Receives direct point/time partials; adjoint_ receives derivative seeds.
-         * @note Homogeneity gives dC/dT without materializing derivative matrices. */
-        void pullbackCoefficients(const CoefficientMatrix &coefficient_partials, Gradients &gradient)
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const int coefficient_row = i * kCoefficientCount;
-                const int left_row = i * kDerivativesPerKnot;
-                const int right_row = left_row + kDerivativesPerKnot;
-
-                // Borrow the same contiguous endpoint rows for every segment count.
-                const auto left_velocity = derivatives_.row(left_row);
-                const auto left_acceleration = derivatives_.row(left_row + 1);
-                const auto left_jerk = derivatives_.row(left_row + 2);
-                const auto right_velocity = derivatives_.row(right_row);
-                const auto right_acceleration = derivatives_.row(right_row + 1);
-                const auto right_jerk = derivatives_.row(right_row + 2);
-
-                // Apply the same Hermite map across coordinates, sharing the time multipliers.
-                const RowVector g4 = coefficient_partials.row(coefficient_row + 4);
-                const RowVector g5 = coefficient_partials.row(coefficient_row + 5);
-                const RowVector g6 = coefficient_partials.row(coefficient_row + 6);
-                const RowVector g7 = coefficient_partials.row(coefficient_row + 7);
-                const RowVector grad_v_left = (-20.0 * tp.h3_inv) * g4
-                    + (45.0 * tp.h4_inv) * g5 - (36.0 * tp.h5_inv) * g6 + (10.0 * tp.h6_inv) * g7;
-                const RowVector grad_a_left = (-5.0 * tp.h2_inv) * g4
-                    + (10.0 * tp.h3_inv) * g5 - (7.5 * tp.h4_inv) * g6 + (2.0 * tp.h5_inv) * g7;
-                const RowVector grad_j_left = (-(2.0 / 3.0) * tp.h_inv) * g4 + tp.h2_inv * g5
-                    - ((2.0 / 3.0) * tp.h3_inv) * g6 + ((1.0 / 6.0) * tp.h4_inv) * g7;
-                const RowVector point_partial = (35.0 * tp.h4_inv) * g4
-                    - (84.0 * tp.h5_inv) * g5 + (70.0 * tp.h6_inv) * g6 - (20.0 * tp.h7_inv) * g7;
-                const RowVector grad_v_right = (-15.0 * tp.h3_inv) * g4
-                    + (39.0 * tp.h4_inv) * g5 - (34.0 * tp.h5_inv) * g6 + (10.0 * tp.h6_inv) * g7;
-                const RowVector grad_a_right = (2.5 * tp.h2_inv) * g4
-                    - (7.0 * tp.h3_inv) * g5 + (6.5 * tp.h4_inv) * g6 - (2.0 * tp.h5_inv) * g7;
-                const RowVector grad_j_right = (-(1.0 / 6.0) * tp.h_inv) * g4
-                    + (0.5 * tp.h2_inv) * g5 - (0.5 * tp.h3_inv) * g6 + ((1.0 / 6.0) * tp.h4_inv) * g7;
-
-                gradient.addWaypoint(i, coefficient_partials.row(coefficient_row) - point_partial);
-                gradient.addWaypoint(i + 1, point_partial);
-                adjoint_.row(left_row) += grad_v_left + coefficient_partials.row(coefficient_row + 1);
-                adjoint_.row(right_row) += grad_v_right;
-                adjoint_.row(left_row + 1) += grad_a_left + 0.5 * coefficient_partials.row(coefficient_row + 2);
-                adjoint_.row(right_row + 1) += grad_a_right;
-                adjoint_.row(left_row + 2) += grad_j_left + (1.0 / 6.0) * coefficient_partials.row(coefficient_row + 3);
-                adjoint_.row(right_row + 2) += grad_j_right;
-
-                // c_k scales as T^-k; endpoint derivative order r scales as T^r.
-                RowVector time_partials = -4.0 * g4.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 4))
-                    - 5.0 * g5.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 5))
-                    - 6.0 * g6.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 6))
-                    - 7.0 * g7.cwiseProduct(trajectory_.coefficients_.row(coefficient_row + 7));
-                time_partials += grad_v_left.cwiseProduct(left_velocity) + grad_v_right.cwiseProduct(right_velocity)
-                    + 2.0 * grad_a_left.cwiseProduct(left_acceleration) + 2.0 * grad_a_right.cwiseProduct(right_acceleration)
-                    + 3.0 * grad_j_left.cwiseProduct(left_jerk) + 3.0 * grad_j_right.cwiseProduct(right_jerk);
-                gradient.durations(i) += tp.h_inv * time_partials.sum();
-            }
-        }
-
-        /** @brief Preserve clamped boundary seeds and solve for free knot adjoints.
-         * @param[in,out] gradient Receives direct boundary derivative gradients.
-         * @note A is symmetric: the primal factors also solve A^T lambda = seed. */
-        void solveAdjoint(Gradients &gradient)
-        {
-            gradient.start.v = adjoint_.row(0).transpose();
-            gradient.end.v = adjoint_.row(num_segments_ * 3 + 0).transpose();
-            gradient.start.a = adjoint_.row(1).transpose();
-            gradient.end.a = adjoint_.row(num_segments_ * 3 + 1).transpose();
-            gradient.start.j = adjoint_.row(2).transpose();
-            gradient.end.j = adjoint_.row(num_segments_ * 3 + 2).transpose();
-            adjoint_.template topRows<3>().setZero();
-            adjoint_.template bottomRows<3>().setZero();
-
-            detail::solveWithFactors<kDerivativesPerKnot>(factors_, num_segments_, adjoint_);
-        }
-
-        /** @brief Add the interpolation constraint's contribution using endpoint identities.
-         * @param[in,out] gradient Physical point, time and clamped-boundary gradients.
-         * @note The adjoint polynomial has zero positions and knot derivatives from adjoint_.
-         *       Integration by parts gives point/boundary forces; the polarized Hamiltonian
-         *       gives time corrections without constructing dA/dT or differentiating the solver. */
-        void accumulateAdjoint(Gradients &gradient) const
-        {
-            for (int i = 0; i < num_segments_; ++i)
-            {
-                const auto &tp = time_powers_[i];
-                const int coefficient_row = i * kCoefficientCount;
-                const int left_row = i * kDerivativesPerKnot;
-                const int right_row = left_row + kDerivativesPerKnot;
-
-                // Map knot adjoints to a polynomial with zero endpoint positions.
-                const RowVector adjoint_v_left = adjoint_.row(left_row);
-                const RowVector adjoint_v_right = adjoint_.row(right_row);
-                const RowVector adjoint_a_left = adjoint_.row(left_row + 1);
-                const RowVector adjoint_a_right = adjoint_.row(right_row + 1);
-                const RowVector adjoint_j_left = adjoint_.row(left_row + 2);
-                const RowVector adjoint_j_right = adjoint_.row(right_row + 2);
-                const RowVector lambda_c4 = (-20.0 * tp.h3_inv) * adjoint_v_left
-                    - (15.0 * tp.h3_inv) * adjoint_v_right
-                    - (5.0 * tp.h2_inv) * adjoint_a_left + (2.5 * tp.h2_inv) * adjoint_a_right
-                    - ((2.0 / 3.0) * tp.h_inv) * adjoint_j_left - ((1.0 / 6.0) * tp.h_inv) * adjoint_j_right;
-                const RowVector lambda_c5 = (45.0 * tp.h4_inv) * adjoint_v_left
-                    + (39.0 * tp.h4_inv) * adjoint_v_right
-                    + (10.0 * tp.h3_inv) * adjoint_a_left - (7.0 * tp.h3_inv) * adjoint_a_right
-                    + tp.h2_inv * adjoint_j_left + (0.5 * tp.h2_inv) * adjoint_j_right;
-                const RowVector lambda_c6 = (-36.0 * tp.h5_inv) * adjoint_v_left
-                    - (34.0 * tp.h5_inv) * adjoint_v_right
-                    - (7.5 * tp.h4_inv) * adjoint_a_left + (6.5 * tp.h4_inv) * adjoint_a_right
-                    - ((2.0 / 3.0) * tp.h3_inv) * adjoint_j_left - (0.5 * tp.h3_inv) * adjoint_j_right;
-                const RowVector lambda_c7 = (10.0 * tp.h6_inv) * adjoint_v_left
-                    + (10.0 * tp.h6_inv) * adjoint_v_right
-                    + (2.0 * tp.h5_inv) * adjoint_a_left - (2.0 * tp.h5_inv) * adjoint_a_right
-                    + ((1.0 / 6.0) * tp.h4_inv) * adjoint_j_left + ((1.0 / 6.0) * tp.h4_inv) * adjoint_j_right;
-
-                // Endpoint forces use physical derivatives of the adjoint polynomial.
-                const RowVector adjoint_snap = 24.0 * lambda_c4;
-                const RowVector adjoint_crackle = 120.0 * lambda_c5;
-                const RowVector adjoint_pop = 720.0 * lambda_c6;
-                const RowVector adjoint_seventh = 5040.0 * lambda_c7;
-                gradient.addWaypoint(i, -adjoint_seventh);
-                gradient.addWaypoint(i + 1, adjoint_seventh);
-
-                // The polarized Hamiltonian contracts matching physical derivatives.
-                const RowVector velocity = trajectory_.coefficients_.row(coefficient_row + 1);
-                const RowVector acceleration = 2.0 * trajectory_.coefficients_.row(coefficient_row + 2);
-                const RowVector jerk = 6.0 * trajectory_.coefficients_.row(coefficient_row + 3);
-                const RowVector snap = 24.0 * trajectory_.coefficients_.row(coefficient_row + 4);
-                const RowVector crackle = 120.0 * trajectory_.coefficients_.row(coefficient_row + 5);
-                const RowVector pop = 720.0 * trajectory_.coefficients_.row(coefficient_row + 6);
-                const RowVector seventh = 5040.0 * trajectory_.coefficients_.row(coefficient_row + 7);
-                const RowVector time_partials = snap.cwiseProduct(adjoint_snap)
-                    - adjoint_v_left.cwiseProduct(seventh) - velocity.cwiseProduct(adjoint_seventh)
-                    + adjoint_a_left.cwiseProduct(pop) + acceleration.cwiseProduct(adjoint_pop)
-                    - adjoint_j_left.cwiseProduct(crackle) - jerk.cwiseProduct(adjoint_crackle);
-                gradient.durations(i) += time_partials.sum();
-
-                // Only clamped endpoints contribute boundary derivative corrections.
-                if (i == 0)
-                {
-                    gradient.start.v += adjoint_pop.transpose();
-                    gradient.start.a -= adjoint_crackle.transpose();
-                    gradient.start.j += adjoint_snap.transpose();
-                }
-                if (i + 1 == num_segments_)
-                {
-                    const RowVector end_v = tp.h * adjoint_seventh + adjoint_pop;
-                    const RowVector end_a = ((2520.0 * tp.h) * lambda_c7 + adjoint_pop) * tp.h + adjoint_crackle;
-                    const RowVector end_j = (((840.0 * tp.h) * lambda_c7 + 360.0 * lambda_c6) * tp.h
-                        + adjoint_crackle) * tp.h + adjoint_snap;
-                    gradient.end.v -= end_v.transpose();
-                    gradient.end.a += end_a.transpose();
-                    gradient.end.j -= end_j.transpose();
-                }
-            }
-        }
     };
+
+    /** @brief Minimum-acceleration spline using the specialized cubic kernel. */
+    template<int DIM> using CubicSplineND = SplineND<DIM, 3>;
+    /** @brief Minimum-jerk spline using the specialized quintic kernel. */
+    template<int DIM> using QuinticSplineND = SplineND<DIM, 5>;
+    /** @brief Minimum-snap spline using the specialized septic kernel. */
+    template<int DIM> using SepticSplineND = SplineND<DIM, 7>;
 
     // Public dimension aliases.
 
