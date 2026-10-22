@@ -1,8 +1,7 @@
 # API migration
 
-This guide covers the current public API, including the October 2026 consolidation. Older
-names in the left column are migration references, not supported compatibility aliases.
-The cubic/quintic/septic implementations, numerical formulas and partial energy computations remain.
+Replace previous API names with the forms below. Cubic, quintic and septic splines retain
+their numerical formulas and separate energy-gradient methods.
 
 ## Physical input, gradients and outputs
 
@@ -29,8 +28,8 @@ The cubic/quintic/septic implementations, numerical formulas and partial energy 
 `setZero(N)` prepares an accumulator; `setZero()` clears existing sizes; `size()` returns N.
 
 `energyDurationPartials()` holds local coefficients fixed. `energyDurationGradient()` is the
-total derivative through interpolation. Keep separate coefficient/time partials for a general
-`spline.backward(gC, gT)`; no bundled input wrapper is required.
+total derivative through interpolation. Pass coefficient and duration partials separately to
+`spline.backward(gC, gT)`.
 
 ## Optimizer, objective and maps
 
@@ -57,14 +56,12 @@ total derivative through interpolation. Keep separate coefficient/time partials 
 | Optimizer `dimension()` | `decisionDimension()` |
 | `costAndGradient()` / `lastStatus()` | `evaluate()` returns EvaluationResult directly; inspect its status |
 
-Default masks optimize durations and interior waypoints. Input waypoints are initial guesses for
-active coordinates; they are not all fixed interpolation constraints throughout optimization.
-Use explicit masks to fix them. Ordinary spline construction still interpolates every input point.
+Default masks optimize durations and interior waypoints. Active input values supply the initial
+guess; use explicit masks to fix them. Direct spline construction interpolates every input point.
 
 Five custom stages remain: integral, sample, coefficient, parameter and decision. Gradients are
 additive. Integral costs return unweighted integrands; sample costs return the whole batch cost.
-Sample records still duplicate interior knots per adjacent segment. Do not silently deduplicate
-them while retaining a differently indexed gradient matrix.
+Sample records include interior knots once per adjacent segment; gradient rows follow that order.
 
 Maps may be owned or borrowed with explicit `std::ref/std::cref`. Total time/spatial operations
 return values/void; fallible ones may return StatusOr/Status. Auxiliary apply/backward return
@@ -94,10 +91,9 @@ function. Mutable working-spline access is replaced by read-only `polynomial()` 
 | `extractInterval()` resets origin | Preserves source time axis; call `rebased(0.0)` explicitly to shift |
 | `appendRebased()` requires zero-origin inputs | Accepts arbitrary origins; shifts suffix to receiver's end |
 
-Borrowing from temporary owners is deleted. Updates, assignment, moves and destruction invalidate
-borrowed segments/samplers/views. A polynomial snapshot is independent. The recommended delivery
-flow is final solver x → successful update(x) → task constraint acceptance → copyPolynomial() →
-control-thread sampling. The final callback trial is not necessarily the accepted solver result.
+Keep the source alive and unchanged while using borrowed segments, samplers and views.
+For delivery, rebuild the solver's final vector with `update(x)`, validate the trajectory and
+save an independent copy with `copyPolynomial()` for control-thread sampling.
 
 ## Convex hulls and allocation
 
@@ -109,7 +105,7 @@ control-thread sampling. The final callback trial is not necessarily the accepte
 | `kernel()` / public conversion-cache type | Internal detail; use controls, piece views, metadata and adjoints |
 | Repeated manual piece offsets | `hull.piece(i).info()` / `.controls()`; older named accessors remain |
 | `backwardInto(gControls, gC, gT)` | `backward(gControls, gC, gT)`; owning outputs resize/reuse |
-| Repeated on-demand configuration in a cost | Prepare hull and gradients before the solver; call strict update(poly) in the loop |
+| Repeated on-demand configuration in a cost | Prepare hull and gradients before the solver; call update(poly) in the loop |
 
 `update(poly, options)` is a convenience form that prepares only on a mismatch. The one-argument
 `update(poly)` requires matching prepared topology and does no allocation or cache lookup.
@@ -117,8 +113,5 @@ control-thread sampling. The final callback trial is not necessarily the accepte
 `backward` returns or overwrites independent coefficient/duration partials; `backwardAdd` adds
 to matching outputs or a coefficient gradient view. The cache remains shared internally.
 
-Failed decode or numerical construction invalidates the current candidate while preserving
-workspace for retry. Fixed-topology library evaluation/recovery with matching output buffers
-does not allocate. User cost buffers remain the caller's preparation responsibility. Status and
-EvaluationResult report expected failures; unexpected exceptions and allocation failure propagate.
-Low-level numerical APIs retain caller-validated input and representable-arithmetic preconditions.
+Failed candidate construction retains workspace for retry. Prepare custom cost buffers before
+solving to reuse them as well. See [optimizer status handling](optimizer.md#solver-callbacks-and-status).

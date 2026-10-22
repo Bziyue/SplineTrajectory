@@ -260,7 +260,8 @@ SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterV
 [凸包优化示例](../examples/convex_hull_optimizer.cpp) 使用 GCOPTER L-BFGS，组合分段凸走廊、
 Bezier 速度与加速度控制点边界、minimum-jerk 能量和总时长。运行方法见[示例目录](../examples/README.md)。
 
-同一 piece 的全部控制点满足凸集约束时，整段曲线满足该约束；ESDF 自由空间通常非凸，不能直接套用此结论。
+同一 piece 的全部控制点满足凸集约束时，整段曲线满足该约束。
+非凸 ESDF 自由空间采用轨迹碰撞检测来验证完整路径。
 
 [Bezier 细分图](images/bezier_subdivision_depths.png)与[MINVO 细分图](images/minvo_subdivision_depths.png)
 展示不同细分深度下的凸包收缩。

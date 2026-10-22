@@ -2,17 +2,17 @@
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel 3
+cmake --build build --parallel
 (cd build && ctest --output-on-failure)
 ```
 
 | Directory / CTest label | Coverage |
 | --- | --- |
-| `trajectory/` / `trajectory` | Polynomials, sampling and lifetime contracts |
+| `trajectory/` / `trajectory` | Polynomials, sampling and object lifetimes |
 | `gradients/` / `gradients` | Energy, waypoint, duration and boundary derivatives |
 | `optimizer/` / `optimizer` | Objective composition, maps, workspace and numerical failures |
 | `convex_hull/` / `convex_hull` | Bezier/MINVO values, subdivision and adjoints |
-| `compile/` / `compile` | Public headers, callback contracts and both English/Chinese README programs |
+| `compile/` / `compile` | Public headers, callback signatures and both English/Chinese README programs |
 | `support/` | Shared checks and allocation counters |
 | `../examples/` / `examples` | Runnable examples and objective gradients |
 

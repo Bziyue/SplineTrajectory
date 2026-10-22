@@ -4,14 +4,14 @@ Compare each project's original MINCO, L-BFGS and penalty methods with direct Sp
 SplineOptimizer on 72 file-backed corridor and ESDF problems. The programs compile as C++17
 and do not require ROS or downstream checkouts.
 
-| Group | Frozen revision | Spline |
+| Project | Backend | Spline |
 | --- | --- | --- |
-| GCOPTER `MINCO_S3NU` | `e0444f6d47b84f972ced91746b05feb36ce1fd4f` | Quintic minimum jerk |
-| SUPER `traj_opt::MINCO_S4NU` | `2ad3419c127a617c6d7df6925e81a14175a9c096` | Septic minimum snap |
+| GCOPTER | `MINCO_S3NU` | Quintic minimum jerk |
+| SUPER | `traj_opt::MINCO_S4NU` | Septic minimum snap |
 
 Within each group, all three backends use the same decision variables, boundaries, initial
-vector, weights, quadrature and original L-BFGS parameters. The two groups have different
-objectives and should not be compared as identical problems.
+vector, weights, quadrature and original L-BFGS parameters. Each group measures its project's
+objective independently.
 
 ## Run
 
@@ -36,7 +36,7 @@ python3 benchmarks/planners/run_benchmarks.py --mode run --build build \
 
 The CMake targets are `benchmark_gcopter_planner` and `benchmark_super_planner`.
 They are enabled by `SPLINE_BUILD_BENCHMARKS=ON`. [Measured results](../../docs/benchmarks.md) and
-[numerical notes](../../docs/numerical_notes.md) describe the comparison's limits.
+[numerical notes](../../docs/numerical_notes.md) provide results and the short-segment stress case.
 
 ## Input files and objective
 
@@ -76,14 +76,13 @@ This ESDF cost is an adaptation of the original method. Geometry preprocessing i
 Regular checks use the initial vector and two deterministic perturbations; both perturbations
 receive full-coordinate central differences. The initial row's zero FD error denotes a skipped
 FD calculation. Debug builds additionally guard structured evaluations against Eigen allocations.
-Timing excludes preparation and post-solve diagnostics. P50/P95 describe batch means, not
-individual-call latency tails; the first-call metric is for a new object in an already running process.
+P50/P95 summarize batch means. Preparation, first evaluation and steady evaluation are recorded
+separately from post-solve diagnostics.
 
 The summary uses paired case medians and excludes negative solver codes from solve ratios.
 Cost agreement uses relative error `1e-4`; trajectory agreement uses relative duration `2e-3`
-and sampled position difference `0.02 m`. Solver stopping is not proof of gradient equivalence.
-The saved short-segment `.candidate` is a separate diagnostic; its [replay command](../../docs/numerical_notes.md)
-can fail strict numerical checks.
+and sampled position difference `0.02 m`. The saved short-segment `.candidate` reproduces a
+known gradient disagreement; see its [replay command](../../docs/numerical_notes.md).
 
 ## Source provenance
 

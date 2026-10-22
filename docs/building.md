@@ -7,7 +7,7 @@ The library has no ROS dependency.
 git clone https://github.com/Bziyue/SplineTrajectory.git
 cd SplineTrajectory
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel 3
+cmake --build build --parallel
 (cd build && ctest --output-on-failure)
 ```
 
@@ -32,10 +32,8 @@ add_subdirectory(external/SplineTrajectory EXCLUDE_FROM_ALL)
 target_link_libraries(your_target PRIVATE SplineTrajectory::SplineTrajectory)
 ```
 
-Disable the repository's test/example/benchmark options when they are not needed.
-The interface target supplies the headers, Eigen dependency and C++17 requirement;
-repository warning flags are not propagated to consumers.
+The interface target supplies the headers, Eigen dependency and C++17 requirement.
+Test, example and benchmark options control the repository's own executables.
 
-The examples reuse the bundled MIT-licensed GCOPTER L-BFGS header. The library itself does not
-require L-BFGS. Preserve IEEE NaN/Inf semantics when compiling numerical code; fast-math options
-are incompatible with the library's finite-value failure checks.
+The examples use the bundled GCOPTER L-BFGS solver; library users can choose their own solver.
+Compile with IEEE NaN/Inf semantics (`-fno-fast-math`) to support finite-value checks.

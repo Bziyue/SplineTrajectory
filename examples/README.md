@@ -4,7 +4,7 @@ Build from the repository root:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target examples --parallel 3
+cmake --build build --target examples --parallel
 ./build/examples/basic_optimizer
 ./build/examples/corridor_optimizer
 ./build/examples/esdf_optimizer
@@ -22,9 +22,8 @@ cmake --build build --target examples --parallel 3
 | [convex_hull_optimizer.cpp](convex_hull_optimizer.cpp) | Bezier control-point bounds with coefficient and time adjoints |
 | [parameterized_optimizer.cpp](parameterized_optimizer.cpp) | Custom coordinate maps, auxiliary variables and an objective gradient check |
 
-The optimization examples use two-dimensional quintic splines for compact geometry; the library
-supports other dimensions and spline families. Penalties are soft. Sampled ESDF/corridor checks
-are observations, while control points in a convex set can bound an entire polynomial piece.
+The optimization examples use two-dimensional quintic splines and soft penalties.
+The library also supports other dimensions and spline families.
 
 ## Add your own objective
 
@@ -34,10 +33,9 @@ costs, `integral` for pointwise state costs, and `coefficient` for polynomial or
 Both built-in weights default to zero; set `energy_weight` explicitly for smoothness. Each callback adds its partials to
 the supplied gradient; SplineOptimizer handles the interpolation and decision-variable chain.
 
-The shared [L-BFGS driver](support/OptimizationExample.hpp) shows the complete solver boundary:
-prepare the optimizer, obtain `initialGuess()`, call `evaluate()` and inspect its status in the GCOPTER callback,
-check the solver status and synchronize the returned vector with `update()`. Validate task constraints before saving `copyPolynomial()` and sampling the
-independent snapshot. The last trial is not necessarily the solver's final accepted vector.
+The shared [L-BFGS driver](support/OptimizationExample.hpp) prepares the optimizer, obtains
+`initialGuess()`, evaluates costs in the solver callback and rebuilds the returned vector with
+`update()`. Validate the trajectory, then save it with `copyPolynomial()` for sampling.
 Cost functions remain in the individual examples; [Penalties.hpp](support/Penalties.hpp) contains
 the shared box and derivative penalties.
 
@@ -51,5 +49,4 @@ before solving. Full callback signatures are in the [optimizer reference](../doc
 `SplineInput` waypoints are interpolation constraints for direct spline construction. In optimization,
 default masks allow durations and interior waypoints to change. Prepare user-owned cost buffers
 before solving: the convex-hull example explicitly prepares hulls and control gradients, then
-uses fixed-topology `update(poly)` in each cost call. Optimizer preparation does not initialize
-user costs.
+uses fixed-topology `update(poly)` in each cost call.

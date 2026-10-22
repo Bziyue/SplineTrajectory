@@ -23,24 +23,21 @@ control_partials.setZero();
 hull.backward(control_partials, coefficient_partials, duration_partials);
 ```
 
-`prepare(poly, options)` or `prepare(segments, coefficient_count, options)` allocates workspace
-and acquires shared immutable conversion data. It sets `isPrepared()`, but controls are invalid
-until update. The one-argument `update(poly)` requires matching prepared topology, returns void,
-and reuses storage without allocation or cache locking. Do this preparation for **each user-owned
-cost workspace** before solving; `optimizer.prepare()` only prepares the library's own buffers.
-The [convex-hull optimizer example](../examples/convex_hull_optimizer.cpp) shows that boundary.
+`prepare(poly, options)` or `prepare(segments, coefficient_count, options)` allocates the workspace
+and shares immutable conversion data. `update(poly)` computes controls for the prepared topology
+and reuses storage. Prepare each cost's workspace before solving, as shown in the
+[convex-hull optimizer example](../examples/convex_hull_optimizer.cpp).
 
 For occasional calls, `update(poly, options)` prepares when `matches(poly, options)` is false.
 It may allocate on first use or topology/options change. Matching repetitions reuse storage.
 `toBezier(poly, derivative, depth)`, `toMINVO(...)` and
 `ConvexHullWorkspace<D>::fromPPoly(poly, options)` return owning, already updated workspaces.
-They do not retain a source reference. Repeated factories allocate; reuse a workspace in a solver.
+Reuse a workspace for repeated evaluations.
 
 `HullOptions` contains `{basis, derivative_order, subdivision_depth}`, defaulting to Bezier,
 position and depth zero. Orders accept `Deriv` or integers via `DerivativeOrder`. Order must be
-between zero and the source degree; depth is in [0,16]. Callers own feasible memory/index limits.
-There is no memory-budget API or public kernel pointer. Cached conversion data remain shared;
-each concurrent evaluation needs its own mutable workspace.
+between zero and the source degree; depth is in [0,16]. Each additional depth doubles the
+number of pieces and their storage. Use a separate workspace for each concurrent evaluation.
 
 ## Piece views and gradients
 
@@ -54,8 +51,8 @@ const int corridor = piece.info().source_segment;
 // controls.row(local) is one control point; info also provides physical start_time/duration.
 ```
 
-`pieceInfo(i)`, `pieceControls(i)`, `pieces()` and `controls()` remain available. Update/prepare,
-movement and destruction invalidate borrowed numeric views. Inspect controls only after update.
+`pieceInfo(i)`, `pieceControls(i)`, `pieces()` and `controls()` provide direct access.
+Piece views refer to the last update and remain valid until the workspace changes or is destroyed.
 
 | Form | Behavior |
 | --- | --- |
@@ -65,19 +62,16 @@ movement and destruction invalidate borrowed numeric views. Inspect controls onl
 | `backwardAdd(control_partials, coefficient_partials, duration_partials)` | Adds to matching preallocated outputs; no resizing or clearing |
 | `backwardAdd(control_partials, gradient_view)` | Adds directly to a coefficient-stage gradient view |
 
-Keep **both** coefficient and independent duration partials. `spline.backward(gC, gT)` then maps
-that pair through interpolation to waypoint, boundary and duration gradients. The explicit
-composition avoids a second representation of the same gradients.
+`spline.backward(gC, gT)` maps both coefficient and independent duration partials through
+interpolation to waypoint, boundary and duration gradients.
 
 For costs that depend directly on piece start times/durations, `backwardPieceTimesAdd()` adds
 those separate partials to source duration/start-time gradients. It also accepts a coefficient
 gradient view. This is additional to the control conversion's duration partials.
 
-All adjoints require updated controls, finite matching inputs and nonaliasing outputs. Add never
-allocates or resizes; owning overwrite may resize. Shapes and output arithmetic are not rescanned.
-Allocation failures propagate. Prepare and numerical updates require exclusive workspace access.
+Use finite control partials matching `controls()`, with separate output buffers.
 
-## Optimizer integration and feasibility
+## Optimizer integration
 
 A user-defined objective holds a callable `coefficient` member. Its `operator()` receives
 `ParameterView<Spline>` and `CoefficientGradientView<Spline>`. Prepare its hulls and gradients
@@ -86,9 +80,8 @@ and `hull.backwardAdd(control_partials, gradient)` in the callback.
 
 A curve piece lies in the convex hull of its controls. If every position control lies inside one
 convex corridor, the entire piece lies there. Velocity/acceleration controls give conservative
-bounds on those derivatives. Subdivision tightens the bounds. Soft penalties still require a
-separate feasibility check after rebuilding the solver's final candidate. ESDF free space is
-usually nonconvex: positive control-point distances alone do not prove collision freedom.
+bounds on those derivatives. Subdivision tightens the bounds. Apply these bounds to convex
+constraints; use trajectory collision checks for nonconvex ESDF free space.
 
 ## Basis conversion
 

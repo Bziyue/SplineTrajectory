@@ -2,7 +2,7 @@
 
 `CubicSplineND<DIM>`, `QuinticSplineND<DIM>` and `SepticSplineND<DIM>` interpolate waypoints and
 minimize squared acceleration, jerk and snap, respectively. They share the `SplineND<DIM, DEGREE>`
-public facade and retain three independent numerical implementations.
+interface.
 
 ## Physical input and construction
 
@@ -24,14 +24,13 @@ if (const auto status = spline.update(input); !status) return status;
 
 `BoundaryConditions<DIM>` has `start` and `end`, each with `v/a/j`. Positions belong only to
 `waypoints`. Derivatives default to zero: cubic uses velocity, quintic adds acceleration, septic
-adds jerk. Unsupported higher derivatives do not participate.
+adds jerk.
 
 `update(durations, waypoints, start_time, boundary)` accepts the same data separately.
 `updateFromBreakpoints(knots, waypoints, boundary)` accepts N+1 strictly increasing times.
-These times and `start_time` are on the caller's trajectory time axis, not necessarily an absolute
-clock. All forms initialize an empty spline or update an existing one, reusing fixed-topology storage.
-Check the returned `Status` before queries. Failed construction invalidates the polynomial while
-retaining private storage for retry; `coefficients()` exposes an empty matrix while invalid.
+These times and `start_time` use the caller's trajectory time axis. All forms return `Status`
+and reuse storage when the segment count stays the same. Query the spline after a successful
+update. Failed construction clears the visible polynomial and retains storage for retry.
 
 Every waypoint is an interpolation constraint here. In an optimizer, mask-selected input values
 are initial guesses that may change; see [physical input and optimization choices](optimizer.md).
@@ -59,7 +58,7 @@ for (double time : times.value()) {
 move or destruction invalidates borrowed segments, iterators and samplers. A sampler owns its
 cursor and cached derivative coefficients but borrows the source. Keep the source alive and
 unchanged, and use a separate sampler for each traversal. Sequential queries reuse current-segment
-coefficients; backward jumps work too. No warm-up of the source is needed.
+coefficients; backward jumps work too.
 
 Queries use trajectory time. `poly[i].evaluateLocal(t)` uses seconds from segment i's start.
 Interior knots select the right segment; the final knot selects the last. Outside queries
@@ -68,16 +67,15 @@ extrapolate the endpoint polynomial. Derivatives above the polynomial degree are
 
 ## Outputs and allocation
 
-| Form | Contract |
+| Form | Behavior |
 | --- | --- |
 | `auto result = function(...)` | Returns owning data; dynamic results may allocate |
 | `function(..., owning_output)` | Overwrites, resizes as needed and reuses matching storage |
 | `function(..., Eigen::Ref/output_block)` where supported | Overwrites a matching preallocated view; no resizing |
 | `functionAdd(..., output)` | Accumulates into matching storage; no clearing or resizing |
 
-There is no separate `Into` family. Not every operation needs every form. Batch point matrices
-have one sample per row. `evaluateDerivatives<R>(times, output)` uses an array of R+1 matrices,
-indexed by derivative order. Output buffers must not alias the source or inputs.
+Batch point matrices have one sample per row. `evaluateDerivatives<R>(times, output)` uses an
+array of R+1 matrices, indexed by derivative order. Use output buffers separate from the inputs.
 
 ## Energy and adjoints
 
@@ -106,9 +104,6 @@ use `output.setZero(spline.numSegments())`, then `energyGradientAdd(output, weig
 `output.setZero()` clears without changing shapes; `size()` reports segment count.
 `addWaypoint(i, partial)` accepts a row or column vector/expression and adds to row i, from 0 to N.
 
-Energy and adjoint functions require a valid spline and finite, correctly shaped inputs. They
-return values or write outputs directly, without rescanning results for overflow.
-
 ## Polynomial storage and time operations
 
 `PPolyND<DIM, MaxCoefficients>` stores coefficients by segment, in ascending powers of local
@@ -116,11 +111,11 @@ physical time. Capacity is a coefficient count, not degree. Spline traits are `k
 `kDegree`, `kCoefficientCount` and `kMinDerivativeOrder`.
 
 `PPolyND::create`, `zero` and `constant` return owning polynomials; `update` returns `void`.
-Callers guarantee valid shapes, finite values, legal indices/orders, increasing knots and
-representable arithmetic. `operator[]` returns a borrowed segment with a caller-validated index.
+Use finite coefficients, strictly increasing knots and matching dimensions. `operator[](i)`
+returns a borrowed segment for an index in `[0, numSegments())`.
 
 `extractInterval(begin, end)` preserves the source time axis. `rebased(new_start)` explicitly
 shifts it without changing local coefficients. `appendRebased(other)` shifts an arbitrary-origin
-suffix to the receiver's end without enforcing continuity. Transforms
-that can fail retain `StatusOr<T>` or `Status`; check them before using results.
+suffix to the receiver's end, retaining its boundary values. Transforms return `StatusOr<T>`
+or `Status` when they can fail.
 See [numerical notes](numerical_notes.md) for conditioning.

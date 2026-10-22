@@ -1,8 +1,8 @@
-# SplineOptimizer protocols
+# SplineOptimizer
 
 `SplineOptimizer<Spline>` connects physical trajectory data to an external numerical solver.
-Objectives and maps are ordinary user-defined C++17 types. No inheritance or type-erased callback
-is required. Start with built-in smoothness and duration weights; add only the cost stages needed.
+Objectives and maps are ordinary user-defined C++17 types. Start with built-in smoothness and
+duration weights, then add cost components as needed.
 
 ## Physical input and optimization choices
 
@@ -38,9 +38,8 @@ To optimize durations with every waypoint fixed, use `options.mask.waypoints.ass
 | `record_samples` | `false` | Keep current sample records even without a sample cost |
 | `mask` | Empty masks | Optimize durations and interior waypoints |
 
-Both weights must be finite. `NoObjective` means **no custom costs**, not energy minimization by
-itself. Built-in costs and custom costs add together. A duration weight is a soft linear cost,
-not a bound or a prescribed total duration.
+Built-in and custom costs add together. `NoObjective` selects built-in costs only.
+`duration_weight` adds a linear cost on total duration; use a `parameter` cost for a target duration.
 
 ## Prepare, solve and deliver
 
@@ -64,12 +63,10 @@ without retaining it. Supply `NoObjective{}` explicitly when no custom stages ar
 A sample stage requires preparation with a sample-capable objective; otherwise evaluation returns
 `SamplingNotPrepared`. Options, map dimensions and sample capability remain fixed until reprepare.
 
-Preparation copies the input, builds an initial candidate, encodes the initial decision vector
-once, and sizes **library-owned** buffers. `initialGuess()` returns an owning copy and requires
-successful preparation. It is unchanged by rejected trials. Prepare user-owned cost resources
-separately before the solver loop; see [convex hulls](convex_hull.md). There are no automatic
-cost initialization hooks. An empty output gradient may allocate on first evaluation; pre-size
-it before entering a loop that must be allocation-free.
+Preparation copies the input, builds the initial candidate, encodes the decision vector and
+sizes reusable buffers. After successful preparation, `initialGuess()` returns an owning copy
+of the initial vector. Prepare cost resources and size the output gradient before the solver
+loop to reuse their storage; see [convex hulls](convex_hull.md).
 
 The external solver repeatedly calls `evaluate(x, gradient, objective)`. After it returns:
 
@@ -78,9 +75,8 @@ The external solver repeatedly calls `evaluate(x, gradient, objective)`. After i
 3. Save `auto trajectory = optimizer.copyPolynomial()`.
 4. Keep that independent snapshot alive and unchanged while the control thread uses its sampler.
 
-`evaluate()` builds trial candidates, including trials the solver may reject. `polynomial()`
-borrows the **last built candidate**, not an automatically accepted result. `update()` rebuilds
-without evaluating costs. Neither solver convergence nor a soft penalty establishes feasibility.
+`evaluate()` builds the current trial candidate. `polynomial()` borrows that candidate.
+`update(x_final)` builds the solver's chosen trajectory without evaluating costs.
 
 `problem()`, `layout()` and `activeMask()` borrow the prepared snapshot. `parameters()` borrows
 current physical values; after a failed decode these may be partially updated. Preserve x when
@@ -103,9 +99,8 @@ Use one optimizer and mutable cost workspace per simultaneous solve.
 | Coupled costs across multiple sampled positions | `sample` |
 | Special regularization in decision coordinates | `decision` |
 
-An objective is a user-defined holder of **callable data members**. Each cost implements
-`operator()`; the member name selects its stage. The cost type's name is arbitrary.
-Direct methods such as `Objective::integral(...)` are not supported. Example:
+An objective holds **callable data members**. Each cost implements `operator()`; the member
+name selects its stage. Choose any name for the cost type. For example:
 
 ```cpp
 struct TargetDurationCost {
@@ -132,7 +127,7 @@ An invalid stage signature is a compile-time error. Extra application fields are
 
 Below, S is the spline, D its dimension, and Opt the optimizer type. Every cost returns a
 `double` for unconditional success or `EvaluationResult{cost, status}` when rejection is possible.
-The cost is added once. **Gradients accumulate**: use `+=`, do not resize or clear prior contributions.
+The cost is added once. **Gradients accumulate**: use `+=` with the provided gradient view.
 Multiple terms in one stage can be composed by calling them inside one functor.
 
 | Member | `operator()` arguments | Gradient meaning |
@@ -151,9 +146,8 @@ starts at zero. Return the integrand without quadrature weights; the optimizer h
 weights, interval lengths, state drift and dependencies on preceding durations.
 
 The integral functor may declare `static constexpr int kDerivativeOrder` in [0, 4], default 4.
-Position is 0, velocity 1, acceleration 2, jerk 3 and snap 4. Write no gradients above the declared
-order. The optimizer computes one further derivative for time drift. There is no
-`beginEvaluation()` hook or separate configuration on Objective.
+Position is 0, velocity 1, acceleration 2, jerk 3 and snap 4. Set the order to the highest
+derivative used by the cost. The optimizer computes one further derivative for time drift.
 
 `IntegralPointInfo` provides `segment_index/count`, `step_index/count`, `alpha`, `segment_duration`,
 `step_size`, `segment_time` (seconds from the segment start), and `trajectory_time` (on the caller's
@@ -164,13 +158,13 @@ axis). Endpoint helpers are `isSegmentStart/End()` and `isTrajectoryStart/End()`
 
 The sample stage sees N × (integration_steps + 1) records in segment order. Each record contains
 `point`, `trap_weight`, `b_p`, `p` and `v`. Interior knots appear **twice**, once per adjacent segment;
-both records have the same waypoint index. This is the per-segment quadrature layout, not a unique
-list of waypoint times. A discrete cost can skip `point.isSegmentStart() && !point.isTrajectoryStart()`
+both records have the same waypoint index. A discrete cost can skip
+`point.isSegmentStart() && !point.isTrajectoryStart()`
 when it wants one record per shared knot, leaving skipped gradient rows zero.
 
 `SampleGradientView` has `positions` (sample_count × DIM, row-major except DIM=1) and
-`trajectory_times` (sample_count). It provides no velocity-gradient field. Return the complete
-batch cost; the optimizer applies **no quadrature weighting** to it. It propagates position drift
+`trajectory_times` (sample_count). Return the complete batch cost, including any desired sample
+weights. The optimizer propagates position drift
 through velocity and explicit sample-time partials through segment durations and start time.
 Recording alone adds no cost or physical adjoint.
 
@@ -182,8 +176,8 @@ coefficients held fixed) and `start_time`. Coefficient, integral and sample part
 one spline adjoint. The analytic energy gradient is added directly to physical gradients.
 
 `ParameterGradientView` borrows the owning `Spline::Gradients` fields with the same access paths
-as the state: `waypoints`, `durations`, `boundary.start/end.v/a/j`, plus `start_time`. There is no
-second gradient store or nested `.spline`. `addWaypoint(i, partial)` adds a row/column expression
+as the state: `waypoints`, `durations`, `boundary.start/end.v/a/j`, plus `start_time`.
+`addWaypoint(i, partial)` adds a row/column expression
 to waypoint i, including endpoint positions. Boundary gradients contain derivatives only.
 `start_time` is an explicit physical partial; auxiliary maps propagate it when they move the origin.
 
@@ -226,7 +220,7 @@ void backward(const Eigen::Ref<const Eigen::VectorXd>& x, const Vector& grad_poi
 Indices run from 0 to N; each mapped dimension is positive. `inverse()` may return a fixed-size
 vector and may allocate during preparation. `backward()` overwrites its pre-sized decision slice.
 Fallible value operations may return `StatusOr<VectorType>`; backward may return `Status`.
-Successful maps guarantee finite, correctly shaped physical outputs.
+Map outputs use finite values and the declared dimensions.
 
 Auxiliary map:
 
@@ -242,7 +236,7 @@ Status backward(const Eigen::Ref<const Eigen::VectorXd>& z, const ParameterView<
 transform waypoints, durations, derivatives and start time, but must preserve topology and valid
 physical inputs. Each candidate first restores reference inputs when an auxiliary map is present.
 `backward()` adds to initially zero `grad_z` and transforms physical gradients back to pre-auxiliary
-coordinates. It returns **Status only**, not a cost. Put a switching-progress or other physical
+coordinates and returns `Status`. Put a switching-progress or other physical
 cost in `parameter`, or a coordinate cost in `decision`. Normal map pullbacks run afterwards.
 See the [parameterized example](../examples/parameterized_optimizer.cpp) for the full coupled chain.
 
@@ -250,31 +244,28 @@ Decision order is active durations, active waypoints, start derivatives, end der
 auxiliary coordinates. `layout().durations/waypoints` hold source indices and offsets; waypoints
 also carry mapped `dof`. `boundary_offset`, `auxiliary_offset` and `dimension` locate other blocks.
 
-## Solver boundary, failure and allocation
+## Solver callbacks and status
 
-The library does not run an external solver. A capturing lambda or C callback invokes
-`evaluate(x, gradient, objective)`, handles/records `result.status`, and returns `result.cost`.
+Connect a numerical solver with a lambda or C callback that invokes
+`evaluate(x, gradient, objective)`, handles `result.status`, and returns `result.cost`.
 The decision vector must match the prepared dimension. Owning gradient outputs resize as needed.
-`Status` has an ErrorCode, static message and optional index; it does not allocate strings.
+`Status` contains an error code, static message and optional index.
 
-Failed evaluation returns infinity and zeros the gradient. Decode/construction failure invalidates
-the candidate but **retains storage for fixed-topology retry**; preparation and the initial guess
-remain valid. A later successful evaluation overwrites the candidate. Failed preparation leaves
-an unprepared optimizer. A rejected cost can leave a numerically valid polynomial: numerical
-validity is separate from objective success and planning acceptance. Do not consume failure outputs.
+Failed evaluation returns infinity and a zero gradient. Decode or construction failure clears
+the candidate while retaining prepared storage and the initial guess for retry. A cost rejection
+can leave a valid polynomial; use the evaluation status to decide whether to accept its cost.
+Failed preparation leaves the optimizer unprepared.
 
-Prepared fixed-topology library evaluation, including rejection and retry, reuses buffers when
-the gradient already matches. User maps/costs own their allocations and exceptions. Unexpected
-exceptions and allocation failures are not converted into ordinary status. The library checks
-reference input on prepare, decisions on evaluation, decoded durations on construction, and final
-cost/gradients after accumulation; it does not repeatedly scan intermediate matrices.
+Fixed-topology evaluation and retries reuse prepared buffers when the output gradient matches.
+Prepare custom map and cost buffers before solving for the same behavior. Input and final-result
+validation returns `Status`; allocation failures and callback exceptions propagate as exceptions.
 
 `evaluate(x, g, objective, OpenMPExecutor{})` parallelizes segment integration when compiled with
-OpenMP, otherwise runs serially. Integral costs and everything they access must allow concurrent
-calls; exceptions must not escape worker callbacks. Other stages run outside the segment loop.
+OpenMP, otherwise runs serially. Use thread-safe integral costs and report worker failures through
+`EvaluationResult`. Other stages run outside the segment loop.
 Parallel failure reporting chooses the first failed segment in segment order.
 
 `checkGradients(optimizer, x, objective, step, tolerance)` allocates diagnostic vectors, compares
 central differences and restores the base candidate even after a rejected perturbation. It returns
 analytic/numeric gradients, norm/relative/max errors, offending index and status. Printing belongs
-to the caller. Previous names and contracts are covered in the [migration guide](api_migration.md).
+to the caller. Previous API names are covered in the [migration guide](api_migration.md).

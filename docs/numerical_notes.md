@@ -2,20 +2,21 @@
 
 ## Conditioning
 
-Use consistent spatial and time units. Very short segments and large ratios between neighboring
-durations can make high-order interpolation and gradients sensitive to roundoff. Consider
-appropriate minimum durations or better-scaled variables for the application.
+Use consistent spatial and time units. Very short segments or large duration ratios increase
+roundoff sensitivity in high-order splines. Scale optimization variables and choose minimum
+durations appropriate to the planning task.
 
-A saved septic-spline stress case is included at
-[`super_esdf_small_05_short_segment.candidate`](../benchmarks/planners/data/super_esdf_small_05_short_segment.candidate).
-Its shortest segment is about 0.017 s. On the recorded GCC 9.4 build, the direct Spline and
-SplineOptimizer objectives differ from native MINCO by about `3.95e-7` relatively, while relative
-gradient differences are about `2.80e-4` and `1.16e3`. This remains an unresolved numerical issue;
-a high-precision reference has not established which gradients are accurate at that state.
+## Short-segment stress case
+
+The saved septic-spline case
+[`super_esdf_small_05_short_segment.candidate`](../benchmarks/planners/data/super_esdf_small_05_short_segment.candidate)
+has a shortest duration of about 0.017 s and reproduces a known gradient disagreement between
+SplineTrajectory and MINCO. Use the following command to inspect costs, coefficients and
+gradients at that candidate:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSPLINE_BUILD_BENCHMARKS=ON
-cmake --build build --target benchmark_super_planner --parallel 3
+cmake --build build --target benchmark_super_planner --parallel
 ./build/benchmarks/planners/benchmark_super_planner \
   --data benchmarks/planners/data --output build/short-segment \
   --case esdf_small_05 \
@@ -24,18 +25,14 @@ cmake --build build --target benchmark_super_planner --parallel 3
 
 The replay reports all backends and returns nonzero when comparisons fail.
 
-## Solver results and constraints
+## Solver results
 
-A solver's relative-cost stopping condition does not imply a small gradient or global optimality.
-Rebuild the solver's final returned vector with `update(x)` and check success. Validate the
-planning constraints before saving an independent `copyPolynomial()` for control-thread sampling.
-The last evaluation may have been a rejected trial.
-The planner corpus includes nonnegative SUPER stopping codes with significant same-vector
-gradient differences; a close objective alone is not a gradient-equivalence check.
+Inspect the solver's termination status, rebuild its final vector with `update(x)`, and evaluate
+the planning constraints. Save the accepted trajectory with `copyPolynomial()` for sampling.
 
-The examples use soft penalties. Positive sampled ESDF values do not certify continuous collision
-freedom, and sampled values need not satisfy the configured margin exactly. Convex-hull bounds
-apply to an entire piece only when all controls satisfy the corresponding convex set.
+Soft penalties trade constraint violations against cost. Convex-hull bounds cover an entire
+piece when all controls satisfy the same convex constraint. For nonconvex ESDF free space,
+use trajectory collision checks to assess the complete path.
 
-Invalid construction or nonfinite evaluation produces an explicit failure. Keep IEEE NaN/Inf
-semantics enabled; do not compile this code with fast-math assumptions that remove finite-value checks.
+Construction and evaluation report invalid or nonfinite results through `Status`.
+Compiler settings are described in [build and integration](building.md).

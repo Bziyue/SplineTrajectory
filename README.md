@@ -15,7 +15,7 @@ interface, and differentiable convex-hull conversions.
 - O(N) construction and adjoint propagation to durations, waypoints and boundary states.
 - Analytic energy gradients derived from Hamiltonian conservation and variational principles.
 - A generic `SplineOptimizer` for reusable variable maps and objective components.
-- Sequential sampling with reusable derivative coefficients and no source warm-up.
+- Sequential sampling with reusable derivative coefficients.
 - Bezier / MINVO convex-hull conversion, subdivision and gradient propagation.
 
 | Spline Type | Polynomial Degree | Minimizes the Integral of | MINCO Equivalent |
@@ -58,7 +58,7 @@ An objective is a user-defined struct holding callable members such as `integral
 
 - Map decision variables to positive durations, spatial points and optional auxiliary states.
 - Combine energy, time, sampled-state and control-point costs.
-- Supply costs and gradients to L-BFGS or another numerical solver through `evaluate()` and an explicit scalar callback.
+- Supply costs and gradients to L-BFGS or another numerical solver through `evaluate()`.
 
 See the quick start below and the [optimizer reference](docs/optimizer.md)
 for custom maps and objective protocols.
@@ -75,8 +75,6 @@ Bezier or MINVO control points without changing the represented curve.
 
 If all controls lie in a convex corridor, the entire corresponding curve piece lies in it.
 Velocity and acceleration controls similarly provide conservative bounds over a whole piece.
-Soft penalties require a separate feasibility check; ESDF values at controls alone do not
-certify collision freedom in nonconvex free space.
 
 ![Bezier subdivision and MINVO convex hulls](docs/images/convex_hull_basis_comparison.png)
 
@@ -85,45 +83,39 @@ certify collision freedom in nonconvex free space.
 
 ## 📈 Benchmarks
 
-### GCOPTER and SUPER: identical optimization problems
+Performance comparisons cover spline construction and gradients, plus trajectory optimization
+with GCOPTER and SUPER. See [benchmark methods and results](docs/benchmarks.md).
 
-The benchmark loads 72 saved corridor and ESDF problems: 12 cases at each of 4, 12 and
-32 segments for each problem family. Within each planner group, all backends use identical
-inputs, penalties, initialization and solver settings, including that project's original
-L-BFGS. GCOPTER compares quintic minimum jerk; SUPER compares septic minimum snap.
-The two planner groups solve different formulations and are compared separately.
+### GCOPTER and SUPER
 
-Recorded on 2026-09-12 with headers at `54abad9`: GCC 9.4, Eigen 3.3.7, C++17
-`-O3 -fno-fast-math`, Ryzen 9 7945HX, one logical CPU, no LTO.
-These historical results and the kernel plots below do not measure the current `main` revision.
+Each project compares its original MINCO backend with `SplineOptimizer` on 72 corridor and
+ESDF problems, using the same inputs, costs and L-BFGS settings. GCOPTER uses quintic minimum
+jerk; SUPER uses septic minimum snap.
 
-| Group | Problem | Segments | Cost + Gradient, MINCO / Optimizer (µs) | Solve, MINCO / Optimizer (ms) |
+| Project | Problem | Segments | Cost + gradient, MINCO / Optimizer (µs) | Solve, MINCO / Optimizer (ms) |
 | --- | --- | ---: | ---: | ---: |
-| GCOPTER | Corridor | 4 | 11.268 / 8.697 | 0.514 / 0.407 |
-| GCOPTER | Corridor | 12 | 33.939 / 25.765 | 7.954 / 6.113 |
-| GCOPTER | Corridor | 32 | 90.378 / 68.347 | 54.164 / 44.063 |
-| GCOPTER | ESDF | 4 | 11.113 / 8.834 | 1.199 / 0.983 |
-| GCOPTER | ESDF | 12 | 33.399 / 26.085 | 5.069 / 4.052 |
-| GCOPTER | ESDF | 32 | 88.526 / 69.285 | 52.435 / 43.716 |
-| SUPER | Corridor | 4 | 12.716 / 8.673 | 0.463 / 0.327 |
-| SUPER | Corridor | 12 | 38.071 / 25.509 | 13.631 / 8.989 |
-| SUPER | Corridor | 32 | 101.295 / 67.576 | 108.449 / 81.553 |
-| SUPER | ESDF | 4 | 12.490 / 8.780 | 3.502 / 2.521 |
-| SUPER | ESDF | 12 | 37.359 / 25.729 | 8.296 / 5.896 |
-| SUPER | ESDF | 32 | 105.469 / 72.444 | 79.921 / 59.749 |
+| GCOPTER | Corridor | 4 | 7.204 / 5.893 | 0.336 / 0.274 |
+| GCOPTER | Corridor | 12 | 21.487 / 17.602 | 4.804 / 3.963 |
+| GCOPTER | Corridor | 32 | 57.016 / 46.872 | 30.261 / 25.056 |
+| GCOPTER | ESDF | 4 | 7.218 / 6.331 | 0.829 / 0.711 |
+| GCOPTER | ESDF | 12 | 21.518 / 19.003 | 3.375 / 2.949 |
+| GCOPTER | ESDF | 32 | 57.131 / 49.500 | 32.517 / 29.390 |
+| SUPER | Corridor | 4 | 7.887 / 5.754 | 0.308 / 0.211 |
+| SUPER | Corridor | 12 | 23.512 / 17.029 | 8.125 / 5.412 |
+| SUPER | Corridor | 32 | 62.772 / 44.880 | 60.795 / 44.637 |
+| SUPER | ESDF | 4 | 7.919 / 5.694 | 2.857 / 2.170 |
+| SUPER | ESDF | 12 | 23.748 / 16.967 | 5.416 / 3.990 |
+| SUPER | ESDF | 32 | 63.220 / 45.159 | 49.105 / 38.576 |
 
-MINCO denotes the original planner backend; Optimizer uses SplineTrajectory with
-`SplineOptimizer`. Values are medians across 12 case medians, excluding file I/O and geometry
-preparation. Regular fixed-candidate gradient comparisons had relative errors below `3e-13`.
-Independent solves did not always reach the same final trajectory, and very short segments
-expose unresolved gradient discrepancies; see [numerical notes](docs/numerical_notes.md).
+Values are medians across 12 problems per row. MINCO is the project's original backend;
+Optimizer uses SplineTrajectory with `SplineOptimizer`.
 
-[Full results, including direct Spline](docs/benchmarks.md) ·
-[Corpus and reproduction commands](benchmarks/planners/README.md)
+### Spline kernels: MINCO and large_scale_traj_optimizer
 
-### Spline kernels
-
-Earlier kernel measurements compare construction, general adjoints and analytic energy gradients:
+The plots compare construction, gradient back-propagation and analytic energy gradients on
+the same 3D inputs at **25 sizes from 4 to 10,000 segments**.
+Blue is SplineTrajectory, orange is MINCO, and green is MinJerk/MinSnap from
+`large_scale_traj_optimizer`. Solid, dashed and dash-dot lines denote cubic, quintic and septic splines.
 
 ![Trajectory construction speed](docs/images/construction_speed.png)
 
@@ -131,11 +123,9 @@ Earlier kernel measurements compare construction, general adjoints and analytic 
 
 ![Analytic energy gradient speed](docs/images/analytic_grad_speed.png)
 
-Current benchmark sources and commands are listed in the [benchmark guide](docs/benchmarks.md).
-
 ## 🛠️ Refactored Projects
 
-Related planner implementations using SplineTrajectory, each with its own integration version:
+Planner implementations using SplineTrajectory:
 
 | Project | Original | Refactored |
 | --- | --- | --- |
@@ -153,7 +143,7 @@ the test tools also require Python 3.
 git clone https://github.com/Bziyue/SplineTrajectory.git
 cd SplineTrajectory
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel 3
+cmake --build build --parallel
 (cd build && ctest --output-on-failure)
 ./build/examples/corridor_optimizer
 ./build/examples/esdf_optimizer
@@ -162,24 +152,22 @@ cmake --build build --parallel 3
 Examples and tests build by default. Enable performance comparisons with
 `-DSPLINE_BUILD_BENCHMARKS=ON`. To use only the library, disable `BUILD_TESTING`,
 `SPLINE_BUILD_EXAMPLES` and `SPLINE_BUILD_BENCHMARKS`, or include the headers directly.
-For local performance measurements, add `-DSPLINE_NATIVE_ARCH=ON` to tune repository
-executables for the build machine's CPU. This option does not propagate to consumers;
-see [build and integration](docs/building.md) for CMake integration and compiler settings.
+Add `-DSPLINE_NATIVE_ARCH=ON` for CPU-specific optimization of repository executables.
+See [build and integration](docs/building.md) for CMake integration and compiler settings.
 
 ### Physical input and optimization choices
 
 `SplineInput<DIM>` contains N durations, N+1 waypoint rows, endpoint derivatives and a
-`start_time` on the caller's trajectory time axis; this need not be an absolute clock.
+`start_time` on the caller's trajectory time axis.
 With `spline.update(input)`, **every waypoint is an interpolation constraint**.
 With `optimizer.prepare(input, options, objective)`, values selected by `options.mask` are
 **optimization initial guesses**. By default, durations and interior waypoints can change;
 endpoint positions and endpoint derivatives remain fixed. To keep all waypoints fixed, set
-`options.mask.waypoints.assign(input.waypoints.rows(), 0)`. Auxiliary maps are a separate,
-explicit mechanism that can also transform fixed physical values.
+`options.mask.waypoints.assign(input.waypoints.rows(), 0)`.
 
-The following is a complete program. Endpoint derivatives default to zero; quintic splines
-use velocity and acceleration. Both built-in weights default to **zero**: `NoObjective` means
-no custom costs, and does not enable minimum-jerk energy by itself.
+The following program constructs a quintic spline and evaluates an optimization objective.
+Endpoint velocity and acceleration default to zero. Set `energy_weight` and `duration_weight`
+to enable the built-in costs; both default to zero. `NoObjective` selects built-in costs only.
 
 ```cpp
 #include "SplineOptimizer.hpp"
@@ -218,7 +206,6 @@ int main()
     // This example evaluates the initial guess. A numerical solver repeatedly
     // calls evaluate(); after solving, use its final returned x here.
     if (!optimizer.update(x)) return 1;
-    // Check your planning task's constraints before accepting this candidate.
     auto trajectory = optimizer.copyPolynomial();
     auto sampler = trajectory.makeSampler<2>();
     const auto command = sampler.evaluateDerivatives(trajectory.startTime());
@@ -229,8 +216,8 @@ int main()
 ```
 
 `prepare(input, objective)` uses default options; `prepare(input, options, objective)` makes
-weights and variable selection explicit. Preparation copies the physical input and prepares
-the library's buffers. Prepare user-owned hulls, maps and cost buffers before the solver loop
+weights and variable selection explicit. Preparation copies the input and sizes reusable buffers.
+Prepare cost-owned hulls, maps and buffers before the solver loop
 as shown in the [convex-hull example](examples/convex_hull_optimizer.cpp).
 
 ### Solve and deliver a trajectory
@@ -240,12 +227,11 @@ Use the solver's final returned decision vector in this order:
 1. Call `optimizer.update(x_final)` and check success.
 2. Check the planning task's constraints and accept or reject the candidate.
 3. Save `auto trajectory = optimizer.copyPolynomial()`.
-4. Keep that snapshot alive and unchanged; create a sampler for each control-thread traversal.
+4. Create a sampler from the saved trajectory for each control-thread traversal.
 
-`evaluate()` replaces the current candidate. `polynomial()` borrows the last built candidate,
-which may be a rejected line-search trial; it is not automatically the solver's final accepted
-trajectory. Updates invalidate borrowed views and samplers. A saved polynomial owns independent
-data. See the [L-BFGS examples](examples/README.md) for actual optimization and solver-status handling.
+`polynomial()` provides a view of the current candidate; `copyPolynomial()` saves an independent
+trajectory. Keep the saved trajectory alive and unchanged while sampling it.
+See the [L-BFGS examples](examples/README.md) for a complete optimization loop.
 
 Choose costs by the planning requirement; custom functors return a `double` (cost) or an
 `EvaluationResult` when they can reject a candidate, and add partials to their gradient view.
@@ -258,12 +244,6 @@ Choose costs by the planning requirement; custom functors return a `double` (cos
 | Waypoint, boundary or additional duration costs | `parameter` |
 | Coupled costs across samples | `sample` |
 | Regularization in decision coordinates | `decision` |
-
-Low-level spline, polynomial and hull APIs expect valid shapes, finite inputs, positive durations
-and representable arithmetic. Check spline construction status before querying. The optimizer
-validates reference inputs during preparation and decisions during evaluation. Failed candidates
-remain invalid while their workspace is retained for fixed-topology retries; callbacks own any
-allocations they perform. See the [optimizer contracts](docs/optimizer.md).
 
 ## 🧰 Examples and Documentation
 

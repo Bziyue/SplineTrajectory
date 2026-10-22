@@ -14,7 +14,7 @@
 - O(N) 构造与伴随反传，覆盖时长、插值点和边界状态。
 - 基于 Hamiltonian 守恒与变分原理的解析能量梯度。
 - 通用 `SplineOptimizer`，支持复用变量映射与目标组件。
-- 顺序采样复用导数系数，无需预热源轨迹。
+- 顺序采样复用导数系数。
 - Bezier / MINVO 凸包转换、细分与梯度传播。
 
 | 样条类型 | 多项式次数 | 最小化的平方积分 | MINCO 对应形式 |
@@ -54,7 +54,7 @@
 
 - 将决策变量映射为正时长、空间点与可选的辅助状态。
 - 组合能量、时间、采样状态与控制点代价。
-- 通过 `evaluate()` 和显式的标量回调向 L-BFGS 或其他数值求解器提供代价与梯度。
+- 通过 `evaluate()` 向 L-BFGS 或其他数值求解器提供代价与梯度。
 
 下方快速开始给出最小用法，自定义映射与目标协议见[优化器参考](docs/optimizer.md)。
 
@@ -69,7 +69,7 @@
 - 控制点梯度同时反传至多项式系数与分段时长。
 
 若全部控制点位于同一凸走廊内，对应的整段曲线也位于其中；速度和加速度控制点同样可以提供
-整段导数的保守界。软惩罚仍需单独检查可行性；非凸自由空间中，仅凭控制点的 ESDF 值不能证明整段无碰撞。
+整段导数的保守界。
 
 ![Bezier 细分与 MINVO 凸包](docs/images/convex_hull_basis_comparison.png)
 
@@ -78,42 +78,37 @@
 
 ## 📈 性能基准
 
-### GCOPTER 与 SUPER：相同优化问题对比
+性能对比覆盖样条构造、梯度计算，以及 GCOPTER 和 SUPER 中的轨迹优化。
+详见[测试方法与结果](docs/benchmarks.md)。
 
-基准从文件加载 72 个走廊与 ESDF 问题：每类问题分别包含 4、12、32 段三个规模，每个规模 12 个实例。
-同一项目组内，各后端使用相同的输入、惩罚、初值与求解器设置，并保留该项目原始的 L-BFGS。
-GCOPTER 组比较五次最小 jerk，SUPER 组比较七次最小 snap；两组求解的模型不同，分别进行对比。
+### GCOPTER 与 SUPER
 
-下表为 2026-09-12 的记录，公共头文件版本 `54abad9`：GCC 9.4、Eigen 3.3.7、
-C++17 `-O3 -fno-fast-math`、Ryzen 9 7945HX，固定一个逻辑 CPU，未启用 LTO。
-这些历史数据及下方内核图表不代表当前 `main` 版本的实测性能。
+每个项目在 72 个走廊与 ESDF 问题上，对比原始 MINCO 后端与 `SplineOptimizer`，
+使用相同输入、代价和 L-BFGS 设置。GCOPTER 采用五次最小 jerk，SUPER 采用七次最小 snap。
 
-| 项目组 | 问题 | 段数 | 代价与梯度，MINCO / Optimizer（µs） | 完整求解，MINCO / Optimizer（ms） |
+| 项目 | 问题 | 段数 | 代价与梯度，MINCO / Optimizer（µs） | 求解，MINCO / Optimizer（ms） |
 | --- | --- | ---: | ---: | ---: |
-| GCOPTER | 走廊 | 4 | 11.268 / 8.697 | 0.514 / 0.407 |
-| GCOPTER | 走廊 | 12 | 33.939 / 25.765 | 7.954 / 6.113 |
-| GCOPTER | 走廊 | 32 | 90.378 / 68.347 | 54.164 / 44.063 |
-| GCOPTER | ESDF | 4 | 11.113 / 8.834 | 1.199 / 0.983 |
-| GCOPTER | ESDF | 12 | 33.399 / 26.085 | 5.069 / 4.052 |
-| GCOPTER | ESDF | 32 | 88.526 / 69.285 | 52.435 / 43.716 |
-| SUPER | 走廊 | 4 | 12.716 / 8.673 | 0.463 / 0.327 |
-| SUPER | 走廊 | 12 | 38.071 / 25.509 | 13.631 / 8.989 |
-| SUPER | 走廊 | 32 | 101.295 / 67.576 | 108.449 / 81.553 |
-| SUPER | ESDF | 4 | 12.490 / 8.780 | 3.502 / 2.521 |
-| SUPER | ESDF | 12 | 37.359 / 25.729 | 8.296 / 5.896 |
-| SUPER | ESDF | 32 | 105.469 / 72.444 | 79.921 / 59.749 |
+| GCOPTER | 走廊 | 4 | 7.204 / 5.893 | 0.336 / 0.274 |
+| GCOPTER | 走廊 | 12 | 21.487 / 17.602 | 4.804 / 3.963 |
+| GCOPTER | 走廊 | 32 | 57.016 / 46.872 | 30.261 / 25.056 |
+| GCOPTER | ESDF | 4 | 7.218 / 6.331 | 0.829 / 0.711 |
+| GCOPTER | ESDF | 12 | 21.518 / 19.003 | 3.375 / 2.949 |
+| GCOPTER | ESDF | 32 | 57.131 / 49.500 | 32.517 / 29.390 |
+| SUPER | 走廊 | 4 | 7.887 / 5.754 | 0.308 / 0.211 |
+| SUPER | 走廊 | 12 | 23.512 / 17.029 | 8.125 / 5.412 |
+| SUPER | 走廊 | 32 | 62.772 / 44.880 | 60.795 / 44.637 |
+| SUPER | ESDF | 4 | 7.919 / 5.694 | 2.857 / 2.170 |
+| SUPER | ESDF | 12 | 23.748 / 16.967 | 5.416 / 3.990 |
+| SUPER | ESDF | 32 | 63.220 / 45.159 | 49.105 / 38.576 |
 
-MINCO 为项目原始后端，Optimizer 为 SplineTrajectory 配合 `SplineOptimizer`。
-数值为 12 个实例各自测量中位数的中位数，不包含文件读取与几何准备。
-常规固定候选点的梯度相对误差低于 `3e-13`；独立求解并非总是得到相同的最终轨迹，
-极短分段仍存在未解决的梯度差异，详见[数值说明](docs/numerical_notes.md)。
+每行数据为 12 个问题的测量中位数。MINCO 为项目原始后端，Optimizer 使用
+SplineTrajectory 与 `SplineOptimizer`。
 
-[完整结果，含直接 Spline 路径](docs/benchmarks.md) ·
-[问题集与复现命令](benchmarks/planners/README.md)
+### 样条内核：MINCO 与 large_scale_traj_optimizer
 
-### 样条内核
-
-以下保留早期的构造、通用伴随反传与解析能量梯度对比图：
+三张图分别比较构造、梯度反传和解析能量梯度，使用相同三维输入，覆盖 **4–10,000 段的 25 个规模**。
+蓝色为 SplineTrajectory，橙色为 MINCO，绿色为 `large_scale_traj_optimizer` 的 MinJerk/MinSnap；
+实线、虚线和点划线分别对应三次、五次和七次样条。
 
 ![轨迹构造速度](docs/images/construction_speed.png)
 
@@ -121,11 +116,9 @@ MINCO 为项目原始后端，Optimizer 为 SplineTrajectory 配合 `SplineOptim
 
 ![解析能量梯度速度](docs/images/analytic_grad_speed.png)
 
-当前基准源码与运行命令见[性能基准指南](docs/benchmarks.md)。
-
 ## 🛠️ 重构项目
 
-以下为使用 SplineTrajectory 的相关规划器实现，各项目维护自身的集成版本：
+以下规划器实现使用 SplineTrajectory：
 
 | 项目 | 原始仓库 | 重构版本 |
 | --- | --- | --- |
@@ -142,7 +135,7 @@ MINCO 为项目原始后端，Optimizer 为 SplineTrajectory 配合 `SplineOptim
 git clone https://github.com/Bziyue/SplineTrajectory.git
 cd SplineTrajectory
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel 3
+cmake --build build --parallel
 (cd build && ctest --output-on-failure)
 ./build/examples/corridor_optimizer
 ./build/examples/esdf_optimizer
@@ -150,20 +143,20 @@ cmake --build build --parallel 3
 
 默认构建测试与示例。性能基准通过 `-DSPLINE_BUILD_BENCHMARKS=ON` 启用。
 仅使用库时，可关闭 `BUILD_TESTING`、`SPLINE_BUILD_EXAMPLES` 和 `SPLINE_BUILD_BENCHMARKS`，或直接包含头文件。
-本机性能测试可添加 `-DSPLINE_NATIVE_ARCH=ON`，按构建机器的 CPU 优化仓库内可执行程序。
-该选项不会传递给下游项目；CMake 接入与编译选项见[构建指南](docs/building.md)。
+添加 `-DSPLINE_NATIVE_ARCH=ON` 可为仓库内可执行程序启用 CPU 专属优化。
+CMake 接入与编译选项见[构建指南](docs/building.md)。
 
 ### 物理输入与优化选择
 
 `SplineInput<DIM>` 包含 N 个段时长、N+1 行途经点、端点导数和调用方轨迹时间轴上的
-`start_time`，它不要求是绝对时钟。在 `spline.update(input)` 中，**所有途经点都是插值约束**；
+`start_time`。在 `spline.update(input)` 中，**所有途经点都是插值约束**；
 在 `optimizer.prepare(input, options, objective)` 中，`options.mask` 选中的值是**优化初值**。
 默认优化时长和内部途经点，端点位置与端点导数固定。若希望固定所有途经点，设置
-`options.mask.waypoints.assign(input.waypoints.rows(), 0)`。辅助映射是另一个显式的高级机制，
-也可以变换未选为直接优化变量的物理值。
+`options.mask.waypoints.assign(input.waypoints.rows(), 0)`。
 
-下面是完整可编译程序。端点导数默认为零，五次样条使用速度和加速度边界。
-两个内置权重默认都为 **零**：`NoObjective` 仅表示没有自定义代价，不会自动启用最小 jerk 能量。
+下面的完整程序构造五次样条，并评价优化目标。端点速度和加速度默认为零。
+设置 `energy_weight` 和 `duration_weight` 可启用内置代价，两者默认均为零。
+`NoObjective` 表示仅使用内置代价。
 
 ```cpp
 #include "SplineOptimizer.hpp"
@@ -202,19 +195,18 @@ int main()
     // 本例只评价初值。数值求解器会重复调用 evaluate()；
     // 求解结束后，此处应使用求解器最终返回的 x。
     if (!optimizer.update(x)) return 1;
-    // 接受候选前，按规划任务验收约束。
     auto trajectory = optimizer.copyPolynomial();
     auto sampler = trajectory.makeSampler<2>();
     const auto command = sampler.evaluateDerivatives(trajectory.startTime());
-    std::cout << "初始代价: " << result.cost << '\n';
+    std::cout << "Initial cost: " << result.cost << '\n';
     return std::isfinite(result.cost) && gradient.allFinite() &&
            state[0].allFinite() && command[0].allFinite() ? 0 : 1;
 }
 ```
 
 `prepare(input, objective)` 使用默认配置；`prepare(input, options, objective)` 显式指定权重和变量选择。
-准备时复制物理输入并分配库自己的工作区。用户代价持有的凸包、映射缓存和梯度缓冲也应在求解循环前
-准备好，参见[凸包示例](examples/convex_hull_optimizer.cpp)。上面只评价初值，完整求解见 L-BFGS 示例。
+准备时复制输入并分配可复用的工作区。代价持有的凸包、映射缓存和梯度缓冲在求解循环前准备，
+参见[凸包示例](examples/convex_hull_optimizer.cpp)。
 
 ### 求解与轨迹交付
 
@@ -223,11 +215,10 @@ int main()
 1. 调用 `optimizer.update(x_final)` 并检查成功。
 2. 按规划任务验收约束，决定是否接受候选。
 3. 用 `auto trajectory = optimizer.copyPolynomial()` 保存独立轨迹。
-4. 保持该快照存活且不变，由每个控制线程的采样过程创建自己的 sampler。
+4. 从保存的轨迹创建 sampler，供各控制线程采样。
 
-`evaluate()` 会替换当前候选。`polynomial()` 借用最后构建的候选，它可能是线搜索拒绝的试探点，
-不会自动成为求解器最终接受的轨迹。更新会使借用视图和 sampler 失效，复制的轨迹拥有独立存储。
-实际优化和求解器状态处理见 [L-BFGS 示例](examples/README.md)。
+`polynomial()` 提供当前候选的视图，`copyPolynomial()` 保存独立轨迹。
+采样期间保持保存的轨迹存活且不变。完整优化流程见 [L-BFGS 示例](examples/README.md)。
 
 按规划需求选择代价入口即可。自定义代价结构体返回 `double`，可能拒绝候选时返回 `EvaluationResult`；
 梯度通过传入的引用视图累加。
@@ -240,10 +231,6 @@ int main()
 | 途经点、边界和额外时长代价 | `parameter` |
 | 跨多个采样点的耦合代价 | `sample` |
 | 决策坐标上的特殊正则项 | `decision` |
-
-底层样条、多项式和凸包接口要求调用者提供正确形状、有限数值、正时长及可表示的数值范围。
-查询前检查样条构建状态。优化器在准备时验证初始输入，评价时验证决策变量；失败候选不可用，
-但工作区保留以便固定拓扑的重试复用。用户回调自行负责其分配行为。详见[优化器契约](docs/optimizer.md)。
 
 ## 🧰 示例与文档
 
