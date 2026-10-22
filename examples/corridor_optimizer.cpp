@@ -8,8 +8,8 @@ struct CorridorCost
     std::array<example::Box, 3> boxes = example::corridor();
     example::DynamicsCost dynamics;
     double operator()(const SplineTrajectory::IntegralPointInfo &point,
-                      const SplineTrajectory::SampleState<2> &state,
-                      SplineTrajectory::SampleGradient<2> &gradient) const
+                      const SplineTrajectory::IntegralState<2> &state,
+                      SplineTrajectory::IntegralGradient<2> &gradient) const
     {
         const double dynamics_cost = dynamics(point, state, gradient);
         return boxes[point.segment_index].penalty(state.p, 5000.0, gradient.p)

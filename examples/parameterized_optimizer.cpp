@@ -101,8 +101,8 @@ struct IntegralCost
 {
     static constexpr int kDerivativeOrder = 1;
     double operator()(const SplineTrajectory::IntegralPointInfo &point,
-                      const SplineTrajectory::SampleState<3> &state,
-                      SplineTrajectory::SampleGradient<3> &gradient) const
+                      const SplineTrajectory::IntegralState<3> &state,
+                      SplineTrajectory::IntegralGradient<3> &gradient) const
     {
         gradient.p += 0.02 * state.p;
         gradient.v += 0.04 * state.v;
@@ -132,10 +132,43 @@ struct CoefficientCost
     }
 };
 
+struct SampleMeanCost
+{
+    // A discrete cost on the mean sample position and time. Unlike integral(),
+    // this returns the complete batch cost, with each interior knot counted once.
+    template<class Samples>
+    double operator()(const Samples &samples, SplineTrajectory::SampleGradientView<Spline> &gradient) const
+    {
+        Eigen::Vector3d position_sum = Eigen::Vector3d::Zero();
+        double time_sum = 0.0;
+        int count = 0;
+        for (const auto &sample : samples)
+        {
+            if (sample.point.isSegmentStart() && !sample.point.isTrajectoryStart()) continue;
+            position_sum += sample.p;
+            time_sum += sample.point.trajectory_time;
+            ++count;
+        }
+        const Eigen::Vector3d position_error = position_sum / count - Eigen::Vector3d(1.0, 0.0, 0.0);
+        const double time_error = time_sum / count - 2.0;
+        constexpr double weight = 0.01;
+        for (int i = 0; i < static_cast<int>(samples.size()); ++i)
+        {
+            const auto &point = samples[i].point;
+            if (point.isSegmentStart() && !point.isTrajectoryStart()) continue;
+            // Preserve original row indices; skipped duplicate rows stay zero.
+            gradient.positions.row(i) += (weight / count) * position_error.transpose();
+            gradient.trajectory_times(i) += (weight / count) * time_error;
+        }
+        return 0.5 * weight * (position_error.squaredNorm() + time_error * time_error);
+    }
+};
+
 struct ProblemObjective
 {
     IntegralCost integral;
     CoefficientCost coefficient;
+    SampleMeanCost sample;
 };
 }
 
@@ -150,7 +183,7 @@ int main()
     SplineTrajectory::OptimizerOptions options;
     options.energy_weight = 0.003;
     options.integration_steps = 10;
-    ProblemObjective objective{{}, CoefficientCost(static_cast<int>(problem.durations.size()))};
+    ProblemObjective objective{{}, CoefficientCost(static_cast<int>(problem.durations.size())), {}};
     const auto prepared = optimizer.prepare(problem, options, objective);
     if (!prepared) { std::cerr << prepared.message << '\n'; return 1; }
     auto x = optimizer.initialGuess();

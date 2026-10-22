@@ -151,6 +151,8 @@ namespace SplineTrajectory
         Vector v = Vector::Zero(), a = Vector::Zero(), j = Vector::Zero();
     };
 
+    /** @brief Endpoint derivatives: cubic uses v, quintic uses v/a, septic uses v/a/j.
+     * @note Higher input fields are ignored by lower-degree splines; their energy gradient fields are zero. */
     template <int DIM>
     struct BoundaryConditions
     {

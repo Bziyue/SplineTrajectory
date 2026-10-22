@@ -28,8 +28,8 @@ struct StateCost
 {
     static constexpr int kDerivativeOrder = ORDER;
     SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &point,
-                      const SplineTrajectory::SampleState<3> &state,
-                      SplineTrajectory::SampleGradient<3> &gradient) const
+                      const SplineTrajectory::IntegralState<3> &state,
+                      SplineTrajectory::IntegralGradient<3> &gradient) const
     {
         double cost = 0.01 * point.trajectory_time * point.trajectory_time;
         gradient.trajectory_time += 0.02 * point.trajectory_time;

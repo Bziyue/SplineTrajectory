@@ -18,8 +18,8 @@ inline constexpr const char *project = "gcopter";
 using Spline = SplineTrajectory::SepticSplineND<3>;
 inline constexpr const char *project = "super";
 #endif
-using State = SplineTrajectory::SampleState<3>;
-using Partials = SplineTrajectory::SampleGradient<3>;
+using State = SplineTrajectory::IntegralState<3>;
+using Partials = SplineTrajectory::IntegralGradient<3>;
 
 /** @brief Read-only geometry in the native half-space and normalized-square vertex conventions. */
 struct Geometry {

@@ -11,7 +11,8 @@ int main(int argc, char **argv) try
 
     // Options enable minimum-jerk energy and a linear cost on total duration.
     example::minimize(optimizer, objective, example::checkRequested(argc, argv));
-    const auto midpoint = optimizer.polynomial().evaluate(optimizer.polynomial().duration() / 2.0);
+    const auto &trajectory = optimizer.polynomial();
+    const auto midpoint = trajectory.evaluate(trajectory.startTime() + trajectory.duration() / 2.0);
     std::cout << "midpoint: " << midpoint.transpose() << '\n';
     return 0;
 }

@@ -62,8 +62,8 @@ struct IntegralCost
 {
     static constexpr int kDerivativeOrder = BENCH_DERIVATIVE_ORDER;
     SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &,
-                      const SplineTrajectory::SampleState<3> &state,
-                      SplineTrajectory::SampleGradient<3> &gradient) const
+                      const SplineTrajectory::IntegralState<3> &state,
+                      SplineTrajectory::IntegralGradient<3> &gradient) const
     {
         gradient.p = state.p;
         double cost = 0.5 * state.p.squaredNorm();
@@ -167,9 +167,9 @@ public:
                 Spline::computeBasisFunctions(alpha*times[i],bp,bv,ba,bj,bs,bc);
                 const Eigen::Vector3d p = (bp*block).transpose(), v=(bv*block).transpose();
                 const Eigen::Vector3d a=(ba*block).transpose(), j=(bj*block).transpose(), s=(bs*block).transpose();
-                SplineTrajectory::SampleState<3> state;
+                SplineTrajectory::IntegralState<3> state;
                 state.p = p; state.v = v; state.a = a; state.j = j; state.s = s;
-                SplineTrajectory::SampleGradient<3> partials;
+                SplineTrajectory::IntegralGradient<3> partials;
                 const double local = integral_cost({}, state, partials).cost;
                 const auto &gp = partials.p; const auto &gv = partials.v;
                 const auto &ga = partials.a; const auto &gj = partials.j;

@@ -12,7 +12,7 @@ int main(int argc, char **argv) try
     problem.durations = {1.2, 1.4, 1.2};
     // Keep the spatial path fixed and optimize its segment durations.
     auto options = example::options();
-    options.mask = SplineTrajectory::OptimizationMask::allFixed(static_cast<int>(problem.durations.size()));
+    options.mask = SplineTrajectory::OptimizationMask::none(static_cast<int>(problem.durations.size()));
     options.mask.durations.assign(problem.durations.size(), 1);
     example::Optimizer optimizer;
     Objective objective;

@@ -144,11 +144,10 @@ void testInputAndAcceptedState()
 struct RecordingIntegral
 {
     static constexpr int kDerivativeOrder = 0;
-    int begins = 0, calls = 0;
-    void beginEvaluation() { ++begins; calls = 0; }
+    int calls = 0;
     SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &,
-                      const SplineTrajectory::SampleState<3> &state,
-                      SplineTrajectory::SampleGradient<3> &gradient)
+                      const SplineTrajectory::IntegralState<3> &state,
+                      SplineTrajectory::IntegralGradient<3> &gradient)
     {
         ++calls;
         gradient.p += 0.002 * state.p;
@@ -169,18 +168,21 @@ void testRecordingAndBorrowedObjective()
     RecordingIntegral integral;
     struct Objective { std::reference_wrapper<RecordingIntegral> integral; } objective{std::ref(integral)};
     require(bool(optimizer.evaluate(x, gradient, objective)), "borrow integral by concrete type");
-    require(integral.begins == 1 && integral.calls == 10, "begin hook executes once and integration visits each endpoint");
+    require(integral.calls == 10, "borrowed integral visits each quadrature point");
     const auto &samples = optimizer.recordedSamples();
     require(samples.size() == 10 && samples.front().point.isTrajectoryStart() &&
             samples.back().point.isTrajectoryEnd(), "recorded sample topology");
-    require(samples[4].point.interiorBoundaryIndex() == 0 && samples[5].point.interiorBoundaryIndex() == 0,
-            "both quadrature endpoints identify their common boundary");
+    require(samples.front().point.waypointIndex() == 0 && samples.back().point.waypointIndex() == 2,
+            "endpoint indices match input waypoint rows");
+    require(samples[4].point.waypointIndex() == 1 && samples[5].point.waypointIndex() == 1,
+            "both quadrature endpoints identify their common waypoint row");
+    require(samples[1].point.waypointIndex() == -1, "non-waypoint sample has no waypoint index");
     require(samples.front().point.trajectory_time == problem.start_time, "recording uses the source time axis");
     require(samples.front().trap_weight == 0.5 && samples[1].trap_weight == 1.0, "trapezoidal endpoint weights");
     const auto expected = optimizer.copyPolynomial();
     const auto checked = SplineTrajectory::checkGradients(optimizer, x, objective, 1e-6, 1e-4);
     require(bool(checked) && optimizer.polynomial().coefficients().isApprox(expected.coefficients(), 1e-13),
-            "diagnostics restore the base candidate and borrowed objective state");
+            "gradient diagnostics restore the base candidate");
 }
 
 /** @brief Tetrahedral softmax coordinates with a redundant vertex on alternate waypoints.

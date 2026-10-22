@@ -22,8 +22,8 @@ struct EsdfCost
     example::DynamicsCost dynamics;
     double clearance = 0.2;
     double operator()(const SplineTrajectory::IntegralPointInfo &point,
-                      const SplineTrajectory::SampleState<2> &state,
-                      SplineTrajectory::SampleGradient<2> &gradient) const
+                      const SplineTrajectory::IntegralState<2> &state,
+                      SplineTrajectory::IntegralGradient<2> &gradient) const
     {
         double cost = dynamics(point, state, gradient);
         example::Vector direction;
@@ -48,12 +48,13 @@ int main(int argc, char **argv) try
     if (!prepared) throw std::runtime_error(prepared.message);
     example::minimize(optimizer, objective, example::checkRequested(argc, argv));
 
-    auto sampler = optimizer.polynomial().makeSampler<0>();
+    const auto &trajectory = optimizer.polynomial();
+    auto sampler = trajectory.makeSampler<0>();
     double minimum_distance = std::numeric_limits<double>::infinity();
     for (int i = 0; i <= 1000; ++i)
     {
         example::Vector scratch;
-        const auto position = sampler.evaluate(optimizer.polynomial().duration() * i / 1000.0);
+        const auto position = sampler.evaluate(trajectory.startTime() + trajectory.duration() * i / 1000.0);
         minimum_distance = std::min(minimum_distance, objective.integral.field.query(position, scratch));
     }
     std::cout << "minimum sampled ESDF: " << minimum_distance << '\n';

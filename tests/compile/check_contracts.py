@@ -21,14 +21,14 @@ int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
      'Objective must declare a supported cost member'),
     ('parameter-signature', prefix + '''struct Objective { int parameter = 0; };
 int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
-     'Objective.parameter must return double or EvaluationResult'),
+     'Objective.parameter must be a callable data member'),
     ('integral-signature', prefix + '''struct Objective { int integral = 0; };
 int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
-     'Objective.integral must return double or EvaluationResult'),
+     'Objective.integral must be a callable data member'),
     ('derivative-order', prefix + '''struct Integral {
 static constexpr int kDerivativeOrder = 5;
 double operator()(const SplineTrajectory::IntegralPointInfo &,
-const SplineTrajectory::SampleState<3> &, SplineTrajectory::SampleGradient<3> &) const { return 0; }
+const SplineTrajectory::IntegralState<3> &, SplineTrajectory::IntegralGradient<3> &) const { return 0; }
 };
 struct Objective { Integral integral; };
 int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',

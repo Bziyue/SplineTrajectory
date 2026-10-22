@@ -206,8 +206,8 @@ void compare(const pb::ProblemData &p,const pb::Geometry &geometry,const Solutio
              const char *label,int trial,Files &files) {
     double position=0,velocity=0;
     for(int k=0;k<=1000;++k) {
-        const auto a=reference.poly.evaluateDerivatives<1>(reference.poly.duration()*k/1000.0);
-        const auto b=actual.poly.evaluateDerivatives<1>(actual.poly.duration()*k/1000.0);
+        const auto a=reference.poly.evaluateDerivatives<1>(reference.poly.startTime()+reference.poly.duration()*k/1000.0);
+        const auto b=actual.poly.evaluateDerivatives<1>(actual.poly.startTime()+actual.poly.duration()*k/1000.0);
         position=std::max(position,(a[0]-b[0]).norm()); velocity=std::max(velocity,(a[1]-b[1]).norm());
     }
     pb::DirectEvaluator<false> native(p,geometry); Eigen::VectorXd gradient(actual.x.size());

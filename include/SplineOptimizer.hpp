@@ -64,26 +64,30 @@ namespace SplineTrajectory
         bool isSegmentEnd() const noexcept { return step_index == step_count; }
         bool isTrajectoryStart() const noexcept { return segment_index == 0 && isSegmentStart(); }
         bool isTrajectoryEnd() const noexcept { return segment_index + 1 == segment_count && isSegmentEnd(); }
-        int interiorBoundaryIndex() const noexcept
+        /** @brief Input waypoint row in [0, segment_count], or -1 between waypoints.
+         * @note Both quadrature records at an interior knot identify the same waypoint. */
+        int waypointIndex() const noexcept
         {
-            if (isSegmentEnd() && segment_index + 1 < segment_count) return segment_index;
-            return isSegmentStart() && segment_index > 0 ? segment_index - 1 : -1;
+            if (isSegmentStart()) return segment_index;
+            return isSegmentEnd() ? segment_index + 1 : -1;
         }
     };
 
-    /** @brief Physical-time derivatives in the caller's coordinate frame. */
+    /** @brief State at one integration point; derivatives use physical seconds in the caller's frame. */
     template<int DIM>
-    struct SampleState
+    struct IntegralState
     {
         using Vector = Eigen::Matrix<double, DIM, 1>;
         Vector p = Vector::Zero(), v = Vector::Zero(), a = Vector::Zero();
         Vector j = Vector::Zero(), s = Vector::Zero();
     };
 
-    /** @brief Unweighted integrand partials, cleared for each sample.
-     * @note trajectory_time is the explicit trajectory-time partial; quadrature and state drift belong to the optimizer. */
+    /** @brief Unweighted integrand partials, cleared for each integration point.
+     * @note integral() returns the unweighted integrand. The optimizer applies quadrature weights
+     *       to both cost and partials. trajectory_time is the explicit time partial; state drift
+     *       and the derivative of the integration measure are handled by the optimizer. */
     template<int DIM>
-    struct SampleGradient
+    struct IntegralGradient
     {
         using Vector = Eigen::Matrix<double, DIM, 1>;
         Vector p = Vector::Zero(), v = Vector::Zero(), a = Vector::Zero();
@@ -201,14 +205,16 @@ namespace SplineTrajectory
     };
 
     struct BoundaryDerivativeMask { bool v = false, a = false, j = false; };
-    /** @brief Active coordinates; empty masks select all durations and only interior waypoints. */
+    /** @brief Select direct optimization coordinates; empty arrays select all durations and interior waypoints.
+     * @note Boundary derivatives default to unselected. Auxiliary coordinates are independent of this mask
+     *       and may still change unselected physical parameters through their apply() mapping. */
     struct OptimizationMask
     {
         std::vector<std::uint8_t> durations, waypoints;
         BoundaryDerivativeMask start, end;
 
-        /** @brief Fix every physical coordinate for a nonnegative segment count. */
-        static OptimizationMask allFixed(int segments)
+        /** @brief Select no direct coordinates for a nonnegative segment count; auxiliary coordinates remain active. */
+        static OptimizationMask none(int segments)
         {
             OptimizationMask mask;
             mask.durations.assign(segments, 0);
@@ -216,10 +222,10 @@ namespace SplineTrajectory
             return mask;
         }
 
-        /** @brief Optimize only interior waypoints; durations and boundary derivatives stay fixed. */
+        /** @brief Select only interior waypoints as direct coordinates; auxiliary coordinates remain active. */
         static OptimizationMask interiorWaypoints(int segments)
         {
-            auto mask = allFixed(segments);
+            auto mask = none(segments);
             for (int i = 1; i < segments; ++i) mask.waypoints[i] = 1;
             return mask;
         }
@@ -291,7 +297,10 @@ namespace SplineTrajectory
         { detail::addWaypointGradient(waypoints, index, partial); }
     };
 
-    /** @brief Additive recorded-position and explicit trajectory-time partials, one sample per row. */
+    /** @brief Additive batch partials with one row per recorded quadrature point.
+     * @note sample() returns the whole batch cost; no quadrature weights are applied automatically.
+     *       Rows match SampleBuffer, including duplicated interior knots. Only position and explicit
+     *       trajectory-time partials are supported; recorded velocities are used for the time chain rule. */
     template<class Spline>
     struct SampleGradientView
     {
@@ -354,13 +363,16 @@ namespace SplineTrajectory
         private:
             template<class T> static auto result(int) -> decltype(std::declval<T &>().integral(std::declval<Args>()...));
             template<class> static MissingStage result(...);
+            template<class T> static auto object(int)
+                -> std::bool_constant<std::is_object_v<Plain<decltype(std::declval<T &>().integral)>>>;
+            template<class> static std::false_type object(...);
             template<class T> static auto named(int) -> decltype((void)std::declval<T &>().integral, std::true_type{});
             template<class T> static auto named(long) -> decltype((void)&T::integral, std::true_type{});
             template<class> static std::false_type named(...);
         public:
             using Result = decltype(result<Objective>(0));
             static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
-            static constexpr bool valid = isCostResult<Result>;
+            static constexpr bool valid = decltype(object<Objective>(0))::value && isCostResult<Result>;
         };
 
         template<class Objective, class... Args>
@@ -369,13 +381,16 @@ namespace SplineTrajectory
         private:
             template<class T> static auto result(int) -> decltype(std::declval<T &>().sample(std::declval<Args>()...));
             template<class> static MissingStage result(...);
+            template<class T> static auto object(int)
+                -> std::bool_constant<std::is_object_v<Plain<decltype(std::declval<T &>().sample)>>>;
+            template<class> static std::false_type object(...);
             template<class T> static auto named(int) -> decltype((void)std::declval<T &>().sample, std::true_type{});
             template<class T> static auto named(long) -> decltype((void)&T::sample, std::true_type{});
             template<class> static std::false_type named(...);
         public:
             using Result = decltype(result<Objective>(0));
             static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
-            static constexpr bool valid = isCostResult<Result>;
+            static constexpr bool valid = decltype(object<Objective>(0))::value && isCostResult<Result>;
         };
 
         template<class Objective, class... Args>
@@ -384,13 +399,16 @@ namespace SplineTrajectory
         private:
             template<class T> static auto result(int) -> decltype(std::declval<T &>().coefficient(std::declval<Args>()...));
             template<class> static MissingStage result(...);
+            template<class T> static auto object(int)
+                -> std::bool_constant<std::is_object_v<Plain<decltype(std::declval<T &>().coefficient)>>>;
+            template<class> static std::false_type object(...);
             template<class T> static auto named(int) -> decltype((void)std::declval<T &>().coefficient, std::true_type{});
             template<class T> static auto named(long) -> decltype((void)&T::coefficient, std::true_type{});
             template<class> static std::false_type named(...);
         public:
             using Result = decltype(result<Objective>(0));
             static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
-            static constexpr bool valid = isCostResult<Result>;
+            static constexpr bool valid = decltype(object<Objective>(0))::value && isCostResult<Result>;
         };
 
         template<class Objective, class... Args>
@@ -399,13 +417,16 @@ namespace SplineTrajectory
         private:
             template<class T> static auto result(int) -> decltype(std::declval<T &>().parameter(std::declval<Args>()...));
             template<class> static MissingStage result(...);
+            template<class T> static auto object(int)
+                -> std::bool_constant<std::is_object_v<Plain<decltype(std::declval<T &>().parameter)>>>;
+            template<class> static std::false_type object(...);
             template<class T> static auto named(int) -> decltype((void)std::declval<T &>().parameter, std::true_type{});
             template<class T> static auto named(long) -> decltype((void)&T::parameter, std::true_type{});
             template<class> static std::false_type named(...);
         public:
             using Result = decltype(result<Objective>(0));
             static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
-            static constexpr bool valid = isCostResult<Result>;
+            static constexpr bool valid = decltype(object<Objective>(0))::value && isCostResult<Result>;
         };
 
         template<class Objective, class... Args>
@@ -414,30 +435,21 @@ namespace SplineTrajectory
         private:
             template<class T> static auto result(int) -> decltype(std::declval<T &>().decision(std::declval<Args>()...));
             template<class> static MissingStage result(...);
+            template<class T> static auto object(int)
+                -> std::bool_constant<std::is_object_v<Plain<decltype(std::declval<T &>().decision)>>>;
+            template<class> static std::false_type object(...);
             template<class T> static auto named(int) -> decltype((void)std::declval<T &>().decision, std::true_type{});
             template<class T> static auto named(long) -> decltype((void)&T::decision, std::true_type{});
             template<class> static std::false_type named(...);
         public:
             using Result = decltype(result<Objective>(0));
             static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
-            static constexpr bool valid = isCostResult<Result>;
+            static constexpr bool valid = decltype(object<Objective>(0))::value && isCostResult<Result>;
         };
 
-        template<class T, class = void> struct HasIntegralObject : std::false_type {};
-        template<class T> struct HasIntegralObject<T, std::void_t<decltype(std::declval<T &>().integral)>> : std::true_type {};
-        template<class T, class = void> struct HasBeginEvaluation : std::false_type {};
-        template<class T> struct HasBeginEvaluation<T, std::void_t<decltype(std::declval<T &>().beginEvaluation())>> : std::true_type {};
-        template<class T, class = void> struct HasBeginIntegralEvaluation : std::false_type {};
-        template<class T> struct HasBeginIntegralEvaluation<T, std::void_t<decltype(std::declval<T &>().beginIntegralEvaluation())>> : std::true_type {};
         template<class T, class = void> struct IntegralDerivativeOrder : std::integral_constant<int, 4> {};
         template<class T> struct IntegralDerivativeOrder<T, std::void_t<decltype(T::kDerivativeOrder)>>
             : std::integral_constant<int, T::kDerivativeOrder> {};
-        template<class T, class = void> struct ObjectiveIntegralOrder : std::integral_constant<int, 4> {};
-        template<class T> struct ObjectiveIntegralOrder<T, std::void_t<decltype(T::kIntegralDerivativeOrder)>>
-            : std::integral_constant<int, T::kIntegralDerivativeOrder> {};
-        template<class T, class = void> struct IntegralOrder : ObjectiveIntegralOrder<T> {};
-        template<class T> struct IntegralOrder<T, std::void_t<decltype(std::declval<T &>().integral)>>
-            : IntegralDerivativeOrder<Plain<decltype(unwrap(std::declval<T &>().integral))>> {};
 
         /** @brief Read a total map's result without wrapping or copying it.
          * @param value Borrowed mapping result. @return The same value for immediate consumption. */
@@ -468,7 +480,11 @@ namespace SplineTrajectory
      * @tparam Spline Concrete minimum-derivative spline; dimension and degree are inferred.
      * @tparam Parameterization Owned maps, or an explicit reference_wrapper to longer-lived maps.
      * @note One instance per concurrent solve. No objective is retained between synchronous calls.
-     *       prepare(), assignment and movement invalidate all borrowed state views. */
+     *       prepare(), assignment and movement invalidate all borrowed state views.
+     *       Objective groups callable data members named integral, sample, coefficient, parameter or decision.
+     *       Each cost implements operator(); std::ref/std::cref explicitly borrow an existing cost object.
+     *       The integral cost declares kDerivativeOrder (default 4).
+     *       Objective itself has no stage methods or integration settings. */
     template<class Spline, class Parameterization = DefaultParameterization<Spline>>
     class SplineOptimizer
     {
@@ -496,10 +512,14 @@ namespace SplineTrajectory
             Eigen::Matrix<double, 1, Spline::kCoefficientCount> b_p;
             Vector p = Vector::Zero(), v = Vector::Zero();
         };
+        /** @brief Segment-major quadrature records: segment_count * (integration_steps + 1) points.
+         * @note Each segment includes both endpoints. For a cost that visits each knot once, skip
+         *       point.isSegmentStart() && !point.isTrajectoryStart(), keeping the original gradient rows.
+         *       Skipped rows remain zero; integral() still uses both records for quadrature. */
         using SampleBuffer = SplineVector<IntegralSample>;
 
     private:
-        template<class O> using IntegralStage = detail::IntegralStage<O, const IntegralPointInfo &, const SampleState<DIM> &, SampleGradient<DIM> &>;
+        template<class O> using IntegralStage = detail::IntegralStage<O, const IntegralPointInfo &, const IntegralState<DIM> &, IntegralGradient<DIM> &>;
         template<class O> using SampleStage = detail::SampleStage<O, const SampleBuffer &, SampleGradientView<Spline> &>;
         template<class O> using CoefficientStage = detail::CoefficientStage<O, const ParameterView<Spline> &, CoefficientGradientView<Spline> &>;
         template<class O> using ParameterStage = detail::ParameterStage<O, const ParameterView<Spline> &, ParameterGradientView<Spline> &>;
@@ -515,15 +535,15 @@ namespace SplineTrajectory
                           DecisionStage<O>::present || std::is_same_v<O, NoObjective>,
                           "Objective must declare a supported cost member, or explicitly use NoObjective");
             static_assert(!IntegralStage<O>::present || IntegralStage<O>::valid,
-                          "Objective.integral must return double or EvaluationResult and accept its stage arguments");
+                          "Objective.integral must be a callable data member returning double or EvaluationResult");
             static_assert(!SampleStage<O>::present || SampleStage<O>::valid,
-                          "Objective.sample must return double or EvaluationResult and accept its stage arguments");
+                          "Objective.sample must be a callable data member returning double or EvaluationResult");
             static_assert(!CoefficientStage<O>::present || CoefficientStage<O>::valid,
-                          "Objective.coefficient must return double or EvaluationResult and accept its stage arguments");
+                          "Objective.coefficient must be a callable data member returning double or EvaluationResult");
             static_assert(!ParameterStage<O>::present || ParameterStage<O>::valid,
-                          "Objective.parameter must return double or EvaluationResult and accept its stage arguments");
+                          "Objective.parameter must be a callable data member returning double or EvaluationResult");
             static_assert(!DecisionStage<O>::present || DecisionStage<O>::valid,
-                          "Objective.decision must return double or EvaluationResult and accept its stage arguments");
+                          "Objective.decision must be a callable data member returning double or EvaluationResult");
         }
 
         // Numeric kernel aliases are local; public dimensions come from Spline.
@@ -1137,25 +1157,18 @@ namespace SplineTrajectory
         EvaluationResult evaluateIntegral(Objective &objective, const Executor &executor, bool record_samples)
         {
             using O = detail::Plain<Objective>;
-            constexpr int order = detail::IntegralOrder<O>::value;
-            static_assert(order >= 0 && order <= 4, "Integral kDerivativeOrder must be between zero and four");
             EvaluationResult result{0.0, Status::success()};
-            if constexpr (IntegralStage<O>::valid && order >= 0 && order <= 4)
+            if constexpr (IntegralStage<O>::valid)
             {
-                if constexpr (detail::HasIntegralObject<O>::value)
+                auto &integral = detail::unwrap(objective.integral);
+                using Cost = detail::Plain<decltype(integral)>;
+                constexpr int order = detail::IntegralDerivativeOrder<Cost>::value;
+                static_assert(order >= 0 && order <= 4, "Integral kDerivativeOrder must be between zero and four");
+                if constexpr (order >= 0 && order <= 4)
                 {
-                    auto &integral = detail::unwrap(objective.integral);
-                    if constexpr (detail::HasBeginEvaluation<detail::Plain<decltype(integral)>>::value)
-                        integral.beginEvaluation();
+                    result = accumulateIntegralCost<order>(integral, record_samples, executor);
+                    buffers_.samples_valid = record_samples && result.status.ok();
                 }
-                else if constexpr (detail::HasBeginIntegralEvaluation<O>::value)
-                    objective.beginIntegralEvaluation();
-                auto integral = [&](const IntegralPointInfo &point, const SampleState<DIM> &state,
-                                    SampleGradient<DIM> &gradient) {
-                    return objective.integral(point, state, gradient);
-                };
-                result = accumulateIntegralCost<order>(integral, record_samples, executor);
-                buffers_.samples_valid = record_samples && result.status.ok();
             }
             return result;
         }
@@ -1374,7 +1387,7 @@ namespace SplineTrajectory
 
                     static_assert(derivative_order >= 0 && derivative_order <= 4,
                                   "Integral costs support derivative orders zero through four.");
-                    SampleState<DIM> sample_state;
+                    IntegralState<DIM> sample_state;
                     auto &p = sample_state.p; auto &v = sample_state.v; auto &a = sample_state.a;
                     auto &j = sample_state.j; auto &s = sample_state.s;
                     [[maybe_unused]] Vector c = Vector::Zero();
@@ -1388,7 +1401,7 @@ namespace SplineTrajectory
                     if constexpr (derivative_order >= 3) s = inverse_time4 * values.row(4).transpose();
                     if constexpr (derivative_order >= 4) c = inverse_time5 * values.row(5).transpose();
 
-                    SampleGradient<DIM> partials;
+                    IntegralGradient<DIM> partials;
                     auto &gp = partials.p; auto &gv = partials.v; auto &ga = partials.a;
                     auto &gj = partials.j; auto &gs = partials.s; auto &gt = partials.trajectory_time;
                     const IntegralPointInfo point{i, prepared_.num_segments, k, K,
