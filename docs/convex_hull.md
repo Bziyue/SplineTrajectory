@@ -51,7 +51,7 @@ const int corridor = piece.info().source_segment;
 // controls.row(local) is one control point; info also provides physical start_time/duration.
 ```
 
-`pieceInfo(i)`, `pieceControls(i)`, `pieces()` and `controls()` provide direct access.
+`pieceInfo(i)`, `pieceControls(i)`, `pieceInfos()` and `controls()` provide direct access.
 Piece views refer to the last update and remain valid until the workspace changes or is destroyed.
 
 | Form | Behavior |

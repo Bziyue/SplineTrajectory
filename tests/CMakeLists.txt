@@ -46,3 +46,8 @@ add_test(NAME readme_quickstart_zh COMMAND ${SPLINE_PYTHON_EXECUTABLE}
     ${CMAKE_CXX_COMPILER} ${SplineTrajectory_SOURCE_DIR}/include ${spline_eigen_include}
     ${SplineTrajectory_SOURCE_DIR}/README_zh.md)
 set_tests_properties(readme_quickstart_zh PROPERTIES LABELS "compile")
+add_test(NAME api_docs COMMAND ${SPLINE_PYTHON_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile/check_api_docs.py
+    ${CMAKE_CXX_COMPILER} ${SplineTrajectory_SOURCE_DIR}/include ${spline_eigen_include}
+    ${SplineTrajectory_SOURCE_DIR}/docs/api/index.html)
+set_tests_properties(api_docs PROPERTIES LABELS "compile;docs")

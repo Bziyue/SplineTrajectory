@@ -44,19 +44,19 @@
     return [...node.childNodes].map(child => localizedText(child, lang)).join('');
   }
 
-  const entries = [...document.querySelectorAll('[data-search-entry]')].map(row => {
-    const title = row.cells[0];
-    const section = row.closest('.subsection');
+  const entries = [...document.querySelectorAll('[data-search-entry]')].map(entry => {
+    const title = entry.matches('.api-entry') ? entry.querySelector('[data-entry-title]') : entry.cells[0];
+    const section = entry.closest('.subsection');
     const heading = section.querySelector('h3');
     return {
-      id: row.id,
+      id: entry.id,
       title: {en: localizedText(title, 'en'), zh: localizedText(title, 'zh')},
       context: {en: localizedText(heading, 'en'), zh: localizedText(heading, 'zh')},
-      search: (row.textContent + ' ' + heading.textContent).toLowerCase()
+      search: (entry.textContent + ' ' + heading.textContent).toLowerCase()
     };
   });
 
-  /** Filter semantic API rows; results link directly to the matching contract table. */
+  /** Search API entries and data tables, linking directly to the matching item. */
   function search() {
     const query = $('search-input').value.trim().toLowerCase();
     const panel = $('search-panel');
@@ -96,7 +96,7 @@
     if (!target) return;
     document.querySelectorAll('.search-hit').forEach(node => node.classList.remove('search-hit'));
     target.classList.add('search-hit');
-    requestAnimationFrame(() => target.scrollIntoView({block: 'center'}));
+    requestAnimationFrame(() => target.scrollIntoView({block: 'start'}));
     setTimeout(() => target.classList.remove('search-hit'), 2200);
   }
 

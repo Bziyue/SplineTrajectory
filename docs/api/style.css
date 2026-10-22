@@ -28,14 +28,14 @@ code { font: .88em/1.6 var(--mono); color: #284d89; overflow-wrap: anywhere; }
 p code, td code { background: #f0f4fa; padding: 2px 4px; border-radius: 3px; }
 pre { font: 12px/1.8 var(--mono); overflow: auto; margin: 18px 0; tab-size: 4; }
 pre code { font: inherit; color: inherit; overflow-wrap: normal; }
-h1, h2, h3, p { margin-top: 0; }
+h1, h2, h3, h4, p { margin-top: 0; }
 h1 { font-size: 30px; font-weight: 650; line-height: 1.4; margin: 0; letter-spacing: -.5px; }
 h2 { font-size: 25px; font-weight: 650; line-height: 1.5; margin-bottom: 10px; letter-spacing: -.3px; }
 h3 { font-size: 18px; font-weight: 650; line-height: 1.5; margin-bottom: 16px; }
 p { margin-bottom: 16px; }
 strong { font-weight: 650; }
 .anchor { font: .75em var(--mono); opacity: 0; margin-left: 10px; }
-h2:hover .anchor, h3:hover .anchor, .anchor:focus-visible { opacity: 1; }
+h2:hover .anchor, h3:hover .anchor, h4:hover .anchor, .anchor:focus-visible { opacity: 1; }
 .topbar {
   position: sticky; top: 0; z-index: 20; height: var(--top); display: flex;
   align-items: center; gap: 28px; padding: 0 28px; border-bottom: 1px solid var(--line);
@@ -83,6 +83,19 @@ main { min-width: 0; padding: 36px clamp(25px, 4.1vw, 68px) 0; max-width: 1230px
 .header-ref { color: var(--muted); margin: 0 0 20px; font-size: 12px; }
 .header-ref code { background: none; padding: 0; color: var(--muted); }
 .signature { padding: 17px 19px; border: 1px solid var(--line); border-left: 3px solid #a1b7dc; border-radius: 5px; background: #f6f8fb; color: #2b405b; }
+.api-entry { padding: 22px 0; border-top: 1px solid var(--line); scroll-margin-top: 12px; }
+.api-entry h4 { margin-bottom: 8px; font-size: 16px; line-height: 1.6; font-weight: 650; }
+.api-entry h4 code { font-size: 14px; }
+.api-description { margin-bottom: 12px; }
+.api-entry .signature { margin: 12px 0; padding: 12px 16px; }
+.api-parameters { display: grid; grid-template-columns: minmax(100px, max-content) minmax(0, 1fr); gap: 7px 22px; margin: 14px 0; font-size: 13px; }
+.api-parameters dt { max-width: 240px; }
+.api-parameters dd { margin: 0; }
+.api-parameters code { background: #f0f4fa; padding: 2px 4px; border-radius: 3px; }
+.api-result { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0 0; font-size: 13px; }
+.api-result > strong { color: var(--muted); font-weight: 500; }
+.api-related { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
+.api-entry:target, .api-entry.search-hit { background: #fff8e8; }
 .table-scroll { overflow-x: auto; margin: 18px 0; border: 1px solid var(--line); border-radius: 6px; }
 table { border-collapse: collapse; width: 100%; font-size: 12px; line-height: 1.8; text-align: left; }
 th, td { border-bottom: 1px solid var(--line); padding: 11px 13px; vertical-align: top; }
@@ -186,6 +199,11 @@ footer { border-top: 1px solid var(--line); padding: 25px 0 34px; display: flex;
   td { min-width: 100px; }
   td:last-child { min-width: 190px; }
   .signature, .example-code { font-size: 11px; padding: 14px; }
+  .api-entry { padding: 18px 0; }
+  .api-entry h4 code { font-size: 13px; }
+  .api-parameters { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .api-parameters dt { margin-top: 6px; max-width: none; }
+  .api-parameters dd { margin-bottom: 5px; }
   .example-tag { display: none; }
   .equation { font-size: 18px; }
   .visual { padding: 12px; }
