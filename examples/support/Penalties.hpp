@@ -45,12 +45,12 @@ struct DynamicsCost
     double max_speed = 2.5;
     double max_acceleration = 4.0;
     double weight = 100.0;
-    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &,
+    double operator()(const SplineTrajectory::IntegralPointInfo &,
                       const SplineTrajectory::SampleState<2> &state,
                       SplineTrajectory::SampleGradient<2> &gradient) const
     {
-        return {normPenalty(state.v, max_speed, weight, gradient.v)
-             + normPenalty(state.a, max_acceleration, weight, gradient.a), SplineTrajectory::Status::success()};
+        return normPenalty(state.v, max_speed, weight, gradient.v)
+             + normPenalty(state.a, max_acceleration, weight, gradient.a);
     }
 };
 }

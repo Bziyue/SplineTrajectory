@@ -50,6 +50,13 @@ struct TimeCost
         g.setConstant(0.2);
         return {0.2 * std::accumulate(times.begin(), times.end(), 0.0), SplineTrajectory::Status::success()};
     }
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline> &state,
+        SplineTrajectory::ParameterGradientView<Spline> &gradient) const
+    {
+        gradient.spline.durations.array() += 0.2;
+        return {0.2 * std::accumulate(state.durations.begin(), state.durations.end(), 0.0), SplineTrajectory::Status::success()};
+    }
+
 };
 struct IntegralCost
 {
@@ -102,7 +109,8 @@ public:
         options.integration_steps = steps;
         options.energy_weight = energy_weight;
         options.record_samples = BENCH_RECORD_SAMPLES;
-        auto status = optimizer.prepare(problem, options);
+        struct Objective { TimeCost &parameter; IntegralCost &integral; } objective{time_cost, integral_cost};
+        auto status = optimizer.prepare(problem, options, objective);
         if (!status) throw std::runtime_error("benchmark preparation failed");
 #elif BENCH_BACKEND == 1
         Eigen::Matrix<double, 3, (BENCH_DEGREE + 1)/2> head, tail;
@@ -120,7 +128,7 @@ public:
     Eigen::VectorXd initialGuess() const
     {
         Eigen::VectorXd x(pieces + 3*(pieces-1));
-        for (int i=0;i<pieces;++i) x(i)=SplineTrajectory::QuadInvTimeMap{}.toTau(times[i]);
+        for (int i=0;i<pieces;++i) x(i)=SplineTrajectory::QuadInvTimeMap{}.inverse(times[i]);
         for (int i=1;i<pieces;++i) x.segment<3>(pieces+3*(i-1))=points.row(i).transpose();
         return x;
     }
@@ -128,11 +136,11 @@ public:
     double evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &gradient)
     {
 #if BENCH_BACKEND == 0
-        struct Objective { TimeCost &duration; IntegralCost &integral; } objective{time_cost, integral_cost};
+        struct Objective { TimeCost &parameter; IntegralCost &integral; } objective{time_cost, integral_cost};
         return optimizer.evaluate(x, gradient, objective).cost;
 #else
         SplineTrajectory::QuadInvTimeMap time_map;
-        for (int i = 0; i < pieces; ++i) times[i] = time_map.toTime(x(i));
+        for (int i = 0; i < pieces; ++i) times[i] = time_map.forward(x(i));
         for (int i = 1; i < pieces; ++i)
         {
             points.row(i) = x.segment<3>(pieces + 3*(i-1)).transpose();

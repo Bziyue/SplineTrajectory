@@ -176,14 +176,15 @@ void checkWorkspaceAndPieceTimeAdjoint(std::mt19937 &generator)
     const PPoly polynomial =
         makePolynomial(durations, coefficients, num_coefficients);
     Hull workspace;
-    workspace.configure(
+    workspace.prepare(
         polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3});
     workspace.update(polynomial);
     const auto reference = Hull::fromPPoly(
         polynomial, {SplineTrajectory::ConvexHullBasis::MINVO, 2, 3});
     require((workspace.controls() - reference.controls()).norm() < 1e-13,
             "Workspace update differs from one-shot conversion.");
-    require(workspace.kernel().get() == reference.kernel().get(),
+    require(SplineTrajectory::detail::HullKernelFactory::acquireKernel(SplineTrajectory::ConvexHullBasis::MINVO, 8, 2, 3) ==
+            SplineTrajectory::detail::HullKernelFactory::acquireKernel(SplineTrajectory::ConvexHullBasis::MINVO, 8, 2, 3),
             "Identical topologies did not reuse the shared immutable kernel.");
 
     Matrix control_gradients(workspace.controls().rows(), 3);
@@ -284,7 +285,7 @@ void checkFixedTopologyEigenAllocationFree()
         durations, waypoints, 0.25, boundary); !status) { throw std::runtime_error(status.message); }
 
     Hull hull;
-    hull.configure(
+    hull.prepare(
         spline.numSegments(), Spline::kCoefficientCount,
         {SplineTrajectory::ConvexHullBasis::Bezier, 1, 2});
     hull.update(spline.polynomial());

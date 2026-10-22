@@ -62,7 +62,7 @@ int main(int argc, char **argv)
         auto backward = [&] {
 #ifdef BENCH_OLD
             spline.propagateGrad(gc, gt, gradient);
-            kernel_checksum += gradient.times.sum();
+            kernel_checksum += gradient.trajectory_times.sum();
 #else
             spline.backward(gc, gt, gradient);
             kernel_checksum += gradient.durations.sum();
@@ -72,7 +72,7 @@ int main(int argc, char **argv)
         const double build = measure(repeats, [&] { if (const auto status = spline.update(durations, points, 0.0); !status) { throw std::runtime_error(status.message); } });
         const double reverse = measure(repeats, backward);
 #ifdef BENCH_OLD
-        const double energy = spline.getEnergy(), checksum = gradient.times.sum() + gradient.inner_points.sum();
+        const double energy = spline.getEnergy(), checksum = gradient.trajectory_times.sum() + gradient.inner_points.sum();
 #else
         const double energy = spline.energy(), checksum = gradient.durations.sum() + gradient.inner_points.sum();
 #endif

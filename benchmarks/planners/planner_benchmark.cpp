@@ -186,7 +186,7 @@ Solution solve(const pb::ProblemData &p,const pb::Geometry &geometry,const Eigen
     }
     double clearance=std::numeric_limits<double>::infinity(),corridor=0;
     for(int piece=0;piece<p.segments;++piece) {
-        const auto segment=result.poly.at(piece);
+        const auto segment=result.poly[piece];
         for(int k=0;k<=100;++k) {
             const auto position=segment.evaluateLocal(segment.duration()*k/100.0);
             clearance=std::min(clearance,pb::distance(p,position));

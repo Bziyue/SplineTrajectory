@@ -80,7 +80,7 @@ struct SpatialMap {
     const ProblemData *problem;
     const Geometry *geometry;
     int dimension(int) const { return problem->usesPolytopeMap()?8:3; }
-    SplineTrajectory::StatusOr<Vector> toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x,int index) const {
+    SplineTrajectory::StatusOr<Vector> forward(const Eigen::Ref<const Eigen::VectorXd> &x,int index) const {
         if(!problem->usesPolytopeMap()) return Vector(x);
         Eigen::Matrix<double,8,1> unit=x;
         unit.normalize();
@@ -90,7 +90,7 @@ struct SpatialMap {
             return SplineTrajectory::Status{SplineTrajectory::ErrorCode::NumericalFailure, "Nonfinite spatial map output", index};
         return result;
     }
-    SplineTrajectory::StatusOr<Eigen::VectorXd> toUnconstrained(const Vector &point,int index) const {
+    SplineTrajectory::StatusOr<Eigen::VectorXd> inverse(const Vector &point,int index) const {
         if(!problem->usesPolytopeMap()) return Eigen::VectorXd(point);
         const auto &box=problem->map_boxes[index-1];
         const Vector ratio=((point-box.head<3>()).array()/box.tail<3>().array()+1)*0.5;
@@ -103,7 +103,7 @@ struct SpatialMap {
         }
         return Eigen::VectorXd(result);
     }
-    SplineTrajectory::Status backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x,const Vector &gradient,
+    SplineTrajectory::Status backward(const Eigen::Ref<const Eigen::VectorXd> &x,const Vector &gradient,
                       int index,Eigen::Ref<Eigen::VectorXd> output) const {
         if(!problem->usesPolytopeMap()) { output=gradient; return SplineTrajectory::Status::success(); }
         const double inverse=1/x.norm();
@@ -121,7 +121,12 @@ using Optimizer = SplineTrajectory::SplineOptimizer<Spline,Parameterization>;
 
 struct DurationCost {
     double weight;
-    SplineTrajectory::EvaluationResult operator()(const std::vector<double> &times,Eigen::Ref<Eigen::VectorXd> gradient) const {
+    template<class Curve>
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Curve> &state,
+        SplineTrajectory::ParameterGradientView<Curve> &output) const
+    {
+        const auto &times = state.durations;
+        auto &gradient = output.spline.durations;
         gradient.array()+=weight;
         return {weight*std::accumulate(times.begin(),times.end(),0.0), SplineTrajectory::Status::success()};
     }
@@ -230,12 +235,12 @@ struct IntegralCost {
     }
 };
 
-inline SplineTrajectory::SplineProblem<Spline> splineProblem(const ProblemData &p) {
-    SplineTrajectory::SplineProblem<Spline> problem;
+inline SplineTrajectory::SplineProblem<Spline::kDimension> splineProblem(const ProblemData &p) {
+    SplineTrajectory::SplineProblem<Spline::kDimension> problem;
     problem.durations=p.durations; problem.waypoints=p.waypoints;
-    problem.boundary.start_velocity=p.start_derivatives.col(0); problem.boundary.end_velocity=p.end_derivatives.col(0);
-    problem.boundary.start_acceleration=p.start_derivatives.col(1); problem.boundary.end_acceleration=p.end_derivatives.col(1);
-    problem.boundary.start_jerk=p.start_derivatives.col(2); problem.boundary.end_jerk=p.end_derivatives.col(2);
+    problem.boundary.start.v=p.start_derivatives.col(0); problem.boundary.end.v=p.end_derivatives.col(0);
+    problem.boundary.start.a=p.start_derivatives.col(1); problem.boundary.end.a=p.end_derivatives.col(1);
+    problem.boundary.start.j=p.start_derivatives.col(2); problem.boundary.end.j=p.end_derivatives.col(2);
     return problem;
 }
 }

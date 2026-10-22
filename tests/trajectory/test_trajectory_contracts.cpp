@@ -57,7 +57,7 @@ void checkPolynomial()
             "Generated samples include endpoints");
     Poly::CoefficientMatrix output(times.size(), 2);
     Eigen::internal::set_is_malloc_allowed(false);
-    poly.evaluateInto(times, output);
+    poly.evaluate(times, output);
     auto sampler = poly.makeSampler<3>();
     require(sampler.evaluate(3.0).isApprox(Eigen::Vector2d(3.0, 4.0)), "No warm-up sampling");
     Eigen::internal::set_is_malloc_allowed(true);
@@ -92,10 +92,11 @@ void checkHull()
     auto p3 = Poly3::zero({0.0, 1.0}, 4);
     ConvexHullWorkspace<1> h1;
     ConvexHullWorkspace<3> h3;
-    require(!h1.isConfigured() && !h1.isValid(), "Default hull state");
-    h1.configure(p1); h3.configure(p3);
-    require(h1.isConfigured() && !h1.isValid() && h1.matches(p1, {}), "Configured hull state");
-    require(h1.kernel() == h3.kernel(), "Identical kernels must be shared across spatial dimensions");
+    require(!h1.isPrepared() && !h1.isValid(), "Default hull state");
+    h1.prepare(p1); h3.prepare(p3);
+    require(h1.isPrepared() && !h1.isValid() && h1.matches(p1, {}), "Configured hull state");
+    require(detail::HullKernelFactory::acquireKernel(ConvexHullBasis::Bezier, 4, 0, 0) ==
+            detail::HullKernelFactory::acquireKernel(ConvexHullBasis::Bezier, 4, 0, 0), "Identical kernels must be shared across spatial dimensions");
     h1.update(p1);
     require(h1.isValid(), "Updated hull state");
     auto moved = std::move(h1);

@@ -143,36 +143,30 @@ namespace SplineTrajectory
     template <typename T>
     using SplineVector = std::vector<T, Eigen::aligned_allocator<T>>;
 
-    /** @brief Physical boundary derivatives in caller-defined coordinates; positions are waypoints. */
+    /** @brief Physical derivatives at one endpoint; positions belong to the waypoint matrix. */
+    template <int DIM>
+    struct EndpointDerivatives
+    {
+        using Vector = Eigen::Matrix<double, DIM, 1>;
+        Vector v = Vector::Zero(), a = Vector::Zero(), j = Vector::Zero();
+    };
+
     template <int DIM>
     struct BoundaryConditions
     {
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
         using Vector = Eigen::Matrix<double, DIM, 1>;
-
-        Vector start_velocity = Vector::Zero();
-        Vector start_acceleration = Vector::Zero();
-        Vector start_jerk = Vector::Zero();
-
-        Vector end_velocity = Vector::Zero();
-        Vector end_acceleration = Vector::Zero();
-        Vector end_jerk = Vector::Zero();
+        EndpointDerivatives<DIM> start, end;
 
         BoundaryConditions() = default;
-
         BoundaryConditions(const Vector &start_vel, const Vector &end_vel)
-            : start_velocity(start_vel), end_velocity(end_vel) {}
-
+            : start{start_vel}, end{end_vel} {}
         BoundaryConditions(const Vector &start_vel, const Vector &start_acc,
                            const Vector &end_vel, const Vector &end_acc)
-            : start_velocity(start_vel), start_acceleration(start_acc),
-              end_velocity(end_vel), end_acceleration(end_acc) {}
-
-        BoundaryConditions(const Vector &start_vel, const Vector &start_acc, const Vector &start_jerk_value,
-                           const Vector &end_vel, const Vector &end_acc, const Vector &end_jerk_value)
-            : start_velocity(start_vel), start_acceleration(start_acc), start_jerk(start_jerk_value),
-              end_velocity(end_vel), end_acceleration(end_acc), end_jerk(end_jerk_value) {}
+            : start{start_vel, start_acc}, end{end_vel, end_acc} {}
+        BoundaryConditions(const Vector &start_vel, const Vector &start_acc, const Vector &start_jerk,
+                           const Vector &end_vel, const Vector &end_acc, const Vector &end_jerk)
+            : start{start_vel, start_acc, start_jerk}, end{end_vel, end_acc, end_jerk} {}
     };
 
     enum class Deriv : int
@@ -184,6 +178,21 @@ namespace SplineTrajectory
         Snap = 4,
         Crackle = 5,
         Pop = 6
+    };
+
+    /** @brief Physical derivative order, accepting named and general nonnegative orders. */
+    class DerivativeOrder
+    {
+        int value_ = 0;
+    public:
+        constexpr DerivativeOrder() noexcept = default;
+        constexpr DerivativeOrder(int value) noexcept : value_(value) {}
+        constexpr DerivativeOrder(Deriv value) noexcept : value_(static_cast<int>(value)) {}
+        constexpr int value() const noexcept { return value_; }
+        friend constexpr bool operator==(DerivativeOrder left, DerivativeOrder right) noexcept
+        { return left.value_ == right.value_; }
+        friend constexpr bool operator!=(DerivativeOrder left, DerivativeOrder right) noexcept
+        { return !(left == right); }
     };
 
     namespace detail
@@ -219,12 +228,13 @@ namespace SplineTrajectory
         using RowVector = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+        using PointMatrix = CoefficientMatrix;
         /** @brief Owned single-time values indexed by physical derivative order, including position. */
         template <int MAX_DERIVATIVE>
         using Derivatives = std::array<Vector, MAX_DERIVATIVE + 1>;
         /** @brief Owned batch matrices indexed by derivative order, with one row per query time. */
         template <int MAX_DERIVATIVE>
-        using DerivativeBatch = std::array<CoefficientMatrix, MAX_DERIVATIVE + 1>;
+        using DerivativeBatch = std::array<PointMatrix, MAX_DERIVATIVE + 1>;
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
     private:
@@ -318,21 +328,6 @@ namespace SplineTrajectory
             for (int d = 0; d <= MAX_DERIVATIVE; ++d)
                 values[d] = evaluateSegmentHorner(segment, local_time, d);
             return values;
-        }
-
-        /** @brief Allocate one result matrix per requested derivative.
-         * @tparam MAX_DERIVATIVE Nonnegative highest physical derivative order.
-         * @param times Query times on the source axis; only their count determines output shape.
-         * @return Owned, uninitialized matrices with times.size() rows and DIM columns.
-         * @note Uses no polynomial or sampler state; independent calls are reentrant. */
-        template <int MAX_DERIVATIVE>
-        static DerivativeBatch<MAX_DERIVATIVE> makeDerivativeBatch(const std::vector<double> &times)
-        {
-            static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            DerivativeBatch<MAX_DERIVATIVE> output;
-            for (auto &matrix : output)
-                matrix.resize(static_cast<Eigen::Index>(times.size()), DIM);
-            return output;
         }
 
         /** @brief Evaluate a batch element using the previous element's piece as a lookup hint.
@@ -439,23 +434,15 @@ namespace SplineTrajectory
 
             /** @brief Evaluate one physical derivative using this sampler's cursor and cache.
              * @param t Time on the source axis, in seconds; outside times extrapolate.
-             * @param derivative_order Requested order in [0, MAX_DERIVATIVE].
+             * @param order Requested order in [0, MAX_DERIVATIVE].
              * @return Owned vector; derivatives above the source degree are zero.
              * @note Interior knots use the right piece. Requires exclusive access to this
              *       sampler and an unmodified source; no allocation occurs. */
-            Vector evaluate(double t, int derivative_order)
+            Vector evaluate(double t, DerivativeOrder order = Deriv::Pos)
             {
+                const int derivative_order = order.value();
                 const double local_time = prepareQuery(t);
                 return evaluateCached(local_time, derivative_order);
-            }
-
-            /** @brief Evaluate a named derivative, defaulting to position.
-             * @param t Time on the source axis, in seconds.
-             * @param type Supported physical derivative; defaults to position.
-             * @return Owned vector with evaluate(t, int)'s value and lifetime contract. */
-            Vector evaluate(double t, Deriv type = Deriv::Pos)
-            {
-                return evaluate(t, static_cast<int>(type));
             }
 
             /** @brief Evaluate physical derivatives 0..MAX_DERIVATIVE with one piece lookup.
@@ -472,15 +459,25 @@ namespace SplineTrajectory
                 return values;
             }
 
+            /** @brief Overwrite an owning batch matrix, resizing only when its shape changes.
+             * @note Matching storage is reused; values and cursor behavior match the Ref overload. */
+            void evaluate(const std::vector<double> &times, PointMatrix &output,
+                          DerivativeOrder order = Deriv::Pos)
+            {
+                output.resize(static_cast<Eigen::Index>(times.size()), DIM);
+                evaluate(times, Eigen::Ref<PointMatrix>(output), order);
+            }
+
             /** @brief Write one derivative for a batch while retaining the sampler's cursor.
              * @param times Query times on the source axis, in seconds, in any order.
-             * @param[out] output Caller-owned matrix with times.size() rows and DIM columns.
-             * @param derivative_order Supported physical derivative order; defaults to position.
+             * @param[out] output Pre-sized view with times.size() rows and DIM columns.
+             * @param order Supported physical derivative order; defaults to position.
              * @note No allocation or source mutation occurs. Per-query values follow evaluate();
              *       requires exclusive sampler/output access. Cursor state survives this call. */
-            void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output,
-                                int derivative_order = 0)
+            void evaluate(const std::vector<double> &times, Eigen::Ref<PointMatrix> output,
+                          DerivativeOrder order = Deriv::Pos)
             {
+                const int derivative_order = order.value();
                 if (derivative_order >= source_->num_coeffs_)
                 {
                     output.setZero();
@@ -493,44 +490,28 @@ namespace SplineTrajectory
                 }
             }
 
-            /** @brief Write a named derivative using the same batch contract as the integer overload.
-             * @param times Query times on the source axis, in seconds.
-             * @param[out] output Pre-sized caller-owned result matrix; storage is reused.
-             * @param type Supported physical derivative; the caller guarantees the order is supported. */
-            void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output, Deriv type)
-            {
-                return evaluateInto(times, output, static_cast<int>(type));
-            }
-
             /** @brief Allocate a batch result and evaluate one supported derivative into it.
              * @param times Query times on the source axis, in seconds, in any order.
-             * @param derivative_order Requested order in [0, MAX_DERIVATIVE].
+             * @param order Requested order in [0, MAX_DERIVATIVE].
              * @return Owning matrix with one row per time; values follow evaluate().
              * @note Updates this sampler's cursor/cache while leaving its source unmodified. */
-            CoefficientMatrix evaluate(const std::vector<double> &times, int derivative_order)
+            PointMatrix evaluate(const std::vector<double> &times, DerivativeOrder order = Deriv::Pos)
             {
-                CoefficientMatrix output(static_cast<Eigen::Index>(times.size()), DIM);
-                evaluateInto(times, output, derivative_order);
+                PointMatrix output;
+                evaluate(times, output, order);
                 return output;
-            }
-
-            /** @brief Allocate a batch for a named derivative, defaulting to position.
-             * @param times Query times on the source axis, in seconds.
-             * @param type Supported physical derivative; defaults to position.
-             * @return Owning result matrix with the integer overload's value and lifetime contract. */
-            CoefficientMatrix evaluate(const std::vector<double> &times, Deriv type = Deriv::Pos)
-            {
-                return evaluate(times, static_cast<int>(type));
             }
 
             /** @brief Write every supported derivative for a batch, locating each time once.
              * @param times Query times on the source axis, in seconds, in any order.
-             * @param[out] output Matrices indexed by derivative order; each must have times.size()
+             * @param[out] output Owning matrices indexed by derivative order; resized to times.size()
              *        rows and DIM columns. Matrices must not alias source coefficient storage.
-             * @note No allocation occurs. Per-query values follow evaluateDerivatives(); only
+             * @note Matching storage is reused. Per-query values follow evaluateDerivatives(); only
              *       this sampler's cursor/cache and the caller's output change. */
-            void evaluateDerivativesInto(const std::vector<double> &times, Batch &output)
+            void evaluateDerivatives(const std::vector<double> &times, Batch &output)
             {
+                for (auto &matrix : output)
+                    matrix.resize(static_cast<Eigen::Index>(times.size()), DIM);
                 for (std::size_t i = 0; i < times.size(); ++i)
                 {
                     const double local_time = prepareQuery(times[i]);
@@ -542,11 +523,11 @@ namespace SplineTrajectory
             /** @brief Allocate a batch of every supported physical derivative.
              * @param times Query times on the source axis, in seconds, in any order.
              * @return Owning matrices indexed by derivative order, with one row per time.
-             * @note Delegates to evaluateDerivativesInto(); the sampler's cursor is retained. */
+             * @note Delegates to evaluateDerivatives(); the sampler's cursor is retained. */
             Batch evaluateDerivatives(const std::vector<double> &times)
             {
-                Batch output = makeDerivativeBatch<MAX_DERIVATIVE>(times);
-                evaluateDerivativesInto(times, output);
+                Batch output;
+                evaluateDerivatives(times, output);
                 return output;
             }
         };
@@ -587,22 +568,15 @@ namespace SplineTrajectory
 
             int index() const { return idx_; }
 
-            /** @brief Evaluate in seconds relative to this piece's start; extrapolation is allowed.
-             * @param t Local physical seconds. @param type Requested physical derivative.
-             * @return Derivative; derivatives above degree are zero. */
-            Vector evaluateLocal(double t, Deriv type = Deriv::Pos) const
-            {
-                return evaluateLocal(t, static_cast<int>(type));
-            }
-
             /** @brief Evaluate a derivative on this borrowed piece without locating a segment.
              * @param t Local physical seconds from this piece's start; extrapolation is allowed.
-             * @param derivative_order Nonnegative physical derivative order.
+             * @param order Nonnegative physical derivative order.
              * @return Owned vector; the view requires a valid, unchanged source.
              * @pre The source remains alive and unchanged; arithmetic is representable.
              * @note Const queries are reentrant and do not allocate. */
-            Vector evaluateLocal(double t, int derivative_order) const
+            Vector evaluateLocal(double t, DerivativeOrder order = Deriv::Pos) const
             {
+                const int derivative_order = order.value();
                 return parent_->evaluateSegmentHorner(idx_, t, derivative_order);
             }
 
@@ -695,6 +669,15 @@ namespace SplineTrajectory
             return result;
         }
 
+        /** @brief Make an independent owning copy across coefficient capacities.
+         * @pre A valid source fits this polynomial's capacity. An invalid source copies as empty. */
+        template<int SourceCapacity>
+        static PPolyND copyOf(const PPolyND<DIM, SourceCapacity> &source)
+        {
+            if (!source.isValid()) return {};
+            return create(source.breakpoints(), source.coefficients(), source.coefficientCount());
+        }
+
         PPolyND(const PPolyND &) = default;
         PPolyND &operator=(const PPolyND &) = default;
         PPolyND(PPolyND &&other) { *this = std::move(other); }
@@ -730,34 +713,17 @@ namespace SplineTrajectory
         }
 
         Segment operator[](int) const && = delete;
-        Segment at(int) const && = delete;
-        /** @brief Borrow a segment; source mutation invalidates the returned view.
-         * @param idx Valid index in [0, numSegments()); not checked.
-         * @return Successful borrowed segment. The source must outlive the view. */
-        Segment at(int idx) const &
-        {
-            return Segment(this, idx);
-        }
-
         /** @brief Query the trajectory time axis in seconds, extrapolating outside its domain.
          * @param t Physical query time in seconds on the trajectory axis.
-         * @param derivative_order Nonnegative physical derivative order.
+         * @param order Nonnegative physical derivative order.
          * @return Owned physical derivative; derivatives above degree are zero.
          * @pre The polynomial is initialized and query inputs satisfy the caller contract. */
-        Vector evaluate(double t, int derivative_order) const
+        Vector evaluate(double t, DerivativeOrder order = Deriv::Pos) const
         {
+            const int derivative_order = order.value();
             assert(is_initialized_);
             int segment = -1;
             return evaluateWithHint(t, derivative_order, segment);
-        }
-
-        /** @brief Evaluate a named physical derivative, defaulting to position.
-         * @param t Time on the trajectory axis, in seconds; outside times extrapolate.
-         * @param type Physical derivative; defaults to position.
-         * @return Owned vector with the integer overload's value and lifetime contract; no shared writes. */
-        Vector evaluate(double t, Deriv type = Deriv::Pos) const
-        {
-            return evaluate(t, static_cast<int>(type));
         }
 
         /** @brief Evaluate derivatives 0..MAX_DERIVATIVE with one segment lookup and no shared writes.
@@ -775,18 +741,28 @@ namespace SplineTrajectory
             return values;
         }
 
-        /** @brief Evaluate one derivative into caller-owned rows without allocating.
+        /** @brief Overwrite an owning batch matrix, resizing only when its shape changes.
+         * @note Matching storage is reused; values and source preconditions match the Ref overload. */
+        void evaluate(const std::vector<double> &times, PointMatrix &output,
+                      DerivativeOrder order = Deriv::Pos) const
+        {
+            output.resize(static_cast<Eigen::Index>(times.size()), DIM);
+            evaluate(times, Eigen::Ref<PointMatrix>(output), order);
+        }
+
+        /** @brief Evaluate one derivative into pre-sized rows without allocating.
          * @param times Query times on the trajectory axis.
-         * @param[out] output Matrix with times.size() rows and DIM columns.
-         * @param derivative_order Nonnegative physical derivative order.
+         * @param[out] output View with times.size() rows and DIM columns; must not alias source storage.
+         * @param order Nonnegative physical derivative order.
          * @pre The polynomial is initialized; inputs and pre-sized outputs satisfy the caller contract.
          * @note Query order is unrestricted; no order scan or input reordering occurs. Each
          *       query checks the current and next piece before falling back to a regular lookup.
          *       The cursor is local to this call and never stored in the polynomial.
          *       Times must be finite; values follow the single-query evaluate() contract. */
-        void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output,
-                            int derivative_order = 0) const
+        void evaluate(const std::vector<double> &times, Eigen::Ref<PointMatrix> output,
+                      DerivativeOrder order = Deriv::Pos) const
         {
+            const int derivative_order = order.value();
             assert(is_initialized_);
             if (derivative_order >= num_coeffs_)
             {
@@ -801,53 +777,36 @@ namespace SplineTrajectory
             }
         }
 
-        /** @brief Write a named derivative using the same batch contract as the integer overload.
-         * @param times Query times on the trajectory axis, in seconds.
-         * @param[out] output Pre-sized caller-owned result matrix; storage is reused.
-         * @param type Physical derivative; order and output shape are caller preconditions.
-         * @pre The polynomial is initialized; inputs and pre-sized outputs satisfy the caller contract. */
-        void evaluateInto(const std::vector<double> &times, Eigen::Ref<CoefficientMatrix> output, Deriv type) const
-        {
-            return evaluateInto(times, output, static_cast<int>(type));
-        }
-
         /** @brief Allocate and evaluate one physical derivative for a batch.
          * @param times Query times on the trajectory axis, in seconds, in any order.
-         * @param derivative_order Nonnegative physical derivative order.
+         * @param order Nonnegative physical derivative order.
          * @return Owning matrix with one row per query time and DIM columns.
-         * @note Delegates to evaluateInto(); no query state is retained in the polynomial. */
-        CoefficientMatrix evaluate(const std::vector<double> &times, int derivative_order) const
+         * @note Delegates to evaluate(); no query state is retained in the polynomial. */
+        PointMatrix evaluate(const std::vector<double> &times, DerivativeOrder order = Deriv::Pos) const
         {
-            CoefficientMatrix output(static_cast<Eigen::Index>(times.size()), DIM);
-            evaluateInto(times, output, derivative_order);
+            PointMatrix output;
+            evaluate(times, output, order);
             return output;
-        }
-
-        /** @brief Allocate a batch for a named derivative, defaulting to position.
-         * @param times Query times on the trajectory axis, in seconds.
-         * @param type Physical derivative; defaults to position.
-         * @return Owning result matrix with the integer overload's value and lifetime contract. */
-        CoefficientMatrix evaluate(const std::vector<double> &times, Deriv type = Deriv::Pos) const
-        {
-            return evaluate(times, static_cast<int>(type));
         }
 
         /** @brief Write physical derivatives 0..MAX_DERIVATIVE for each time with one lookup.
          * @tparam MAX_DERIVATIVE Nonnegative highest requested physical derivative order.
          * @param times Query times on the trajectory axis, in seconds, in any order.
-         * @param[out] output Matrices indexed by derivative order; each must have times.size()
+         * @param[out] output Owning matrices indexed by derivative order; resized to times.size()
          *        rows and DIM columns. Output must not alias source coefficient storage.
-         * @pre The polynomial is initialized; inputs and pre-sized outputs satisfy the caller contract.
-         * @note No allocation, order scan or source mutation occurs. A call-local cursor checks
+         * @pre The polynomial is initialized and query inputs satisfy the caller contract.
+         * @note Matching storage is reused; no order scan or source mutation occurs. A call-local cursor checks
          *       the current and next piece before a regular lookup, for queries in any order.
          *       Requires an initialized source; above-degree derivatives return zero, and outside
          *       queries extrapolate. Independent calls with separate outputs are reentrant. */
         template <int MAX_DERIVATIVE>
-        void evaluateDerivativesInto(const std::vector<double> &times,
-                                       DerivativeBatch<MAX_DERIVATIVE> &output) const
+        void evaluateDerivatives(const std::vector<double> &times,
+                                 DerivativeBatch<MAX_DERIVATIVE> &output) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
             assert(is_initialized_);
+            for (auto &matrix : output)
+                matrix.resize(static_cast<Eigen::Index>(times.size()), DIM);
             int segment = -1;
             for (std::size_t i = 0; i < times.size(); ++i)
             {
@@ -863,13 +822,13 @@ namespace SplineTrajectory
          * @tparam MAX_DERIVATIVE Nonnegative highest requested physical derivative order.
          * @param times Query times on the trajectory axis, in seconds, in any order.
          * @return Owning matrices indexed by derivative order, with one row per query time.
-         * @note Delegates to evaluateDerivativesInto(); source data remains unmodified. */
+         * @note Delegates to evaluateDerivatives(); source data remains unmodified. */
         template <int MAX_DERIVATIVE>
         DerivativeBatch<MAX_DERIVATIVE> evaluateDerivatives(const std::vector<double> &times) const
         {
             static_assert(MAX_DERIVATIVE >= 0, "Derivative order must be nonnegative");
-            auto output = makeDerivativeBatch<MAX_DERIVATIVE>(times);
-            evaluateDerivativesInto<MAX_DERIVATIVE>(times, output);
+            DerivativeBatch<MAX_DERIVATIVE> output;
+            evaluateDerivatives<MAX_DERIVATIVE>(times, output);
             return output;
         }
 
@@ -911,7 +870,7 @@ namespace SplineTrajectory
         }
 
         /** @brief Copy caller-validated polynomial data, invalidating all borrowed views.
-         * @param breakpoints Finite strictly increasing absolute seconds, at least two entries.
+         * @param breakpoints Finite strictly increasing seconds on the trajectory time axis, at least two entries.
          * @param coefficients Finite piece-major ascending-power coefficients, (knots - 1) * count rows.
          * @param num_coefficients Positive count within static capacity; total rows fit int indices.
          * @pre Inputs satisfy the class contract; no input scan is performed. Requires exclusive access.
@@ -970,11 +929,12 @@ namespace SplineTrajectory
         }
 
         /** @brief Differentiate the local-power coefficients into an owning polynomial.
-         * @param derivative_order Nonnegative physical derivative order.
+         * @param order Nonnegative physical derivative order.
          * @return Owned polynomial or invalid-state failure; above-degree derivatives are zero.
          * @pre The coefficient arithmetic is representable. Const calls are reentrant. */
-        StatusOr<PPolyND> derivative(int derivative_order = 1) const
+        StatusOr<PPolyND> derivative(DerivativeOrder order = Deriv::Vel) const
         {
+            const int derivative_order = order.value();
             if (num_segments_ == 0 || derivative_order >= num_coeffs_)
             {
                 if (num_segments_ == 0)
@@ -1222,23 +1182,31 @@ namespace SplineTrajectory
          * @param knot Waypoint index in [0, N], with N given by the prepared durations size.
          * @param partial Physical position partials in the caller's coordinates; borrowed for this call.
          * @note Requires a prepared N-segment topology and exclusive access to this output.
-         *       The row overload preserves vectorized accumulation without allocating. */
-        void addWaypoint(int knot, const RowVector &partial)
+         *       Row and column expressions share one allocation-free index dispatch. */
+        template<class Derived>
+        void addWaypoint(int knot, const Eigen::MatrixBase<Derived> &partial)
         {
-            if (knot == 0)
-                start.p += partial.transpose();
-            else if (knot == durations.size())
-                end.p += partial.transpose();
-            else
-                inner_points.row(knot - 1) += partial;
+            static_assert(Derived::IsVectorAtCompileTime, "Waypoint partial must be a row or column vector");
+            static_assert(Derived::SizeAtCompileTime == DIM || Derived::SizeAtCompileTime == Eigen::Dynamic,
+                          "Waypoint partial must match the spatial dimension");
+            if constexpr (Derived::RowsAtCompileTime == 1) addWaypointRow(knot, partial);
+            else addWaypointRow(knot, partial.transpose());
         }
 
+    private:
+        template<class Derived>
+        void addWaypointRow(int knot, const Eigen::MatrixBase<Derived> &partial)
+        {
+            if (knot == 0) start.p += partial.transpose();
+            else if (knot == durations.size()) end.p += partial.transpose();
+            else inner_points.row(knot - 1) += partial;
+        }
 
     };
 
     namespace detail
     {
-        /** @brief Convert caller-validated absolute knots to physical durations.
+        /** @brief Convert caller-validated trajectory breakpoints to physical durations.
          * @param knots At least two finite, strictly increasing times in seconds.
          * @param[out] durations Consecutive time differences; storage is reused.
          * @param[out] start First knot on the original time axis. */
@@ -1865,8 +1833,8 @@ namespace SplineTrajectory
                     resizeWorkspace(data);
 
                 // Boundary velocities change independently of the segment count.
-                derivatives_.row(0) = data.boundary_.start_velocity.transpose();
-                derivatives_.row(data.num_segments_) = data.boundary_.end_velocity.transpose();
+                derivatives_.row(0) = data.boundary_.start.v.transpose();
+                derivatives_.row(data.num_segments_) = data.boundary_.end.v.transpose();
             }
 
             /** @brief Resize primal, adjoint and factor caches after a segment-count change.
@@ -2311,10 +2279,10 @@ namespace SplineTrajectory
                     resizeWorkspace(data);
 
                 // Boundary values change independently of the segment count.
-                derivatives_.row(0) = data.boundary_.start_velocity.transpose();
-                derivatives_.row(data.num_segments_ * 2 + 0) = data.boundary_.end_velocity.transpose();
-                derivatives_.row(1) = data.boundary_.start_acceleration.transpose();
-                derivatives_.row(data.num_segments_ * 2 + 1) = data.boundary_.end_acceleration.transpose();
+                derivatives_.row(0) = data.boundary_.start.v.transpose();
+                derivatives_.row(data.num_segments_ * 2 + 0) = data.boundary_.end.v.transpose();
+                derivatives_.row(1) = data.boundary_.start.a.transpose();
+                derivatives_.row(data.num_segments_ * 2 + 1) = data.boundary_.end.a.transpose();
             }
 
             /** @brief Resize primal, adjoint and factor caches after a segment-count change.
@@ -2891,12 +2859,12 @@ namespace SplineTrajectory
                     resizeWorkspace(data);
 
                 // Boundary values change independently of the segment count.
-                derivatives_.row(0) = data.boundary_.start_velocity.transpose();
-                derivatives_.row(data.num_segments_ * 3 + 0) = data.boundary_.end_velocity.transpose();
-                derivatives_.row(1) = data.boundary_.start_acceleration.transpose();
-                derivatives_.row(data.num_segments_ * 3 + 1) = data.boundary_.end_acceleration.transpose();
-                derivatives_.row(2) = data.boundary_.start_jerk.transpose();
-                derivatives_.row(data.num_segments_ * 3 + 2) = data.boundary_.end_jerk.transpose();
+                derivatives_.row(0) = data.boundary_.start.v.transpose();
+                derivatives_.row(data.num_segments_ * 3 + 0) = data.boundary_.end.v.transpose();
+                derivatives_.row(1) = data.boundary_.start.a.transpose();
+                derivatives_.row(data.num_segments_ * 3 + 1) = data.boundary_.end.a.transpose();
+                derivatives_.row(2) = data.boundary_.start.j.transpose();
+                derivatives_.row(data.num_segments_ * 3 + 2) = data.boundary_.end.j.transpose();
             }
 
             /** @brief Resize primal, adjoint and factor caches after a segment-count change.
@@ -3261,6 +3229,7 @@ namespace SplineTrajectory
         using RowVector = Eigen::Matrix<double, 1, DIM>;
         static constexpr int kMatrixOptions = (DIM == 1) ? Eigen::ColMajor : Eigen::RowMajor;
         using CoefficientMatrix = Eigen::Matrix<double, Eigen::Dynamic, DIM, kMatrixOptions>;
+        using WaypointMatrix = CoefficientMatrix;
 
         static constexpr int kDimension = DIM;
         static constexpr int kDegree = DEGREE;
@@ -3284,18 +3253,18 @@ namespace SplineTrajectory
         /** @brief Construct an empty, invalid spline with independent storage. */
         SplineND() = default;
 
-        /** @brief Replace interpolation data using caller-validated absolute knots.
-         * @param t_points Absolute times in seconds. @param spatial_points Physical waypoint rows.
+        /** @brief Replace interpolation data using caller-validated trajectory breakpoints.
+         * @param breakpoints Seconds on the trajectory time axis. @param waypoints Physical waypoint rows.
          * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @pre Inputs satisfy the class contract; no input validation is performed.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
          * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
-        Status update(const std::vector<double> &t_points,
-                    const CoefficientMatrix &spatial_points,
+        Status updateFromBreakpoints(const std::vector<double> &breakpoints,
+                    const WaypointMatrix &waypoints,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
-            detail::durationsFromKnots(t_points, data_.time_segments_, data_.start_time_);
-            return update(data_.time_segments_, spatial_points, data_.start_time_, boundary);
+            detail::durationsFromKnots(breakpoints, data_.time_segments_, data_.start_time_);
+            return update(data_.time_segments_, waypoints, data_.start_time_, boundary);
         }
 
         /** @brief Replace interpolation data using positive durations and a common time origin.
@@ -3307,7 +3276,7 @@ namespace SplineTrajectory
          *       Numeric construction failures clear the polynomial; inputs are not validated here.
          * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
         Status update(const std::vector<double> &time_segments,
-                    const CoefficientMatrix &spatial_points,
+                    const WaypointMatrix &spatial_points,
                     double start_time,
                     const BoundaryConditions<DIM> &boundary = BoundaryConditions<DIM>())
         {
@@ -3323,13 +3292,13 @@ namespace SplineTrajectory
         /** @brief Inspect spatial dimension. @return Compile-time DIM. */
         int dimension() const { return DIM; }
 
-        /** @brief Inspect the absolute start time. @return Seconds, or zero for an invalid spline. */
+        /** @brief Inspect the trajectory start time. @return Seconds, or zero for an invalid spline. */
         double startTime() const
         {
             return data_.trajectory_.startTime();
         }
 
-        /** @brief Inspect the absolute end time. @return Seconds, or zero for an invalid spline. */
+        /** @brief Inspect the trajectory end time. @return Seconds, or zero for an invalid spline. */
         double endTime() const
         {
             return data_.trajectory_.endTime();
@@ -3354,10 +3323,10 @@ namespace SplineTrajectory
         }
 
         /** @brief Borrow physical waypoints. @return Storage valid until update, assignment or move. */
-        const CoefficientMatrix &waypoints() const { return data_.spatial_points_; }
+        const WaypointMatrix &waypoints() const { return data_.spatial_points_; }
         /** @brief Borrow segment durations in seconds. @return Storage valid until the next mutation. */
         const std::vector<double> &durations() const { return data_.time_segments_; }
-        /** @brief Borrow absolute knots in seconds. @return Storage valid until the next mutation. */
+        /** @brief Borrow trajectory breakpoints in seconds. @return Storage valid until the next mutation. */
         const std::vector<double> &breakpoints() const { return data_.trajectory_.breakpoints_; }
         /** @brief Borrow physical boundary data. @return Storage valid until the next mutation. */
         const BoundaryConditions<DIM> &boundary() const { return data_.boundary_; }
@@ -3459,17 +3428,17 @@ namespace SplineTrajectory
          * @param[out] grad Full gradient dE/dP for inner points only.
          *         Resized to (N-1) × DIM (excludes boundary points P0 and PN); matching storage is reused.
          * @pre The spline is valid. */
-        void energyWaypointGradient(CoefficientMatrix &grad) const
+        void energyInnerWaypointGradient(WaypointMatrix &grad) const
         {
             assert(data_.trajectory_.isValid());
             detail::computeEnergyWaypointGradient<Kernel::kWaypointGradientScale>(data_.trajectory_, grad, 1.0);
         }
 
         /** @brief Allocate total energy waypoint gradients. @return Interior physical position gradients. */
-        CoefficientMatrix energyWaypointGradient() const
+        WaypointMatrix energyInnerWaypointGradient() const
         {
-            CoefficientMatrix grad;
-            energyWaypointGradient(grad);
+            WaypointMatrix grad;
+            energyInnerWaypointGradient(grad);
             return grad;
         }
 

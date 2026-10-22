@@ -147,7 +147,7 @@ void addWorkspaceMeasurement(
         basis == SplineTrajectory::ConvexHullBasis::Bezier
             ? "Bezier" : "MINVO";
     Hull workspace;
-    workspace.configure(
+    workspace.prepare(
         polynomial, {basis, derivative, subdivision_depth});
     workspace.update(polynomial);
     const Matrix gradients =

@@ -19,12 +19,12 @@ cases += [
     ('empty-objective', prefix + '''struct Objective {};
 int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
      'Objective must declare a supported cost member'),
-    ('duration-signature', prefix + '''struct Objective { int duration = 0; };
+    ('parameter-signature', prefix + '''struct Objective { int parameter = 0; };
 int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
-     'Objective.duration must return EvaluationResult'),
+     'Objective.parameter must return double or EvaluationResult'),
     ('integral-signature', prefix + '''struct Objective { int integral = 0; };
 int main() { O o; Eigen::VectorXd x, g; Objective f; o.evaluate(x,g,f); }''',
-     'Objective.integral must return EvaluationResult'),
+     'Objective.integral must return double or EvaluationResult'),
     ('derivative-order', prefix + '''struct Integral {
 static constexpr int kDerivativeOrder = 5;
 double operator()(const SplineTrajectory::IntegralPointInfo &,

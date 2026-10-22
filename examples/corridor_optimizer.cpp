@@ -7,32 +7,31 @@ struct CorridorCost
     static constexpr int kDerivativeOrder = 2;
     std::array<example::Box, 3> boxes = example::corridor();
     example::DynamicsCost dynamics;
-    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &point,
+    double operator()(const SplineTrajectory::IntegralPointInfo &point,
                       const SplineTrajectory::SampleState<2> &state,
                       SplineTrajectory::SampleGradient<2> &gradient) const
     {
-        const auto result = dynamics(point, state, gradient);
-        if (!result) return result;
-        return {boxes[point.segment_index].penalty(state.p, 5000.0, gradient.p)
-             + result.cost, SplineTrajectory::Status::success()};
+        const double dynamics_cost = dynamics(point, state, gradient);
+        return boxes[point.segment_index].penalty(state.p, 5000.0, gradient.p)
+             + dynamics_cost;
     }
 };
-struct Objective { example::DurationCost duration; CorridorCost integral; };
+struct Objective { example::DurationCost parameter; CorridorCost integral; };
 
 int main(int argc, char **argv) try
 {
     auto problem = example::makeProblem();
     problem.waypoints(1, 1) = 0.85;
     example::Optimizer optimizer;
-    const auto prepared = optimizer.prepare(problem, example::options());
-    if (!prepared) throw std::runtime_error(prepared.message);
     Objective objective;
+    const auto prepared = optimizer.prepare(problem, example::options(), objective);
+    if (!prepared) throw std::runtime_error(prepared.message);
     example::minimize(optimizer, objective, example::checkRequested(argc, argv));
 
     double violation = 0.0;
     for (int piece = 0; piece < optimizer.polynomial().numSegments(); ++piece)
     {
-        const auto segment = optimizer.polynomial().at(piece);
+        const auto segment = optimizer.polynomial()[piece];
         for (int i = 0; i <= 200; ++i)
         {
             example::Vector scratch = example::Vector::Zero();

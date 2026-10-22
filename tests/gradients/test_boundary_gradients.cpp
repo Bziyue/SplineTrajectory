@@ -29,8 +29,8 @@ void testCubicGradients() {
         points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
     BoundaryConditions<DIM> bc;
-    bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
-    bc.end_velocity = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.start.v = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.end.v = Eigen::Matrix<double, DIM, 1>::Random();
 
     SplineType spline;
     if (const auto status = spline.update(times, points, 0.0, bc); !status)
@@ -95,12 +95,12 @@ void testCubicGradients() {
     // Test velocity gradients
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("Start Vel [" + std::to_string(d) + "]",
-                         grads.start.v(d), bc_grads.start.v(d), bc.start_velocity(d));
+                         grads.start.v(d), bc_grads.start.v(d), bc.start.v(d));
     }
 
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("End Vel [" + std::to_string(d) + "]",
-                         grads.end.v(d), bc_grads.end.v(d), bc.end_velocity(d));
+                         grads.end.v(d), bc_grads.end.v(d), bc.end.v(d));
     }
 
     // --- PROOF SECTION: Cubic Spline (k=2) ---
@@ -145,10 +145,10 @@ void testQuinticGradients() {
         points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
     BoundaryConditions<DIM> bc;
-    bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
-    bc.start_acceleration = Eigen::Matrix<double, DIM, 1>::Random();
-    bc.end_velocity = Eigen::Matrix<double, DIM, 1>::Random();
-    bc.end_acceleration = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.start.v = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.start.a = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.end.v = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.end.a = Eigen::Matrix<double, DIM, 1>::Random();
 
     SplineType spline;
     if (const auto status = spline.update(times, points, 0.0, bc); !status)
@@ -212,16 +212,16 @@ void testQuinticGradients() {
     // Test velocity gradients
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("Start Vel [" + std::to_string(d) + "]",
-                         grads.start.v(d), bc_grads.start.v(d), bc.start_velocity(d));
+                         grads.start.v(d), bc_grads.start.v(d), bc.start.v(d));
         verify_boundary("Start Acc [" + std::to_string(d) + "]",
-                         grads.start.a(d), bc_grads.start.a(d), bc.start_acceleration(d));
+                         grads.start.a(d), bc_grads.start.a(d), bc.start.a(d));
     }
 
     for (int d = 0; d < DIM; ++d) {
         verify_boundary("End Vel [" + std::to_string(d) + "]",
-                         grads.end.v(d), bc_grads.end.v(d), bc.end_velocity(d));
+                         grads.end.v(d), bc_grads.end.v(d), bc.end.v(d));
         verify_boundary("End Acc [" + std::to_string(d) + "]",
-                         grads.end.a(d), bc_grads.end.a(d), bc.end_acceleration(d));
+                         grads.end.a(d), bc_grads.end.a(d), bc.end.a(d));
     }
 
     // --- PROOF SECTION: Quintic Spline (k=3) ---
@@ -274,13 +274,13 @@ void testSepticGradients() {
         points.row(i) = Eigen::Matrix<double, DIM, 1>::Random().transpose();
 
     BoundaryConditions<DIM> bc;
-    bc.start_velocity = Eigen::Matrix<double, DIM, 1>::Random();
-    bc.start_acceleration = Eigen::Matrix<double, DIM, 1>::Random();
-    bc.start_jerk = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.start.v = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.start.a = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.start.j = Eigen::Matrix<double, DIM, 1>::Random();
 
-    bc.end_velocity = Eigen::Matrix<double, DIM, 1>::Random();
-    bc.end_acceleration = Eigen::Matrix<double, DIM, 1>::Random();
-    bc.end_jerk = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.end.v = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.end.a = Eigen::Matrix<double, DIM, 1>::Random();
+    bc.end.j = Eigen::Matrix<double, DIM, 1>::Random();
 
     SplineType spline;
     if (const auto status = spline.update(times, points, 0.0, bc); !status)
@@ -338,13 +338,13 @@ void testSepticGradients() {
     }
 
     // Test velocity, acceleration, and jerk gradients
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc_grads.start.v(d), bc.start_velocity(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.start.a(d), bc_grads.start.a(d), bc.start_acceleration(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("Start Jerk [" + std::to_string(d) + "]", grads.start.j(d), bc_grads.start.j(d), bc.start_jerk(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Vel [" + std::to_string(d) + "]", grads.start.v(d), bc_grads.start.v(d), bc.start.v(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Acc [" + std::to_string(d) + "]", grads.start.a(d), bc_grads.start.a(d), bc.start.a(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("Start Jerk [" + std::to_string(d) + "]", grads.start.j(d), bc_grads.start.j(d), bc.start.j(d));
 
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc_grads.end.v(d), bc.end_velocity(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Acc [" + std::to_string(d) + "]", grads.end.a(d), bc_grads.end.a(d), bc.end_acceleration(d));
-    for (int d = 0; d < DIM; ++d) verify_boundary("End Jerk [" + std::to_string(d) + "]", grads.end.j(d), bc_grads.end.j(d), bc.end_jerk(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Vel [" + std::to_string(d) + "]", grads.end.v(d), bc_grads.end.v(d), bc.end.v(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Acc [" + std::to_string(d) + "]", grads.end.a(d), bc_grads.end.a(d), bc.end.a(d));
+    for (int d = 0; d < DIM; ++d) verify_boundary("End Jerk [" + std::to_string(d) + "]", grads.end.j(d), bc_grads.end.j(d), bc.end.j(d));
 
     // --- PROOF SECTION: Septic Spline (k=4) ---
     std::cout << "\n--- [Proof] Hierarchy: Pos->Flick, Vel->Pop, Acc->Crackle, Jerk->Snap (Septic k=4) ---" << std::endl;

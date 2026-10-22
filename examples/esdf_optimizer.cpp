@@ -21,13 +21,11 @@ struct EsdfCost
     CircleDistance field;
     example::DynamicsCost dynamics;
     double clearance = 0.2;
-    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::IntegralPointInfo &point,
+    double operator()(const SplineTrajectory::IntegralPointInfo &point,
                       const SplineTrajectory::SampleState<2> &state,
                       SplineTrajectory::SampleGradient<2> &gradient) const
     {
-        const auto result = dynamics(point, state, gradient);
-        if (!result) return result;
-        double cost = result.cost;
+        double cost = dynamics(point, state, gradient);
         example::Vector direction;
         const double violation = clearance - field.query(state.p, direction);
         if (violation > 0.0)
@@ -35,19 +33,19 @@ struct EsdfCost
             cost += 5000.0 * violation * violation;
             gradient.p -= 10000.0 * violation * direction;
         }
-        return {cost, SplineTrajectory::Status::success()};
+        return cost;
     }
 };
-struct Objective { example::DurationCost duration; EsdfCost integral; };
+struct Objective { example::DurationCost parameter; EsdfCost integral; };
 
 int main(int argc, char **argv) try
 {
     auto problem = example::makeProblem();
     problem.waypoints << 0, 0, 2, 0.25, 4, 0.25, 6, 0;
     example::Optimizer optimizer;
-    const auto prepared = optimizer.prepare(problem, example::options());
-    if (!prepared) throw std::runtime_error(prepared.message);
     Objective objective;
+    const auto prepared = optimizer.prepare(problem, example::options(), objective);
+    if (!prepared) throw std::runtime_error(prepared.message);
     example::minimize(optimizer, objective, example::checkRequested(argc, argv));
 
     auto sampler = optimizer.polynomial().makeSampler<0>();

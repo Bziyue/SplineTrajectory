@@ -12,18 +12,18 @@ struct HullCost
     std::array<Matrix, 3> control_gradients;
     std::array<example::Box, 3> boxes = example::corridor();
 
-    explicit HullCost(const example::Spline::Polynomial &polynomial)
+    explicit HullCost(int segments)
     {
         for (int derivative = 0; derivative < 3; ++derivative)
         {
-            hulls[derivative].configure(polynomial,
+            hulls[derivative].prepare(segments, example::Spline::kCoefficientCount,
                 {SplineTrajectory::ConvexHullBasis::Bezier, derivative, 1});
             control_gradients[derivative].resize(hulls[derivative].controls().rows(), 2);
         }
     }
 
-    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<example::Spline> &state,
-                      SplineTrajectory::CoefficientGradient<example::Spline> &gradient)
+    double operator()(const SplineTrajectory::ParameterView<example::Spline> &state,
+                      SplineTrajectory::CoefficientGradientView<example::Spline> &gradient)
     {
         double cost = 0.0;
         for (int derivative = 0; derivative < 3; ++derivative)
@@ -34,34 +34,36 @@ struct HullCost
             partials.setZero();
             for (int piece = 0; piece < hull.numPieces(); ++piece)
             {
-                const auto &box = boxes[hull.pieceInfo(piece).source_segment];
-                for (int local = 0; local < hull.controlsPerPiece(); ++local)
+                const auto p = hull.piece(piece);
+                const auto controls = p.controls();
+                auto piece_partials = partials.middleRows(controls.startRow(), controls.rows());
+                const auto &box = boxes[p.info().source_segment];
+                for (Eigen::Index local = 0; local < controls.rows(); ++local)
                 {
-                    const int row = piece * hull.controlsPerPiece() + local;
-                    const example::Vector value = hull.controls().row(row).transpose();
+                    const example::Vector value = controls.row(local).transpose();
                     example::Vector partial = example::Vector::Zero();
                     cost += derivative == 0 ? box.penalty(value, 5000.0, partial)
                         : example::normPenalty(value, derivative == 1 ? 2.5 : 4.0, 100.0, partial);
-                    partials.row(row) = partial.transpose();
+                    piece_partials.row(local) = partial.transpose();
                 }
             }
             // Include explicit duration partials from conversion, in addition to coefficient partials.
-            hull.backwardAdd(partials, gradient.coefficients, gradient.durations);
+            hull.backwardAdd(partials, gradient);
         }
-        return {cost, SplineTrajectory::Status::success()};
+        return cost;
     }
 };
-struct Objective { example::DurationCost duration; HullCost coefficient; };
+struct Objective { example::DurationCost parameter; HullCost coefficient; };
 
 int main(int argc, char **argv) try
 {
     auto problem = example::makeProblem();
     problem.waypoints(1, 1) = 0.85;
     example::Optimizer optimizer;
-    const auto prepared = optimizer.prepare(problem, example::options());
+    Objective objective{{}, HullCost(static_cast<int>(problem.durations.size()))};
+    const auto prepared = optimizer.prepare(problem, example::options(), objective);
     if (!prepared) throw std::runtime_error(prepared.message);
 
-    Objective objective{{}, HullCost(optimizer.polynomial())};
     example::minimize(optimizer, objective, example::checkRequested(argc, argv));
     // Inspect controls of the accepted polynomial, rather than the last line-search trial.
     double corridor_violation = 0.0;
@@ -76,13 +78,17 @@ int main(int argc, char **argv) try
             continue;
         }
         for (int piece = 0; piece < hull.numPieces(); ++piece)
-            for (int local = 0; local < hull.controlsPerPiece(); ++local)
+        {
+            const auto p = hull.piece(piece);
+            const auto controls = p.controls();
+            const auto &box = objective.coefficient.boxes[p.info().source_segment];
+            for (Eigen::Index local = 0; local < controls.rows(); ++local)
             {
                 example::Vector scratch = example::Vector::Zero();
-                const example::Vector point = hull.pieceControls(piece).row(local).transpose();
-                corridor_violation = std::max(corridor_violation, std::sqrt(
-                    objective.coefficient.boxes[hull.pieceInfo(piece).source_segment].penalty(point, 1.0, scratch)));
+                const example::Vector point = controls.row(local).transpose();
+                corridor_violation = std::max(corridor_violation, std::sqrt(box.penalty(point, 1.0, scratch)));
             }
+        }
     }
     std::cout << "control corridor violation: " << corridor_violation << '\n';
     return 0;

@@ -51,15 +51,18 @@ void CheckEvaluationFailures()
 {
   Optimizer optimizer;
   const auto problem = MakeProblem();
-  require(bool(optimizer.prepare(problem)), "prepare valid context");
+  require(bool(optimizer.prepare(problem, SplineTrajectory::NoObjective{})), "prepare valid context");
   const auto good = optimizer.initialGuess();
   Eigen::VectorXd gradient(good.size());
   int time_calls = 0;
   int integral_calls = 0;
   bool nonfinite_cost = false;
-  auto time_cost = [&](const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> g) {
+  auto time_cost = [&](const SplineTrajectory::ParameterView<Spline> &state,
+                       SplineTrajectory::ParameterGradientView<Spline> &gradient) {
+    const auto &times = state.durations;
+    auto &g = gradient.spline.durations;
     ++time_calls;
-    g.setOnes();
+    g.array() += 1.0;
     return SplineTrajectory::EvaluationResult{nonfinite_cost ? std::numeric_limits<double>::infinity() : times[0] + times[1], {}};
   };
   auto integral_cost = [&](const auto &, const auto &, auto &) {
@@ -68,7 +71,7 @@ void CheckEvaluationFailures()
   };
   struct Objective
   {
-    decltype(time_cost) &duration;
+    decltype(time_cost) &parameter;
     decltype(integral_cost) &integral;
   } objective{time_cost, integral_cost};
   const double baseline = optimizer.evaluate(good, gradient, objective).cost;
@@ -103,7 +106,7 @@ void CheckEvaluationFailures()
     status = rejected_result.status;
     require(!status && status.message[0] != 0 && std::isinf(rejected) && gradient.isZero(),
             "evaluation must preserve status and reject invalid trials in Release too");
-    require(!optimizer.updateAccepted(bad), "synchronization must reject same trial");
+    require(!optimizer.update(bad), "synchronization must reject same trial");
     require(!optimizer.polynomial().isValid(), "invalid synchronized curve");
 
     require(optimizer.evaluate(good, gradient, objective).cost == baseline &&
@@ -119,13 +122,13 @@ void CheckEvaluationFailures()
 
   auto invalid_seed = problem;
   invalid_seed.durations = {2e16, 1.0};
-  require(!optimizer.prepare(invalid_seed), "prepare must reject collapsed seed knots");
+  require(!optimizer.prepare(invalid_seed, SplineTrajectory::NoObjective{}), "prepare must reject collapsed seed knots");
   require(!optimizer.isPrepared() && !optimizer.polynomial().isValid(), "invalid seed state");
   invalid_seed = problem;
   invalid_seed.waypoints(1, 0) = std::numeric_limits<double>::quiet_NaN();
-  require(!optimizer.prepare(invalid_seed), "prepare must reject nonfinite seed inputs");
-  require(bool(optimizer.prepare(problem)), "reprepare after invalid seed");
-  require(bool(optimizer.updateAccepted(good)), "synchronize valid retry");
+  require(!optimizer.prepare(invalid_seed, SplineTrajectory::NoObjective{}), "prepare must reject nonfinite seed inputs");
+  require(bool(optimizer.prepare(problem, SplineTrajectory::NoObjective{})), "reprepare after invalid seed");
+  require(bool(optimizer.update(good)), "synchronize valid retry");
 }
 } // namespace
 

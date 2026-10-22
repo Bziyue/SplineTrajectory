@@ -49,34 +49,31 @@ namespace SplineTrajectory
         MINVO
     };
 
-    /** @brief Topology-only conversion data, shared as const across dimensions and workspaces. */
-    struct ConvexHullKernel
-    {
-        ConvexHullBasis basis = ConvexHullBasis::Bezier;
-        int source_num_coeffs = 0;
-        int derivative_order = 0;
-        int degree = 0;
-        int subdivision_depth = 0;
-        int leaves_per_segment = 1;
-        Eigen::MatrixXd stacked_power_to_control;
-        Eigen::MatrixXd stacked_control_to_power_adjoint;
-        Eigen::VectorXd derivative_factors;
-        Eigen::VectorXd leaf_begin_fractions;
-
-
-    };
-
-
     /** @brief Conversion basis, physical derivative order and binary subdivision depth. */
     struct HullOptions
     {
         ConvexHullBasis basis = ConvexHullBasis::Bezier;
-        int derivative_order = 0;
+        DerivativeOrder derivative_order = Deriv::Pos;
         int subdivision_depth = 0;
     };
 
     namespace detail
     {
+        /** @brief Topology-only conversion data, shared as const across dimensions and workspaces. */
+        struct ConvexHullKernel
+        {
+            ConvexHullBasis basis = ConvexHullBasis::Bezier;
+            int source_num_coeffs = 0;
+            int derivative_order = 0;
+            int degree = 0;
+            int subdivision_depth = 0;
+            int leaves_per_segment = 1;
+            Eigen::MatrixXd stacked_power_to_control;
+            Eigen::MatrixXd stacked_control_to_power_adjoint;
+            Eigen::VectorXd derivative_factors;
+            Eigen::VectorXd leaf_begin_fractions;
+        };
+
         struct HullKernelFactory
         {
             /** @brief Build the configured basis transform from ascending powers.
@@ -322,8 +319,8 @@ namespace SplineTrajectory
      * Callers guarantee valid input polynomials, supported options, finite partials and matching
      * pre-sized input/output shapes, within a representable numerical working range.
      * These preconditions are not checked; controls and gradients are not scanned for overflow.
-     * Configuration and factories trust topology and allocate directly. A configured workspace is invalid until updated.
-     * Update requires a configured workspace; adjoints require updated controls. These state
+     * Preparation and factories trust topology and allocate directly. A prepared workspace is invalid until updated.
+     * Update requires a prepared workspace; adjoints require updated controls. These state
      * preconditions are asserted in debug builds; methods return values or void directly.
      * Fixed-topology update/adjoint does not allocate; allocation exceptions during preparation
      * remain standard allocation failures.
@@ -353,6 +350,21 @@ namespace SplineTrajectory
             Eigen::VectorXd durations;
         };
 
+        /** @brief Borrow one piece's metadata and controls; workspace mutation invalidates the view. */
+        class Piece
+        {
+            const ConvexHullWorkspace *workspace_;
+            int index_;
+            friend class ConvexHullWorkspace;
+            Piece(const ConvexHullWorkspace &workspace, int index) : workspace_(&workspace), index_(index) {}
+        public:
+            const PieceInfo &info() const { return workspace_->pieceInfo(index_); }
+            auto controls() const { return workspace_->pieceControls(index_); }
+        };
+
+        Piece piece(int index) const & { return Piece(*this, index); }
+        Piece piece(int) const && = delete;
+
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
         ConvexHullWorkspace() = default;
@@ -369,7 +381,7 @@ namespace SplineTrajectory
             HullOptions options = {})
         {
             ConvexHullWorkspace result;
-            result.configure(polynomial, options);
+            result.prepare(polynomial, options);
             result.update(polynomial.breakpoints(), polynomial.coefficients());
             return result;
         }
@@ -381,13 +393,13 @@ namespace SplineTrajectory
          * @note Topology sizes must fit supported indices and available memory.
          * @pre Positive counts, a supported basis, 0 <= derivative_order < source_num_coeffs,
          *      subdivision depth in [0, 16], and MINVO degree <= 7; resulting row counts fit int indices.
-         * @note Successful configuration leaves isConfigured() true and isValid() false. */
-        void configure(int num_source_segments, int source_num_coeffs, HullOptions options = {})
+         * @note Successful preparation leaves isPrepared() true and isValid() false. */
+        void prepare(int num_source_segments, int source_num_coeffs, HullOptions options = {})
         {
-            // Topology is caller-validated; configuration owns all allocation and cache lookup.
+            // Topology is caller-validated; preparation owns all allocation and cache lookup.
             initialized_ = false;
             kernel_ = detail::HullKernelFactory::acquireKernel(options.basis, source_num_coeffs,
-                options.derivative_order, options.subdivision_depth);
+                options.derivative_order.value(), options.subdivision_depth);
             num_source_segments_ = num_source_segments;
             const int cp = kernel_->degree + 1;
             const Eigen::Index rows = Eigen::Index(num_source_segments_) * kernel_->stacked_power_to_control.rows();
@@ -398,7 +410,7 @@ namespace SplineTrajectory
             normalized_gradient_.resize(cp, DIM);
             pieces_.resize(static_cast<std::size_t>(num_source_segments_) * kernel_->leaves_per_segment);
 
-            // Segment ownership and normalized intervals depend only on the configured topology.
+            // Segment ownership and normalized intervals depend only on the prepared topology.
             for (int segment = 0; segment < num_source_segments_; ++segment)
                 for (int leaf = 0; leaf < kernel_->leaves_per_segment; ++leaf)
                 {
@@ -410,19 +422,19 @@ namespace SplineTrajectory
         }
 
         /** @brief Update numeric data with fixed topology, without allocation or locking.
-         * @param polynomial Valid source matching the configured topology; data are copied.
-         * @pre The workspace is configured; the caller guarantees source validity and matching topology.
+         * @param polynomial Valid source matching the prepared topology; data are copied.
+         * @pre The workspace is prepared; the caller guarantees source validity and matching topology.
          * @note Requires exclusive workspace access, as does backwardAdd(). */
         template <int MaxCoefficients>
         void update(const PPolyND<DIM, MaxCoefficients> &polynomial)
         {
             initialized_ = false;
-            assert(isConfigured());
+            assert(isPrepared());
             update(polynomial.breakpoints(), polynomial.coefficients());
         }
 
-        /** @brief True after topology configuration, even before the first numeric update. */
-        bool isConfigured() const { return bool(kernel_); }
+        /** @brief True after topology preparation, even before the first numeric update. */
+        bool isPrepared() const { return bool(kernel_); }
         /** @brief True after numeric update; arithmetic range is guaranteed by the caller. */
         bool isValid() const { return kernel_ && initialized_; }
         /** @brief Compare topology and conversion options without allocating or locking. */
@@ -441,9 +453,9 @@ namespace SplineTrajectory
          * @note Topology sizes must fit supported indices and available memory.
          * @note Requires exclusive workspace access; the source is neither retained nor changed. */
         template <int MaxCoefficients>
-        void configure(const PPolyND<DIM, MaxCoefficients> &polynomial, HullOptions options = {})
+        void prepare(const PPolyND<DIM, MaxCoefficients> &polynomial, HullOptions options = {})
         {
-            configure(polynomial.numSegments(), polynomial.coefficientCount(), options);
+            prepare(polynomial.numSegments(), polynomial.coefficientCount(), options);
         }
         ConvexHullBasis basis() const { return kernel_ ? kernel_->basis : ConvexHullBasis::Bezier; }
         int derivativeOrder() const { return kernel_ ? kernel_->derivative_order : 0; }
@@ -457,12 +469,11 @@ namespace SplineTrajectory
 
         const CoefficientMatrix &controls() const { return controls_; }
         const std::vector<PieceInfo> &pieces() const { return pieces_; }
-        /** @brief Borrow metadata for a configured piece.
-         * @param piece_index Index in [0, numPieces()). @return Borrow valid until reconfiguration.
-         * @pre The workspace is configured and the index is in range. */
+        /** @brief Borrow metadata for a prepared piece.
+         * @param piece_index Index in [0, numPieces()). @return Borrow valid until preparation or update.
+         * @pre The workspace is prepared and the index is in range. */
         const PieceInfo &pieceInfo(int piece_index) const
-        { assert(isConfigured()); return pieces_[piece_index]; }
-        const std::shared_ptr<const ConvexHullKernel> &kernel() const { return kernel_; }
+        { assert(isPrepared()); return pieces_[piece_index]; }
 
         /** @brief Borrow controls of a valid piece without copying.
          * @param piece_index Index in [0, numPieces()). @return View valid until workspace mutation.
@@ -482,33 +493,48 @@ namespace SplineTrajectory
         {
             assert(isValid());
             BackwardResult result;
-            result.coefficients = CoefficientMatrix::Zero(
-                num_source_segments_ * kernel_->source_num_coeffs, DIM);
-            result.durations = Eigen::VectorXd::Zero(num_source_segments_);
-            accumulateControlGradients(control_gradients, result.coefficients, result.durations);
+            backward(control_gradients, result);
             return result;
         }
 
-        /** @brief Overwrite pre-sized source partials without allocating or resizing.
+        /** @brief Overwrite an owning result, resizing only when its shape changes. */
+        void backward(const CoefficientMatrix &control_gradients, BackwardResult &result)
+        {
+            backward(control_gradients, result.coefficients, result.durations);
+        }
+
+        /** @brief Add geometry partials to a coefficient-gradient view; start_time is unchanged. */
+        template<class GradientView>
+        void backwardAdd(const CoefficientMatrix &control_gradients, GradientView &output)
+        { backwardAdd(control_gradients, output.coefficients, output.durations); }
+
+        /** @brief Add explicit piece-time partials to duration and common-start gradient views. */
+        template<class GradientView>
+        void backwardPieceTimesAdd(const Eigen::Ref<const Eigen::VectorXd> &piece_start_gradients,
+                                   const Eigen::Ref<const Eigen::VectorXd> &piece_duration_gradients,
+                                   GradientView &output) const
+        { backwardPieceTimesAdd(piece_start_gradients, piece_duration_gradients, output.durations, output.start_time); }
+
+        /** @brief Overwrite owning source partials, resizing only when their shape changes.
          * @param control_gradients Finite partials matching the piece-major rows of controls().
          * @param[out] coefficient_gradients Source coefficient-shaped output in caller-owned storage.
          * @param[out] duration_gradients One independent physical-duration partial per source segment.
-         * @pre The workspace contains updated controls and the caller supplies matching shapes.
-         * @note Inputs/outputs must not alias each other or
+         * @pre The workspace contains updated controls.
+         * @note Matching output storage is reused. Inputs/outputs must not alias each other or
          *       workspace storage. Requires exclusive workspace and output access. */
-        void backwardInto(const CoefficientMatrix &control_gradients,
-                          CoefficientMatrix &coefficient_gradients,
-                          Eigen::VectorXd &duration_gradients)
+        void backward(const CoefficientMatrix &control_gradients,
+                      CoefficientMatrix &coefficient_gradients,
+                      Eigen::VectorXd &duration_gradients)
         {
             assert(isValid());
 
-            coefficient_gradients.setZero();
-            duration_gradients.setZero();
+            coefficient_gradients.setZero(num_source_segments_ * kernel_->source_num_coeffs, DIM);
+            duration_gradients.setZero(num_source_segments_);
             accumulateControlGradients(control_gradients, coefficient_gradients, duration_gradients);
         }
 
         /**
-         * @brief Allocation-free additive adjoint after updating a configured workspace.
+         * @brief Allocation-free additive adjoint after updating a prepared workspace.
          *
          * The destination gradients must already have the exact topology. They
          * are accumulated rather than cleared, allowing several hull costs and
@@ -589,7 +615,7 @@ namespace SplineTrajectory
         CoefficientMatrix normalized_gradient_;
         CoefficientMatrix normalized_derivative_;
         std::vector<PieceInfo> pieces_;
-        std::shared_ptr<const ConvexHullKernel> kernel_;
+        std::shared_ptr<const detail::ConvexHullKernel> kernel_;
 
         /** @brief Accumulate the hull adjoint using caller-validated shapes and finite partials.
          * @param control_gradients Borrowed piece-major input partials.
@@ -635,10 +661,10 @@ namespace SplineTrajectory
             }
         }
 
-        /** @brief Refresh hull controls and adjoint caches at the configured topology.
+        /** @brief Refresh hull controls and adjoint caches at the prepared topology.
          * @param breakpoints Strictly increasing physical times, one per segment boundary.
          * @param coefficients Borrowed local-power coefficients; normalized derivatives are retained for the adjoint.
-         * @pre The workspace is configured and the source matches its topology and numerical range.
+         * @pre The workspace is prepared and the source matches its topology and numerical range.
          * @note Requires exclusive workspace access; fixed-topology updates do not allocate. */
         void update(const std::vector<double> &breakpoints,
                     const CoefficientMatrix &coefficients)
@@ -701,11 +727,11 @@ namespace SplineTrajectory
      * @param polynomial Valid source; copied values do not borrow its lifetime.
      * @param derivative_order Physical derivative order, between zero and the source degree.
      * @param subdivision_depth Binary subdivision depth in [0, 16].
-     * @return Configured, updated workspace; may allocate; topology and allocation size are caller preconditions. */
+     * @return Prepared, updated workspace; may allocate; topology and allocation size are caller preconditions. */
     template <int DIM, int MaxCoefficients>
     inline ConvexHullWorkspace<DIM>
     toBezier(const PPolyND<DIM, MaxCoefficients> &polynomial,
-             int derivative_order = 0,
+             DerivativeOrder derivative_order = Deriv::Pos,
              int subdivision_depth = 0)
     {
         return ConvexHullWorkspace<DIM>::fromPPoly(
@@ -716,11 +742,11 @@ namespace SplineTrajectory
      * @param polynomial Valid source; copied values do not borrow its lifetime.
      * @param derivative_order Physical derivative order, between zero and the source degree.
      * @param subdivision_depth Binary subdivision depth in [0, 16].
-     * @return Configured, updated workspace; may allocate; topology and allocation size are caller preconditions. */
+     * @return Prepared, updated workspace; may allocate; topology and allocation size are caller preconditions. */
     template <int DIM, int MaxCoefficients>
     inline ConvexHullWorkspace<DIM>
     toMINVO(const PPolyND<DIM, MaxCoefficients> &polynomial,
-            int derivative_order = 0,
+            DerivativeOrder derivative_order = Deriv::Pos,
             int subdivision_depth = 0)
     {
         return ConvexHullWorkspace<DIM>::fromPPoly(

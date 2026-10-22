@@ -58,7 +58,7 @@ namespace SplineTrajectory
     {
         int segment_index = 0, segment_count = 0, step_index = 0, step_count = 0;
         double alpha = 0.0, segment_duration = 0.0, step_size = 0.0;
-        double local_time = 0.0, global_time = 0.0;
+        double segment_time = 0.0, trajectory_time = 0.0;
         bool isSegmentStart() const noexcept { return step_index == 0; }
         bool isSegmentEnd() const noexcept { return step_index == step_count; }
         bool isTrajectoryStart() const noexcept { return segment_index == 0 && isSegmentStart(); }
@@ -80,14 +80,14 @@ namespace SplineTrajectory
     };
 
     /** @brief Unweighted integrand partials, cleared for each sample.
-     * @note time is the explicit global-time partial; quadrature and state drift belong to the optimizer. */
+     * @note trajectory_time is the explicit trajectory-time partial; quadrature and state drift belong to the optimizer. */
     template<int DIM>
     struct SampleGradient
     {
         using Vector = Eigen::Matrix<double, DIM, 1>;
         Vector p = Vector::Zero(), v = Vector::Zero(), a = Vector::Zero();
         Vector j = Vector::Zero(), s = Vector::Zero();
-        double time = 0.0;
+        double trajectory_time = 0.0;
     };
 
     /** @brief Direct physical duration coordinates; the optimizer checks decoded candidates for positivity. */
@@ -96,10 +96,10 @@ namespace SplineTrajectory
         /** @brief Copy a physical-time coordinate without transforming it.
          * @param value Finite coordinate in seconds; the optimizer validates decoded positivity.
          * @return The unchanged coordinate. */
-        double toTime(double value) const noexcept
+        double forward(double value) const noexcept
         { return value; }
         /** @brief Copy physical seconds. @param value Caller-validated positive finite duration. @return Coordinate. */
-        double toTau(double value) const noexcept { return toTime(value); }
+        double inverse(double value) const noexcept { return forward(value); }
         /** @brief Pull back a finite time partial. @param tau Decision coordinate. @param time Physical seconds.
          * @param gradient Finite physical partial. @return The unchanged decision partial. */
         double backward(double tau, double time, double gradient) const noexcept
@@ -116,7 +116,7 @@ namespace SplineTrajectory
          * @param tau Finite dimensionless decision coordinate.
          * @return Computed duration in seconds; Optimizer checks its range once during decoding.
          * @note Stateless and reentrant; standalone callers own numerical-range validation. */
-        double toTime(double tau) const noexcept
+        double forward(double tau) const noexcept
         {
             const double time = tau > 0.0 ? (0.5 * tau + 1.0) * tau + 1.0
                                          : 1.0 / ((0.5 * tau - 1.0) * tau + 1.0);
@@ -126,7 +126,7 @@ namespace SplineTrajectory
          * @param duration Positive physical duration in seconds.
          * @return Computed coordinate; Optimizer validates the assembled initial vector once.
          * @note Stateless and reentrant; standalone callers own numerical-range validation. */
-        double toTau(double duration) const noexcept
+        double inverse(double duration) const noexcept
         {
             const double tau = duration > 1.0 ? std::sqrt(2.0 * duration - 1.0) - 1.0
                                              : 1.0 - std::sqrt(2.0 / duration - 1.0);
@@ -160,7 +160,7 @@ namespace SplineTrajectory
         /** @brief Copy decision coordinates into physical Cartesian coordinates.
          * @param value Finite DIM-sized coordinates. @param index Global waypoint index; unused.
          * @return Owned vector in the caller's coordinate frame; stateless and reentrant. */
-        Vector toPhysical(const Eigen::Ref<const Eigen::VectorXd> &value, int index) const
+        Vector forward(const Eigen::Ref<const Eigen::VectorXd> &value, int index) const
         {
             (void)index;
             return Vector(value);
@@ -168,7 +168,7 @@ namespace SplineTrajectory
         /** @brief Copy physical Cartesian coordinates into decision coordinates.
          * @param point Finite physical position. @param index Global waypoint index; unused.
          * @return Independent DIM-sized vector; stateless and reentrant. */
-        Vector toUnconstrained(const Vector &point, int index) const
+        Vector inverse(const Vector &point, int index) const
         {
             (void)index;
             return point;
@@ -177,7 +177,7 @@ namespace SplineTrajectory
          * @param coordinates Forward decision coordinates; unused by the identity Jacobian.
          * @param gradient Physical position partial. @param index Global waypoint index; unused.
          * @param[out] destination Exclusive DIM-sized decision slice; no allocation or resizing. */
-        void backwardInto(const Eigen::Ref<const Eigen::VectorXd> &coordinates, const Vector &gradient,
+        void backward(const Eigen::Ref<const Eigen::VectorXd> &coordinates, const Vector &gradient,
                           int index, Eigen::Ref<Eigen::VectorXd> destination) const
         {
             (void)coordinates; (void)index;
@@ -203,17 +203,18 @@ namespace SplineTrajectory
     /** @brief Active coordinates; empty masks select all durations and only interior waypoints. */
     struct OptimizationMask
     {
-        std::vector<std::uint8_t> time, waypoints;
+        std::vector<std::uint8_t> durations, waypoints;
         BoundaryDerivativeMask start, end;
     };
 
     /** @brief Numerical input copied by prepare(); times use seconds on one common axis. */
-    template<class Spline>
+    template<int DIM>
     struct SplineProblem
     {
         std::vector<double> durations;
-        typename Spline::CoefficientMatrix waypoints;
-        BoundaryConditions<Spline::kDimension> boundary;
+        using WaypointMatrix = typename PPolyND<DIM>::PointMatrix;
+        WaypointMatrix waypoints;
+        BoundaryConditions<DIM> boundary;
         double start_time = 0.0;
         std::optional<OptimizationMask> mask;
     };
@@ -226,12 +227,12 @@ namespace SplineTrajectory
         bool record_samples = false;
     };
 
-    struct TimeVariable { int segment_index = 0, offset = 0; };
+    struct DurationVariable { int segment_index = 0, offset = 0; };
     struct PointVariable { int point_index = 0, offset = 0, dof = 0; };
     /** @brief Read-only decision layout, valid until preparation, movement or destruction. */
     struct DecisionLayout
     {
-        std::vector<TimeVariable> time;
+        std::vector<DurationVariable> durations;
         std::vector<PointVariable> waypoints;
         int boundary_offset = 0, auxiliary_offset = 0, dimension = 0;
     };
@@ -242,7 +243,7 @@ namespace SplineTrajectory
     struct MutableParameters
     {
         std::vector<double> &durations;
-        typename Spline::CoefficientMatrix &waypoints;
+        typename Spline::WaypointMatrix &waypoints;
         BoundaryConditions<Spline::kDimension> &boundary;
         double &start_time;
     };
@@ -253,7 +254,7 @@ namespace SplineTrajectory
     {
         const typename Spline::Polynomial &polynomial;
         const std::vector<double> &durations;
-        const typename Spline::CoefficientMatrix &waypoints;
+        const typename Spline::WaypointMatrix &waypoints;
         const BoundaryConditions<Spline::kDimension> &boundary;
         double start_time;
     };
@@ -261,7 +262,7 @@ namespace SplineTrajectory
     /** @brief Additive coefficient and independent-time partials before the spline adjoint.
      * @note durations differentiates time with local power coefficients held fixed. */
     template<class Spline>
-    struct CoefficientGradient
+    struct CoefficientGradientView
     {
         Eigen::Ref<typename Spline::CoefficientMatrix> coefficients;
         Eigen::Ref<Eigen::VectorXd> durations;
@@ -270,22 +271,15 @@ namespace SplineTrajectory
 
     /** @brief Additive physical parameter gradients after the spline adjoint. */
     template<class Spline>
-    struct ParameterGradient
+    struct ParameterGradientView
     {
-        Eigen::Ref<typename Spline::CoefficientMatrix> inner_points;
-        Eigen::Ref<Eigen::VectorXd> durations;
-        typename Spline::BoundaryGradient &start, &end;
+        typename Spline::Gradients &spline;
         double &start_time;
-        /** @brief Add a waypoint partial using the global index, including both endpoints.
-         * @param index Valid waypoint index in [0, inner_points.rows()+1]; not checked.
-         * @param gradient Finite position partial in the caller's coordinates.
-         * @note Additive, allocation-free; requires exclusive output access. */
-        void addWaypoint(int index, const typename Spline::Vector &gradient)
-        {
-            if (index == 0) start.p += gradient;
-            else if (index == inner_points.rows() + 1) end.p += gradient;
-            else inner_points.row(index - 1) += gradient.transpose();
-        }
+        /** @brief Add a row or column waypoint partial through the owning gradient's implementation. */
+        template<class Derived>
+        void addWaypoint(int index, const Eigen::MatrixBase<Derived> &partial)
+        { spline.addWaypoint(index, partial); }
+
     };
 
     /** @brief Borrowed decision coordinates and immutable layout for additive domain penalties. */
@@ -325,23 +319,108 @@ namespace SplineTrajectory
         template<class T> T &unwrap(std::reference_wrapper<T> &value) noexcept { return value.get(); }
         template<class T> using Plain = std::remove_cv_t<std::remove_reference_t<T>>;
 
-        template<class T, class = void> struct HasDuration : std::false_type {};
-        template<class T> struct HasDuration<T, std::void_t<decltype(std::declval<T &>().duration)>> : std::true_type {};
-        template<class T, class = void> struct HasIntegral : std::false_type {};
-        template<class T> struct HasIntegral<T, std::void_t<decltype(std::declval<T &>().integral)>> : std::true_type {};
-        template<class T, class = void> struct HasSample : std::false_type {};
-        template<class T> struct HasSample<T, std::void_t<decltype(std::declval<T &>().sample)>> : std::true_type {};
-        template<class T, class = void> struct HasCoefficient : std::false_type {};
-        template<class T> struct HasCoefficient<T, std::void_t<decltype(std::declval<T &>().coefficient)>> : std::true_type {};
-        template<class T, class = void> struct HasParameter : std::false_type {};
-        template<class T> struct HasParameter<T, std::void_t<decltype(std::declval<T &>().parameter)>> : std::true_type {};
-        template<class T, class = void> struct HasDecision : std::false_type {};
-        template<class T> struct HasDecision<T, std::void_t<decltype(std::declval<T &>().decision)>> : std::true_type {};
+        // Diagnose the removed stage instead of silently ignoring an old objective's time cost.
+        template<class T, class = void> struct HasDurationMember : std::false_type {};
+        template<class T> struct HasDurationMember<T, std::void_t<decltype(std::declval<T &>().duration)>> : std::true_type {};
+
+        struct MissingStage {};
+        template<class Result>
+        inline constexpr bool isCostResult = std::is_same_v<Result, double> ||
+                                             std::is_same_v<Result, EvaluationResult>;
+
+        inline EvaluationResult toEvaluationResult(double cost) { return {cost, Status::success()}; }
+        inline EvaluationResult toEvaluationResult(EvaluationResult result) { return result; }
+
+        template<class Objective, class... Args>
+        struct IntegralStage
+        {
+        private:
+            template<class T> static auto result(int) -> decltype(std::declval<T &>().integral(std::declval<Args>()...));
+            template<class> static MissingStage result(...);
+            template<class T> static auto named(int) -> decltype((void)std::declval<T &>().integral, std::true_type{});
+            template<class T> static auto named(long) -> decltype((void)&T::integral, std::true_type{});
+            template<class> static std::false_type named(...);
+        public:
+            using Result = decltype(result<Objective>(0));
+            static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
+            static constexpr bool valid = isCostResult<Result>;
+        };
+
+        template<class Objective, class... Args>
+        struct SampleStage
+        {
+        private:
+            template<class T> static auto result(int) -> decltype(std::declval<T &>().sample(std::declval<Args>()...));
+            template<class> static MissingStage result(...);
+            template<class T> static auto named(int) -> decltype((void)std::declval<T &>().sample, std::true_type{});
+            template<class T> static auto named(long) -> decltype((void)&T::sample, std::true_type{});
+            template<class> static std::false_type named(...);
+        public:
+            using Result = decltype(result<Objective>(0));
+            static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
+            static constexpr bool valid = isCostResult<Result>;
+        };
+
+        template<class Objective, class... Args>
+        struct CoefficientStage
+        {
+        private:
+            template<class T> static auto result(int) -> decltype(std::declval<T &>().coefficient(std::declval<Args>()...));
+            template<class> static MissingStage result(...);
+            template<class T> static auto named(int) -> decltype((void)std::declval<T &>().coefficient, std::true_type{});
+            template<class T> static auto named(long) -> decltype((void)&T::coefficient, std::true_type{});
+            template<class> static std::false_type named(...);
+        public:
+            using Result = decltype(result<Objective>(0));
+            static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
+            static constexpr bool valid = isCostResult<Result>;
+        };
+
+        template<class Objective, class... Args>
+        struct ParameterStage
+        {
+        private:
+            template<class T> static auto result(int) -> decltype(std::declval<T &>().parameter(std::declval<Args>()...));
+            template<class> static MissingStage result(...);
+            template<class T> static auto named(int) -> decltype((void)std::declval<T &>().parameter, std::true_type{});
+            template<class T> static auto named(long) -> decltype((void)&T::parameter, std::true_type{});
+            template<class> static std::false_type named(...);
+        public:
+            using Result = decltype(result<Objective>(0));
+            static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
+            static constexpr bool valid = isCostResult<Result>;
+        };
+
+        template<class Objective, class... Args>
+        struct DecisionStage
+        {
+        private:
+            template<class T> static auto result(int) -> decltype(std::declval<T &>().decision(std::declval<Args>()...));
+            template<class> static MissingStage result(...);
+            template<class T> static auto named(int) -> decltype((void)std::declval<T &>().decision, std::true_type{});
+            template<class T> static auto named(long) -> decltype((void)&T::decision, std::true_type{});
+            template<class> static std::false_type named(...);
+        public:
+            using Result = decltype(result<Objective>(0));
+            static constexpr bool present = !std::is_same_v<Result, MissingStage> || decltype(named<Objective>(0))::value;
+            static constexpr bool valid = isCostResult<Result>;
+        };
+
+        template<class T, class = void> struct HasIntegralObject : std::false_type {};
+        template<class T> struct HasIntegralObject<T, std::void_t<decltype(std::declval<T &>().integral)>> : std::true_type {};
         template<class T, class = void> struct HasBeginEvaluation : std::false_type {};
         template<class T> struct HasBeginEvaluation<T, std::void_t<decltype(std::declval<T &>().beginEvaluation())>> : std::true_type {};
+        template<class T, class = void> struct HasBeginIntegralEvaluation : std::false_type {};
+        template<class T> struct HasBeginIntegralEvaluation<T, std::void_t<decltype(std::declval<T &>().beginIntegralEvaluation())>> : std::true_type {};
         template<class T, class = void> struct IntegralDerivativeOrder : std::integral_constant<int, 4> {};
         template<class T> struct IntegralDerivativeOrder<T, std::void_t<decltype(T::kDerivativeOrder)>>
             : std::integral_constant<int, T::kDerivativeOrder> {};
+        template<class T, class = void> struct ObjectiveIntegralOrder : std::integral_constant<int, 4> {};
+        template<class T> struct ObjectiveIntegralOrder<T, std::void_t<decltype(T::kIntegralDerivativeOrder)>>
+            : std::integral_constant<int, T::kIntegralDerivativeOrder> {};
+        template<class T, class = void> struct IntegralOrder : ObjectiveIntegralOrder<T> {};
+        template<class T> struct IntegralOrder<T, std::void_t<decltype(std::declval<T &>().integral)>>
+            : IntegralDerivativeOrder<Plain<decltype(unwrap(std::declval<T &>().integral))>> {};
 
         /** @brief Read a total map's result without wrapping or copying it.
          * @param value Borrowed mapping result. @return The same value for immediate consumption. */
@@ -385,12 +464,12 @@ namespace SplineTrajectory
     public:
         using Vector = typename Spline::Vector;
         using CoefficientMatrix = typename Spline::CoefficientMatrix;
-        using Problem = SplineProblem<Spline>;
+        using Problem = SplineProblem<DIM>;
         using Polynomial = typename Spline::Polynomial;
         using Status = SplineTrajectory::Status;
         using ErrorCode = SplineTrajectory::ErrorCode;
         using Gradients = typename Spline::Gradients;
-        using SampleGradMatrix = Eigen::Matrix<double, DIM, Eigen::Dynamic>;
+        using SampleGradMatrix = typename Spline::WaypointMatrix;
 
         /** @brief One recorded quadrature point, borrowed until the next evaluation or preparation. */
         struct IntegralSample
@@ -403,6 +482,33 @@ namespace SplineTrajectory
         using SampleBuffer = SplineVector<IntegralSample>;
 
     private:
+        template<class O> using IntegralStage = detail::IntegralStage<O, const IntegralPointInfo &, const SampleState<DIM> &, SampleGradient<DIM> &>;
+        template<class O> using SampleStage = detail::SampleStage<O, const SampleBuffer &, Eigen::Ref<SampleGradMatrix>, Eigen::Ref<Eigen::VectorXd>>;
+        template<class O> using CoefficientStage = detail::CoefficientStage<O, const ParameterView<Spline> &, CoefficientGradientView<Spline> &>;
+        template<class O> using ParameterStage = detail::ParameterStage<O, const ParameterView<Spline> &, ParameterGradientView<Spline> &>;
+        template<class O> using DecisionStage = detail::DecisionStage<O, const DecisionView &, Eigen::Ref<Eigen::VectorXd>>;
+
+        template<class O>
+        static constexpr void validateObjective()
+        {
+            static_assert(!detail::HasDurationMember<O>::value,
+                          "Objective.duration was removed; move its cost to Objective.parameter");
+            static_assert(IntegralStage<O>::present || SampleStage<O>::present ||
+                          CoefficientStage<O>::present || ParameterStage<O>::present ||
+                          DecisionStage<O>::present || std::is_same_v<O, NoObjective>,
+                          "Objective must declare a supported cost member, or explicitly use NoObjective");
+            static_assert(!IntegralStage<O>::present || IntegralStage<O>::valid,
+                          "Objective.integral must return double or EvaluationResult and accept its stage arguments");
+            static_assert(!SampleStage<O>::present || SampleStage<O>::valid,
+                          "Objective.sample must return double or EvaluationResult and accept its stage arguments");
+            static_assert(!CoefficientStage<O>::present || CoefficientStage<O>::valid,
+                          "Objective.coefficient must return double or EvaluationResult and accept its stage arguments");
+            static_assert(!ParameterStage<O>::present || ParameterStage<O>::valid,
+                          "Objective.parameter must return double or EvaluationResult and accept its stage arguments");
+            static_assert(!DecisionStage<O>::present || DecisionStage<O>::valid,
+                          "Objective.decision must return double or EvaluationResult and accept its stage arguments");
+        }
+
         // Numeric kernel aliases are local; public dimensions come from Spline.
         using IntegralBasis = Eigen::Matrix<double, 6, Spline::kCoefficientCount, Eigen::RowMajor>;
         using SegmentCoefficients = Eigen::Matrix<double, Spline::kCoefficientCount, DIM>;
@@ -431,7 +537,7 @@ namespace SplineTrajectory
         struct EvaluationBuffers
         {
             CoefficientMatrix grad_coeffs;
-            Eigen::VectorXd grad_times, global_time_grad_buffer, auxiliary_grad_buffer;
+            Eigen::VectorXd grad_times, trajectory_time_grad_buffer, auxiliary_grad_buffer;
             double grad_start_time = 0.0;
             Gradients grads;
             SampleGradMatrix sample_position_grad_buffer;
@@ -444,12 +550,12 @@ namespace SplineTrajectory
                 samples_valid = false;
                 grad_coeffs.resize(pieces * Spline::kCoefficientCount, DIM);
                 grad_times.resize(pieces);
-                global_time_grad_buffer.resize(pieces);
+                trajectory_time_grad_buffer.resize(pieces);
                 auxiliary_grad_buffer.resize(auxiliary);
                 grads.setZero(pieces);
                 segment_results.resize(pieces);
                 integral_samples.resize(static_cast<std::size_t>(samples));
-                sample_position_grad_buffer.resize(DIM, samples);
+                sample_position_grad_buffer.resize(samples, DIM);
                 sample_time_grad_buffer.resize(samples);
             }
         };
@@ -485,52 +591,32 @@ namespace SplineTrajectory
         }
         static bool finiteBoundary(const BoundaryConditions<DIM> &boundary)
         {
-            bool valid = detail::allFinite(boundary.start_velocity) && detail::allFinite(boundary.end_velocity);
+            bool valid = detail::allFinite(boundary.start.v) && detail::allFinite(boundary.end.v);
             if constexpr (Spline::kDegree >= 5)
-                valid = valid && detail::allFinite(boundary.start_acceleration) && detail::allFinite(boundary.end_acceleration);
+                valid = valid && detail::allFinite(boundary.start.a) && detail::allFinite(boundary.end.a);
             if constexpr (Spline::kDegree >= 7)
-                valid = valid && detail::allFinite(boundary.start_jerk) && detail::allFinite(boundary.end_jerk);
+                valid = valid && detail::allFinite(boundary.start.j) && detail::allFinite(boundary.end.j);
             return valid;
         }
-        template<class Function>
-        void forEachBoundary(Function &&function) const
+        template<class Boundary, class Function>
+        void forEachBoundary(Boundary &boundary, Function &&function) const
         {
-            const auto &mask = prepared_.mask;
-            if (mask.start.v) function(0);
-            if constexpr (Spline::kDegree >= 5) if (mask.start.a) function(1);
-            if constexpr (Spline::kDegree >= 7) if (mask.start.j) function(2);
-            if (mask.end.v) function(3);
-            if constexpr (Spline::kDegree >= 5) if (mask.end.a) function(4);
-            if constexpr (Spline::kDegree >= 7) if (mask.end.j) function(5);
-        }
-        template<class Boundary>
-        static decltype(auto) boundaryVector(Boundary &boundary, int slot)
-        {
-            switch (slot)
-            {
-            case 0: return (boundary.start_velocity);
-            case 1: return (boundary.start_acceleration);
-            case 2: return (boundary.start_jerk);
-            case 3: return (boundary.end_velocity);
-            case 4: return (boundary.end_acceleration);
-            default: return (boundary.end_jerk);
-            }
-        }
-        const Vector &boundaryGradient(int slot) const
-        {
-            const auto &endpoint = slot < 3 ? buffers_.grads.start : buffers_.grads.end;
-            if constexpr (Spline::kDegree >= 7) if (slot % 3 == 2) return endpoint.j;
-            if constexpr (Spline::kDegree >= 5) if (slot % 3 == 1) return endpoint.a;
-            return endpoint.v;
+            const auto visit = [&](auto &endpoint, const BoundaryDerivativeMask &mask) {
+                if (mask.v) function(endpoint.v);
+                if constexpr (Spline::kDegree >= 5) if (mask.a) function(endpoint.a);
+                if constexpr (Spline::kDegree >= 7) if (mask.j) function(endpoint.j);
+            };
+            visit(boundary.start, prepared_.mask.start);
+            visit(boundary.end, prepared_.mask.end);
         }
         ParameterView<Spline> parameterView() const
         {
             return {state_.spline.polynomial(), state_.durations, state_.waypoints, state_.bc, state_.start_time};
         }
-        ParameterGradient<Spline> parameterGradient()
+        ParameterGradientView<Spline> parameterGradient()
         {
             auto &gradient = buffers_.grads;
-            return {gradient.inner_points, gradient.durations, gradient.start, gradient.end, buffers_.grad_start_time};
+            return {gradient, buffers_.grad_start_time};
         }
 
         // Initial coordinates belong to the prepared problem, not the changing trial state.
@@ -538,23 +624,23 @@ namespace SplineTrajectory
         {
             const auto &reference = prepared_.problem;
             Eigen::VectorXd x(prepared_.layout.dimension);
-            for (const auto &variable : prepared_.layout.time)
+            for (const auto &variable : prepared_.layout.durations)
             {
-                auto value = timeMap().toTau(reference.durations[variable.segment_index]);
+                auto value = timeMap().inverse(reference.durations[variable.segment_index]);
                 if (const auto status = detail::mappingStatus(value); !status) return status;
                 x(variable.offset) = detail::mappingValue(value);
             }
             for (const auto &variable : prepared_.layout.waypoints)
             {
-                auto value = spaceMap().toUnconstrained(reference.waypoints.row(variable.point_index).transpose(), variable.point_index);
+                auto value = spaceMap().inverse(reference.waypoints.row(variable.point_index).transpose(), variable.point_index);
                 if (const auto status = detail::mappingStatus(value); !status) return status;
                 if (detail::mappingValue(value).size() != variable.dof)
                     return Status{ErrorCode::DimensionMismatch, "Spatial map initial dimension mismatch", variable.point_index};
                 x.segment(variable.offset, variable.dof) = detail::mappingValue(value);
             }
             int offset = prepared_.layout.boundary_offset;
-            forEachBoundary([&](int slot) {
-                x.template segment<DIM>(offset) = boundaryVector(reference.boundary, slot);
+            forEachBoundary(reference.boundary, [&](const auto &value) {
+                x.template segment<DIM>(offset) = value;
                 offset += DIM;
             });
             if constexpr (has_auxiliary)
@@ -601,13 +687,13 @@ namespace SplineTrajectory
             const int n = prepared_.num_segments;
             prepared_.mask = prepared_.problem.mask.value_or(OptimizationMask{});
             auto &mask = prepared_.mask;
-            if (mask.time.empty()) mask.time.assign(n, 1);
+            if (mask.durations.empty()) mask.durations.assign(n, 1);
             if (mask.waypoints.empty())
             {
                 mask.waypoints.assign(n + 1, 1);
                 mask.waypoints.front() = mask.waypoints.back() = 0;
             }
-            if (mask.time.size() != static_cast<std::size_t>(n) || mask.waypoints.size() != static_cast<std::size_t>(n + 1))
+            if (mask.durations.size() != static_cast<std::size_t>(n) || mask.waypoints.size() != static_cast<std::size_t>(n + 1))
                 return error(ErrorCode::DimensionMismatch, "Optimization mask does not match topology");
             if constexpr (Spline::kDegree < 5)
                 if (mask.start.a || mask.end.a)
@@ -617,11 +703,11 @@ namespace SplineTrajectory
                     return error(ErrorCode::InvalidInput, "This spline has no jerk boundary variables");
 
             auto &layout = prepared_.layout;
-            layout.time.clear();
+            layout.durations.clear();
             layout.waypoints.clear();
             std::int64_t offset = 0;
             for (int i = 0; i < n; ++i)
-                if (mask.time[i]) layout.time.push_back({i, static_cast<int>(offset++)});
+                if (mask.durations[i]) layout.durations.push_back({i, static_cast<int>(offset++)});
             for (int i = 0; i <= n; ++i)
             {
                 if (!mask.waypoints[i]) continue;
@@ -632,7 +718,7 @@ namespace SplineTrajectory
                 offset += dof;
             }
             layout.boundary_offset = static_cast<int>(offset);
-            forEachBoundary([&](int) { offset += DIM; });
+            forEachBoundary(prepared_.problem.boundary, [&](const auto &) { offset += DIM; });
             const int auxiliary = auxiliaryDimension();
             if (auxiliary < 0 || offset + auxiliary > std::numeric_limits<int>::max())
                 return error(ErrorCode::InvalidInput, "Invalid auxiliary decision dimension");
@@ -669,7 +755,7 @@ namespace SplineTrajectory
             state_.bc = prepared_.problem.boundary;
             state_.start_time = prepared_.problem.start_time;
             if constexpr (has_auxiliary)
-                state_.mapped_durations.resize(prepared_.layout.time.size());
+                state_.mapped_durations.resize(prepared_.layout.durations.size());
             state_.auxiliary_vars.resize(auxiliary);
             return Status::success();
         }
@@ -724,9 +810,9 @@ namespace SplineTrajectory
                 state_.bc = reference.boundary;
                 state_.start_time = reference.start_time;
             }
-            for (const auto &variable : prepared_.layout.time)
+            for (const auto &variable : prepared_.layout.durations)
             {
-                auto value = timeMap().toTime(x(variable.offset));
+                auto value = timeMap().forward(x(variable.offset));
                 if (const auto status = detail::mappingStatus(value); !status) return reject(status);
                 const double duration = detail::mappingValue(value);
                 if (!(duration > 0.0) || !std::isfinite(duration))
@@ -736,13 +822,13 @@ namespace SplineTrajectory
             }
             for (const auto &variable : prepared_.layout.waypoints)
             {
-                auto point = spaceMap().toPhysical(x.segment(variable.offset, variable.dof), variable.point_index);
+                auto point = spaceMap().forward(x.segment(variable.offset, variable.dof), variable.point_index);
                 if (const auto status = detail::mappingStatus(point); !status) return reject(status);
                 state_.waypoints.row(variable.point_index) = detail::mappingValue(point).transpose();
             }
             int offset = prepared_.layout.boundary_offset;
-            forEachBoundary([&](int slot) {
-                boundaryVector(state_.bc, slot) = x.template segment<DIM>(offset);
+            forEachBoundary(state_.bc, [&](auto &value) {
+                value = x.template segment<DIM>(offset);
                 offset += DIM;
             });
             if constexpr (has_auxiliary)
@@ -791,17 +877,19 @@ namespace SplineTrajectory
          * @return Failure leaves the optimizer unprepared with no usable polynomial.
          * @note Allocation occurs here. Borrowed maps must remain valid throughout the solve;
          *       reprepare whenever their mapping behavior changes. */
-        Status prepare(const Problem &problem, OptimizerOptions options = {})
-        { return prepareImpl(problem, options, false); }
+        template<class Objective,
+                 std::enable_if_t<!std::is_same_v<detail::Plain<Objective>, OptimizerOptions>, int> = 0>
+        Status prepare(const Problem &problem, const Objective &objective)
+        { return prepare(problem, OptimizerOptions{}, objective); }
 
-        /** @brief Also prepare storage required by the objective's sample stage.
-         * @param objective Inspected by type only; no objective reference is retained.
-         * @return Success with the documented output, or an explicit input/state/numerical failure. */
+        /** @brief Prepare all library storage needed by the objective; no objective reference is retained. */
         template<class Objective>
         Status prepare(const Problem &problem, OptimizerOptions options, const Objective &objective)
         {
             (void)objective;
-            return prepareImpl(problem, options, detail::HasSample<Objective>::value);
+            using O = detail::Plain<Objective>;
+            validateObjective<O>();
+            return prepareImpl(problem, options, SampleStage<O>::present);
         }
 
         bool isPrepared() const noexcept { return static_cast<bool>(prepared_.status); }
@@ -809,7 +897,7 @@ namespace SplineTrajectory
         const Problem &problem() const noexcept { return prepared_.problem; }
         const DecisionLayout &layout() const noexcept { return prepared_.layout; }
         const OptimizationMask &activeMask() const noexcept { return prepared_.mask; }
-        /** @brief Borrow the last built polynomial; inspect evaluation/updateAccepted status before use.
+        /** @brief Borrow the last built polynomial; inspect evaluation/update status before use.
          * @note Any evaluation, preparation or movement invalidates previously obtained views/samplers. */
         const Polynomial &polynomial() const & { return state_.spline.polynomial(); }
         const Polynomial &polynomial() const && = delete;
@@ -846,56 +934,53 @@ namespace SplineTrajectory
             return prepared_.initial_variables;
         }
 
-        /** @brief Rebuild the external solver's accepted vector without evaluating the objective.
+        /** @brief Rebuild a candidate without evaluating costs; use the solver's final accepted vector after solving.
          * @param x Accepted coordinates, not necessarily the solver's final trial callback.
          * @return Failure clears the working polynomial; prepared configuration remains reusable. */
 #if defined(__GNUC__) || defined(__clang__)
         __attribute__((noinline))
 #endif
-        Status updateAccepted(const Eigen::VectorXd &x)
+        Status update(const Eigen::VectorXd &x)
         {
             buffers_.samples_valid = false;
             if (!isPrepared() || x.size() != dimension() || !detail::allFinite(x))
             {
                 state_.spline = Spline{};
                 if (!isPrepared()) return prepared_.status;
-                if (x.size() != dimension()) return error(ErrorCode::DimensionMismatch, "Accepted decision vector has wrong size");
-                return error(ErrorCode::InvalidInput, "Nonfinite accepted decision vector");
+                if (x.size() != dimension()) return error(ErrorCode::DimensionMismatch, "Decision vector has wrong size");
+                return error(ErrorCode::InvalidInput, "Nonfinite decision vector");
             }
             return buildCandidate(x);
         }
 
         /** @brief Evaluate one candidate with statically bound named objective stages.
          * @param x Prepared-size finite decision vector.
-         * @param[out] gradient Pre-sized decision gradient; cleared on failure, never resized here.
+         * @param[out] gradient Owning decision gradient; resized as needed and cleared on failure. Must not alias x.
          * @param[in,out] objective Named cost members borrowed only for this synchronous call.
          * @param executor Segment executor; parallel calls require a thread-safe integral member.
          * @return Finite cost and success, or infinity with a failure status.
-         * @note Fixed-topology library evaluation does not allocate. User callbacks own their allocation
-         *       and exception behavior. A sample member requires prepare(problem, options, objective). */
+         * @note Prepared fixed-topology evaluation reuses storage; an unmatched owning output may allocate. User callbacks own their allocation
+         *       and exception behavior. Preparation must include the objective, with default or explicit options. */
         template<class Objective, class Executor = SerialExecutor>
         EvaluationResult evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &gradient,
                                   Objective &objective, const Executor &executor = {})
         {
             buffers_.samples_valid = false;
             using O = detail::Plain<Objective>;
-            static_assert(detail::HasDuration<O>::value || detail::HasIntegral<O>::value ||
-                          detail::HasSample<O>::value || detail::HasCoefficient<O>::value ||
-                          detail::HasParameter<O>::value || detail::HasDecision<O>::value ||
-                          std::is_same_v<O, NoObjective>,
-                          "Objective must declare a supported cost member, or explicitly use NoObjective");
+            validateObjective<O>();
             if (!isPrepared()) return failEvaluation(prepared_.status, gradient);
-            if (x.size() != dimension() || gradient.size() != dimension())
+            gradient.resize(dimension());
+            if (x.size() != dimension())
             {
                 state_.spline = Spline{};
-                return failEvaluation(error(ErrorCode::DimensionMismatch, "Decision vector and output gradient must be pre-sized"), gradient);
+                return failEvaluation(error(ErrorCode::DimensionMismatch, "Decision vector must match the prepared layout"), gradient);
             }
             if (!detail::allFinite(x))
             {
                 state_.spline = Spline{};
                 return failEvaluation(error(ErrorCode::InvalidInput, "Nonfinite decision vector"), gradient);
             }
-            if constexpr (detail::HasSample<O>::value)
+            if constexpr (SampleStage<O>::present)
                 if (!prepared_.sample_capability)
                     return failEvaluation(error(ErrorCode::SamplingNotPrepared, "Prepare with the objective before evaluating its sample stage"), gradient);
 
@@ -909,14 +994,14 @@ namespace SplineTrajectory
             b.grad_times.setZero();
             b.grad_start_time = 0.0;
             double cost = 0.0;
-            constexpr bool needs_integral = detail::HasIntegral<O>::value;
+            constexpr bool needs_integral = IntegralStage<O>::present;
             if (const auto status = accumulateCoefficientCosts(objective, executor, cost); !status)
                 return failEvaluation(status, gradient);
 
             // Inactive coefficient-stage costs need no spline adjoint. Test components
             // exactly: a norm can underflow and incorrectly erase nonzero partials.
             bool needs_adjoint = false;
-            if constexpr (needs_integral || detail::HasSample<O>::value || detail::HasCoefficient<O>::value)
+            if constexpr (needs_integral || SampleStage<O>::present || CoefficientStage<O>::present)
                 needs_adjoint = (b.grad_coeffs.array() != 0.0).any();
             if (needs_adjoint)
                 state_.spline.backward(b.grad_coeffs, b.grad_times, b.grads);
@@ -931,18 +1016,12 @@ namespace SplineTrajectory
                 return failEvaluation(status, gradient);
 
             // Direct decision penalties add to the mapped gradient; publish only finite results.
-            if constexpr (detail::HasDecision<O>::value)
+            if constexpr (DecisionStage<O>::valid)
             {
-                auto &function = detail::unwrap(objective.decision);
-                using Output = Eigen::Ref<Eigen::VectorXd>;
-                constexpr bool valid = std::is_invocable_r_v<EvaluationResult, decltype(function), const DecisionView &, Output>;
-                static_assert(valid, "Objective.decision must return EvaluationResult and accept (const DecisionView&, Eigen::Ref<VectorXd>)");
-                if constexpr (valid)
-                {
-                    const auto result = function(DecisionView{x, prepared_.layout}, Output(gradient));
-                    if (!result) return failEvaluation(result.status, gradient);
-                    cost += result.cost;
-                }
+                const auto result = detail::toEvaluationResult(
+                    objective.decision(DecisionView{x, prepared_.layout}, Eigen::Ref<Eigen::VectorXd>(gradient)));
+                if (!result) return failEvaluation(result.status, gradient);
+                cost += result.cost;
             }
             if (!std::isfinite(cost) || !detail::allFinite(gradient) || !std::isfinite(b.grad_start_time))
                 return failEvaluation(error(ErrorCode::NumericalFailure, "Nonfinite objective or decision gradient"), gradient);
@@ -950,7 +1029,7 @@ namespace SplineTrajectory
         }
 
     private:
-        /** @brief Accumulate duration, integral, sample and coefficient costs before the spline adjoint.
+        /** @brief Accumulate integral, sample and coefficient costs before the spline adjoint.
          * @param[in,out] objective Statically bound callbacks borrowed for this evaluation only.
          * @param executor Segment executor; parallel integral callbacks must be thread-safe.
          * @param[in,out] cost Additive scalar objective; owned partial buffers were cleared by evaluate().
@@ -961,26 +1040,11 @@ namespace SplineTrajectory
         {
             using O = detail::Plain<Objective>;
             auto &b = buffers_;
-            if constexpr (detail::HasDuration<O>::value)
-            {
-                auto &function = detail::unwrap(objective.duration);
-                using Function = decltype(function);
-                using Output = Eigen::Ref<Eigen::VectorXd>;
-                constexpr bool valid = std::is_invocable_r_v<EvaluationResult, Function, const std::vector<double> &, Output>;
-                static_assert(valid, "Objective.duration must return EvaluationResult and accept (const vector<double>&, Eigen::Ref<VectorXd>)");
-                if constexpr (valid)
-                {
-                    const auto result = function(state_.durations, Output(b.grad_times));
-                    if (!result) return result.status;
-                    cost += result.cost;
-                }
-            }
-
-            const bool record_samples = detail::HasSample<O>::value || prepared_.options.record_samples;
-            constexpr bool needs_integral = detail::HasIntegral<O>::value;
+            const bool record_samples = SampleStage<O>::present || prepared_.options.record_samples;
+            constexpr bool needs_integral = IntegralStage<O>::present;
             if constexpr (needs_integral)
             {
-                const auto result = evaluateIntegral(detail::unwrap(objective.integral), executor, record_samples);
+                const auto result = evaluateIntegral(objective, executor, record_samples);
                 if (!result) return result.status;
                 cost += result.cost;
             }
@@ -988,36 +1052,24 @@ namespace SplineTrajectory
             {
                 recordSamples(executor);
             }
-            if constexpr (detail::HasSample<O>::value)
+            if constexpr (SampleStage<O>::valid)
             {
                 b.sample_position_grad_buffer.setZero();
                 b.sample_time_grad_buffer.setZero();
-                auto &function = detail::unwrap(objective.sample);
-                using PositionOutput = Eigen::Ref<SampleGradMatrix>;
-                using TimeOutput = Eigen::Ref<Eigen::VectorXd>;
-                constexpr bool valid = std::is_invocable_r_v<EvaluationResult, decltype(function), const SampleBuffer &, PositionOutput, TimeOutput>;
-                static_assert(valid, "Objective.sample must accept (const SampleBuffer&, Eigen::Ref<SampleGradMatrix>, Eigen::Ref<VectorXd>) and return EvaluationResult");
-                if constexpr (valid)
-                {
-                    const auto result = function(b.integral_samples, PositionOutput(b.sample_position_grad_buffer), TimeOutput(b.sample_time_grad_buffer));
-                    if (!result) return result.status;
-                    cost += result.cost;
-                    accumulateSampleCostGradients();
-                }
+                const auto result = detail::toEvaluationResult(objective.sample(b.integral_samples,
+                    Eigen::Ref<SampleGradMatrix>(b.sample_position_grad_buffer),
+                    Eigen::Ref<Eigen::VectorXd>(b.sample_time_grad_buffer)));
+                if (!result) return result.status;
+                cost += result.cost;
+                accumulateSampleCostGradients();
             }
-            if constexpr (detail::HasCoefficient<O>::value)
+            if constexpr (CoefficientStage<O>::valid)
             {
-                auto &function = detail::unwrap(objective.coefficient);
-                constexpr bool valid = std::is_invocable_r_v<EvaluationResult, decltype(function), const ParameterView<Spline> &, CoefficientGradient<Spline> &>;
-                static_assert(valid, "Objective.coefficient must return EvaluationResult and accept (const ParameterView<Spline>&, CoefficientGradient<Spline>&)");
-                if constexpr (valid)
-                {
-                    auto input = parameterView();
-                    CoefficientGradient<Spline> output{b.grad_coeffs, b.grad_times, b.grad_start_time};
-                    const auto result = function(input, output);
-                    if (!result) return result.status;
-                    cost += result.cost;
-                }
+                auto input = parameterView();
+                CoefficientGradientView<Spline> output{b.grad_coeffs, b.grad_times, b.grad_start_time};
+                const auto result = detail::toEvaluationResult(objective.coefficient(input, output));
+                if (!result) return result.status;
+                cost += result.cost;
             }
             return Status::success();
         }
@@ -1033,48 +1085,49 @@ namespace SplineTrajectory
         {
             using O = detail::Plain<Objective>;
             auto &b = buffers_;
-            if constexpr (detail::HasParameter<O>::value)
+            if constexpr (ParameterStage<O>::valid)
             {
-                auto &function = detail::unwrap(objective.parameter);
-                constexpr bool valid = std::is_invocable_r_v<EvaluationResult, decltype(function), const ParameterView<Spline> &, ParameterGradient<Spline> &>;
-                static_assert(valid, "Objective.parameter must return EvaluationResult and accept (const ParameterView<Spline>&, ParameterGradient<Spline>&)");
-                if constexpr (valid)
-                {
-                    auto input = parameterView();
-                    auto output = parameterGradient();
-                    const auto result = function(input, output);
-                    if (!result) return result.status;
-                    cost += result.cost;
-                }
+                auto input = parameterView();
+                auto output = parameterGradient();
+                const auto result = detail::toEvaluationResult(objective.parameter(input, output));
+                if (!result) return result.status;
+                cost += result.cost;
             }
             if constexpr (has_auxiliary)
             {
                 b.auxiliary_grad_buffer.setZero();
                 auto input = parameterView();
                 auto output = parameterGradient();
-                const auto result = auxiliaryMap().backward(state_.auxiliary_vars, input, output,
+                const Status status = auxiliaryMap().backward(state_.auxiliary_vars, input, output,
                                                 Eigen::Ref<Eigen::VectorXd>(b.auxiliary_grad_buffer));
-                if (!result) return result.status;
-                cost += result.cost;
+                if (!status) return status;
                 gradient.segment(prepared_.layout.auxiliary_offset, b.auxiliary_grad_buffer.size()) = b.auxiliary_grad_buffer;
             }
             return Status::success();
         }
 
-        template<class Integral, class Executor>
-        EvaluationResult evaluateIntegral(Integral &integral, const Executor &executor, bool record_samples)
+        template<class Objective, class Executor>
+        EvaluationResult evaluateIntegral(Objective &objective, const Executor &executor, bool record_samples)
         {
-            constexpr bool valid = std::is_invocable_r_v<EvaluationResult, Integral &, const IntegralPointInfo &,
-                                                        const SampleState<DIM> &, SampleGradient<DIM> &>;
-            static_assert(valid, "Objective.integral must return EvaluationResult and accept (const IntegralPointInfo&, const SampleState<DIM>&, SampleGradient<DIM>&)");
-            constexpr int derivative_order = detail::IntegralDerivativeOrder<detail::Plain<Integral>>::value;
-            static_assert(derivative_order >= 0 && derivative_order <= 4,
-                          "Objective.integral kDerivativeOrder must be between zero and four");
+            using O = detail::Plain<Objective>;
+            constexpr int order = detail::IntegralOrder<O>::value;
+            static_assert(order >= 0 && order <= 4, "Integral kDerivativeOrder must be between zero and four");
             EvaluationResult result{0.0, Status::success()};
-            if constexpr (valid && derivative_order >= 0 && derivative_order <= 4)
+            if constexpr (IntegralStage<O>::valid && order >= 0 && order <= 4)
             {
-                if constexpr (detail::HasBeginEvaluation<Integral>::value) integral.beginEvaluation();
-                result = accumulateIntegralCost(integral, record_samples, executor);
+                if constexpr (detail::HasIntegralObject<O>::value)
+                {
+                    auto &integral = detail::unwrap(objective.integral);
+                    if constexpr (detail::HasBeginEvaluation<detail::Plain<decltype(integral)>>::value)
+                        integral.beginEvaluation();
+                }
+                else if constexpr (detail::HasBeginIntegralEvaluation<O>::value)
+                    objective.beginIntegralEvaluation();
+                auto integral = [&](const IntegralPointInfo &point, const SampleState<DIM> &state,
+                                    SampleGradient<DIM> &gradient) {
+                    return objective.integral(point, state, gradient);
+                };
+                result = accumulateIntegralCost<order>(integral, record_samples, executor);
                 buffers_.samples_valid = record_samples && result.status.ok();
             }
             return result;
@@ -1094,7 +1147,7 @@ namespace SplineTrajectory
         Status writeDecisionGradient(const Eigen::VectorXd &x, Eigen::VectorXd &gradient) const
         {
             const auto &g = buffers_.grads;
-            for (const auto &variable : prepared_.layout.time)
+            for (const auto &variable : prepared_.layout.durations)
             {
                 const double tau = x(variable.offset);
                 // Auxiliary pullbacks return derivatives in the original mapped coordinates.
@@ -1113,20 +1166,20 @@ namespace SplineTrajectory
                 else if (variable.point_index == prepared_.num_segments) physical = g.end.p;
                 else physical = g.inner_points.row(variable.point_index - 1).transpose();
                 const auto status = detail::invokeMapping([&] {
-                    return spaceMap().backwardInto(x.segment(variable.offset, variable.dof), physical,
+                    return spaceMap().backward(x.segment(variable.offset, variable.dof), physical,
                         variable.point_index, gradient.segment(variable.offset, variable.dof));
                 });
                 if (!status) return status;
             }
             int offset = prepared_.layout.boundary_offset;
-            forEachBoundary([&](int slot) {
-                gradient.template segment<DIM>(offset) = boundaryGradient(slot);
+            forEachBoundary(g, [&](const auto &value) {
+                gradient.template segment<DIM>(offset) = value;
                 offset += DIM;
             });
             return Status::success();
         }
 
-        /** @brief Reverse recorded position/global-time partials into owned coefficient/time buffers.
+        /** @brief Reverse recorded position/trajectory-time partials into owned coefficient/time buffers.
          * @note Requires sample-capable preparation and callback outputs with their fixed shapes.
          *       Reuses exclusive buffers without allocation; explicit time partials are always accumulated. */
         void accumulateSampleCostGradients()
@@ -1136,16 +1189,16 @@ namespace SplineTrajectory
             const auto &sample_time_gradients = buffers_.sample_time_grad_buffer;
             auto &grad_coeffs = buffers_.grad_coeffs;
             auto &grad_times = buffers_.grad_times;
-            auto &global_time_grad = buffers_.global_time_grad_buffer;
+            auto &trajectory_time_grad = buffers_.trajectory_time_grad_buffer;
             const Eigen::Index sample_count = static_cast<Eigen::Index>(samples.size());
-            global_time_grad.setZero();
+            trajectory_time_grad.setZero();
 
             for (Eigen::Index sample_idx = 0; sample_idx < sample_count; ++sample_idx)
             {
                 const IntegralSample &sample = samples[sample_idx];
                 const int segment_index = sample.point.segment_index;
                 const int base_row = segment_index * SplineType::kCoefficientCount;
-                const Vector grad_position = sample_position_gradients.col(sample_idx);
+                const Vector grad_position = sample_position_gradients.row(sample_idx).transpose();
 
                 // Exact component tests preserve tiny nonzero partials and propagate NaNs.
                 if ((grad_position.array() != 0.0).any())
@@ -1157,24 +1210,24 @@ namespace SplineTrajectory
 
                 const double grad_time = sample_time_gradients(sample_idx);
                 grad_times(segment_index) += grad_time * sample.point.alpha;
-                global_time_grad(segment_index) += grad_time;
+                trajectory_time_grad(segment_index) += grad_time;
             }
 
-            accumulateGlobalTimeGradients();
+            accumulateTrajectoryTimeGradients();
         }
 
-        /** @brief Reverse explicit global-time partials to earlier durations and the common start time.
+        /** @brief Reverse explicit trajectory-time partials to earlier durations and the common start time.
          * @note Each buffer entry sums the current stage's partials within one segment. Called once
          *       per stage, after local-duration terms are added; preserves reverse accumulation order. */
-        void accumulateGlobalTimeGradients()
+        void accumulateTrajectoryTimeGradients()
         {
             double accumulator = 0.0;
             for (int i = prepared_.num_segments - 1; i > 0; --i)
             {
-                accumulator += buffers_.global_time_grad_buffer(i);
+                accumulator += buffers_.trajectory_time_grad_buffer(i);
                 buffers_.grad_times(i - 1) += accumulator;
             }
-            buffers_.grad_start_time += buffers_.global_time_grad_buffer.sum();
+            buffers_.grad_start_time += buffers_.trajectory_time_grad_buffer.sum();
         }
 
         /** @brief Express a segment's coefficients on the unit time interval.
@@ -1224,10 +1277,10 @@ namespace SplineTrajectory
                 for (int k = 0; k <= steps; ++k)
                 {
                     const double alpha = k * inverse_steps;
-                    const double local_time = alpha * duration;
+                    const double segment_time = alpha * duration;
                     const Eigen::Matrix<double, 2, DIM> values = prepared_.basis[k].template topRows<2>() * coefficients;
                     const IntegralPointInfo point{segment, prepared_.num_segments, k, steps, alpha,
-                        duration, duration * inverse_steps, local_time, state_.spline.breakpoints()[segment] + local_time};
+                        duration, duration * inverse_steps, segment_time, state_.spline.breakpoints()[segment] + segment_time};
                     recordSample(point, powers, values.row(0).transpose(), values.row(1).transpose() / duration);
                 }
             });
@@ -1240,7 +1293,7 @@ namespace SplineTrajectory
          * @param executor Segment executor with disjoint per-segment writes.
          * @return Trapezoid-rule cost, or the first callback failure in segment order.
          * @note Uses exclusive owned buffers; parallel callbacks must be thread-safe. No allocation. */
-        template <typename IntegralFunc, typename Executor>
+        template <int derivative_order, typename IntegralFunc, typename Executor>
 #if defined(__GNUC__) || defined(__clang__)
         // Keep statically bound sample/flatness call chains visible inside the quadrature loop.
         // GCC 9 otherwise outlines them after structured state binding, increasing measured planner cost.
@@ -1255,7 +1308,7 @@ namespace SplineTrajectory
             auto &grad_times = buffers.grad_times;
             std::fill(buffers.segment_results.begin(), buffers.segment_results.end(), EvaluationResult{0.0, Status::success()});
 
-            buffers.global_time_grad_buffer.setZero();
+            buffers.trajectory_time_grad_buffer.setZero();
 
             int K = prepared_.options.integration_steps;
             double inv_K = 1.0 / K;
@@ -1295,8 +1348,6 @@ namespace SplineTrajectory
 
                     const auto &basis = prepared_.basis[k];
 
-                    using Cost = std::decay_t<IntegralFunc>;
-                    constexpr int derivative_order = detail::IntegralDerivativeOrder<Cost>::value;
                     static_assert(derivative_order >= 0 && derivative_order <= 4,
                                   "Integral costs support derivative orders zero through four.");
                     SampleState<DIM> sample_state;
@@ -1315,12 +1366,12 @@ namespace SplineTrajectory
 
                     SampleGradient<DIM> partials;
                     auto &gp = partials.p; auto &gv = partials.v; auto &ga = partials.a;
-                    auto &gj = partials.j; auto &gs = partials.s; auto &gt = partials.time;
+                    auto &gj = partials.j; auto &gs = partials.s; auto &gt = partials.trajectory_time;
                     const IntegralPointInfo point{i, prepared_.num_segments, k, K,
                                                   alpha, T, dt, t, t_global};
                     // Successful callbacks guarantee valid partials. Only explicit rejection
                     // stops this segment; the final objective/gradient is checked once outside.
-                    const auto evaluated = integral_cost(point, sample_state, partials);
+                    const auto evaluated = detail::toEvaluationResult(integral_cost(point, sample_state, partials));
                     if (!evaluated)
                     {
                         Status status = evaluated.status;
@@ -1359,20 +1410,20 @@ namespace SplineTrajectory
                 buffers.segment_results[i] = {local_acc_cost, Status::success()};
 
                 grad_times(i) += local_acc_gdT;
-                buffers.global_time_grad_buffer(i) += local_acc_explicit_time_grad;
+                buffers.trajectory_time_grad_buffer(i) += local_acc_explicit_time_grad;
 
                 for (int power = 0; power < SplineType::kCoefficientCount; ++power)
                     grad_coeffs.row(base_row + power) += time_powers(power) * local_acc_gdC.row(power);
             });
 
-            // Reduce in segment order after workers finish, then reverse the global time chain.
+            // Reduce in segment order after workers finish, then reverse the trajectory-time chain.
             double cost = 0.0;
             for (int i = 0; i < prepared_.num_segments; ++i)
             {
                 if (!buffers.segment_results[i]) return buffers.segment_results[i];
                 cost += buffers.segment_results[i].cost;
             }
-            accumulateGlobalTimeGradients();
+            accumulateTrajectoryTimeGradients();
             return {cost, Status::success()};
         }
 

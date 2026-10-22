@@ -178,12 +178,12 @@ void runEvaluationTests()
     SepticSpline3D::CoefficientMatrix spline_points = convertRouteToSplineMatrix(route);
     std::vector<double> time_segments = convertVectorXdToStdVector(ts);
     BoundaryConditions<3> boundary;
-    boundary.start_velocity.setZero();
-    boundary.start_acceleration.setZero();
-    boundary.start_jerk.setZero();
-    boundary.end_velocity.setZero();
-    boundary.end_acceleration.setZero();
-    boundary.end_jerk.setZero();
+    boundary.start.v.setZero();
+    boundary.start.a.setZero();
+    boundary.start.j.setZero();
+    boundary.end.v.setZero();
+    boundary.end.a.setZero();
+    boundary.end.j.setZero();
     if (const auto status = septicSpline.update(time_segments, spline_points, 0.0, boundary); !status) { throw std::runtime_error(status.message); }
 
     double total_duration = minSnapTraj.getTotalDuration();
@@ -455,12 +455,12 @@ int main()
 
             // 设置边界条件（零速度、加速度和急动度）
             BoundaryConditions<3> boundary;
-            boundary.start_velocity.setZero();
-            boundary.start_acceleration.setZero();
-            boundary.start_jerk.setZero();
-            boundary.end_velocity.setZero();
-            boundary.end_acceleration.setZero();
-            boundary.end_jerk.setZero();
+            boundary.start.v.setZero();
+            boundary.start.a.setZero();
+            boundary.start.j.setZero();
+            boundary.end.v.setZero();
+            boundary.end.a.setZero();
+            boundary.end.j.setZero();
 
             // 测试 SepticSpline - 直接使用时间段构造
             tc1 = std::chrono::high_resolution_clock::now();

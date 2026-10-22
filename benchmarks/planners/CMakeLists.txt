@@ -26,6 +26,10 @@ target_include_directories(planner_super_native SYSTEM PRIVATE ${planner_generat
 # Compile original translation units without treating upstream diagnostics as owned warnings.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(planner_super_native PRIVATE -fno-fast-math)
+    # Eigen layouts must agree with the executables across translation units.
+    if(SPLINE_NATIVE_ARCH)
+        target_compile_options(planner_super_native PRIVATE -march=native)
+    endif()
 endif()
 
 foreach(planner gcopter super)

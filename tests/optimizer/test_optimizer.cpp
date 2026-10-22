@@ -15,9 +15,9 @@ using Matrix = Spline::CoefficientMatrix;
 using spline_test::require;
 
 template<class Curve = Spline>
-SplineTrajectory::SplineProblem<Curve> makeProblem()
+SplineTrajectory::SplineProblem<Curve::kDimension> makeProblem()
 {
-    SplineTrajectory::SplineProblem<Curve> problem;
+    SplineTrajectory::SplineProblem<Curve::kDimension> problem;
     problem.durations = {1.2, 1.5};
     problem.start_time = 2.0;
     problem.waypoints.resize(3, 3);
@@ -27,8 +27,12 @@ SplineTrajectory::SplineProblem<Curve> makeProblem()
 
 struct DurationCost
 {
-    SplineTrajectory::EvaluationResult operator()(const std::vector<double> &times, Eigen::Ref<Eigen::VectorXd> gradient) const
+    template<class Curve>
+    SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Curve> &state,
+        SplineTrajectory::ParameterGradientView<Curve> &output) const
     {
+        const auto &times = state.durations;
+        auto &gradient = output.spline.durations;
         double cost = 0.0;
         for (double duration : times) cost += duration;
         gradient.array() += 1.0;
@@ -42,9 +46,9 @@ struct ScalingSpatialMap
     double scale;
     mutable int inverse_calls = 0;
     int dimension(int) const { return 3; }
-    SplineTrajectory::StatusOr<Eigen::Vector3d> toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const { return Eigen::Vector3d(scale * x); }
-    SplineTrajectory::StatusOr<Eigen::Vector3d> toUnconstrained(const Eigen::Vector3d &point, int) const { ++inverse_calls; return Eigen::Vector3d(point / scale); }
-    SplineTrajectory::Status backwardInto(const Eigen::Ref<const Eigen::VectorXd> &, const Eigen::Vector3d &gradient,
+    SplineTrajectory::StatusOr<Eigen::Vector3d> forward(const Eigen::Ref<const Eigen::VectorXd> &x, int) const { return Eigen::Vector3d(scale * x); }
+    SplineTrajectory::StatusOr<Eigen::Vector3d> inverse(const Eigen::Vector3d &point, int) const { ++inverse_calls; return Eigen::Vector3d(point / scale); }
+    SplineTrajectory::Status backward(const Eigen::Ref<const Eigen::VectorXd> &, const Eigen::Vector3d &gradient,
                       int, Eigen::Ref<Eigen::VectorXd> output) const { output = scale * gradient;
         return SplineTrajectory::Status::success();
     }
@@ -67,11 +71,11 @@ void testOwnershipAndMovement()
     Mapped optimizer(maps);
     maps.space.scale = 7.0;
     const auto problem = makeProblem();
-    require(bool(optimizer.prepare(problem)), "owned map preparation");
+    require(bool(optimizer.prepare(problem, SplineTrajectory::NoObjective{})), "owned map preparation");
     const auto x = optimizer.initialGuess();
     require(std::abs(x(optimizer.layout().waypoints.front().offset) - 0.5) < 1e-14,
             "owned maps are independent of later caller changes");
-    struct Objective { DurationCost duration; } objective;
+    struct Objective { DurationCost parameter; } objective;
     Eigen::VectorXd gradient(x.size());
     auto moved = std::move(optimizer);
     require(!optimizer.isPrepared() && moved.isPrepared(), "move invalidates source preparation");
@@ -81,7 +85,7 @@ void testOwnershipAndMovement()
     assigned = std::move(moved);
     require(!moved.isPrepared() && bool(assigned.evaluate(x, gradient, objective)), "move assignment transfers workspace");
     auto borrowed = SplineTrajectory::makeOptimizer<Spline>(std::cref(maps));
-    require(bool(borrowed.prepare(problem)), "explicitly borrowed parameterization");
+    require(bool(borrowed.prepare(problem, SplineTrajectory::NoObjective{})), "explicitly borrowed parameterization");
     const auto borrowed_x = borrowed.initialGuess();
     auto editable_initial = borrowed.initialGuess();
     editable_initial.setZero();
@@ -91,13 +95,13 @@ void testOwnershipAndMovement()
     require(maps.space.inverse_calls == 1, "trial evaluation does not encode coordinates");
     auto changed = problem;
     changed.waypoints(1, 0) += 1.0;
-    require(bool(borrowed.prepare(changed)) && maps.space.inverse_calls == 2,
+    require(bool(borrowed.prepare(changed, SplineTrajectory::NoObjective{})) && maps.space.inverse_calls == 2,
             "a new problem refreshes its initial coordinate snapshot");
     require(std::abs(borrowed.initialGuess()(borrowed.layout().waypoints.front().offset) - 2.0 / 7.0) < 1e-14,
             "repreparation replaces the previous initial coordinates");
     require(std::abs(borrowed_x(borrowed.layout().waypoints.front().offset) - 1.0 / 7.0) < 1e-14,
             "borrowed maps use the supplied object");
-    require(bool(assigned.prepare(assigned.problem())), "prepare accepts the optimizer's own immutable problem view");
+    require(bool(assigned.prepare(assigned.problem(), SplineTrajectory::NoObjective{})), "prepare accepts the optimizer's own immutable problem view");
 }
 
 void testInputAndAcceptedState()
@@ -105,31 +109,31 @@ void testInputAndAcceptedState()
     Optimizer optimizer;
     auto problem = makeProblem();
     SplineTrajectory::OptimizationMask mask;
-    mask.time = {1};
+    mask.durations = {1};
     problem.mask = mask;
-    require(!optimizer.prepare(problem), "reject malformed mask");
+    require(!optimizer.prepare(problem, SplineTrajectory::NoObjective{}), "reject malformed mask");
     require(!optimizer.isPrepared() && !optimizer.polynomial().isValid(), "failed preparation invalidates state");
     problem.mask.reset();
-    require(bool(optimizer.prepare(problem)), "prepare valid problem after rejection");
+    require(bool(optimizer.prepare(problem, SplineTrajectory::NoObjective{})), "prepare valid problem after rejection");
     auto x = optimizer.initialGuess();
     Eigen::VectorXd gradient;
-    struct Objective { DurationCost duration; } objective;
-    require(!optimizer.evaluate(x, gradient, objective) && gradient.size() == 0,
-            "wrong output shape is rejected without implicit allocation");
+    struct Objective { DurationCost parameter; } objective;
+    require(bool(optimizer.evaluate(x, gradient, objective)) && gradient.size() == x.size(),
+            "owning output is resized on first evaluation");
     gradient.resize(x.size());
     require(bool(optimizer.evaluate(x, gradient, objective)), "evaluate after sizing output");
     const auto accepted = optimizer.copyPolynomial();
     const auto original = x;
     x(0) += 0.4;
     require(bool(optimizer.evaluate(x, gradient, objective)), "evaluate a later trial");
-    require(bool(optimizer.updateAccepted(original)), "restore the solver's accepted vector");
+    require(bool(optimizer.update(original)), "restore the solver's accepted vector");
     require(optimizer.polynomial().coefficients().isApprox(accepted.coefficients(), 1e-13),
             "accepted state must not equal the last rejected trial");
     x(0) = std::numeric_limits<double>::quiet_NaN();
-    require(!optimizer.updateAccepted(x) && !optimizer.polynomial().isValid(), "invalid acceptance clears polynomial");
+    require(!optimizer.update(x) && !optimizer.polynomial().isValid(), "invalid acceptance clears polynomial");
 
     auto mapped = SplineTrajectory::makeOptimizer<Spline>(Parameterization{{}, ScalingSpatialMap(1.0), {}});
-    require(bool(mapped.prepare(problem)), "prepare identity durations");
+    require(bool(mapped.prepare(problem, SplineTrajectory::NoObjective{})), "prepare identity durations");
     x = mapped.initialGuess();
     x(0) = -1.0;
     require(!mapped.evaluate(x, gradient, objective), "reject nonpositive decoded duration");
@@ -159,7 +163,7 @@ void testRecordingAndBorrowedObjective()
     options.integration_steps = 4;
     options.record_samples = true;
     const auto problem = makeProblem();
-    require(bool(optimizer.prepare(problem, options)), "prepare sample recording");
+    require(bool(optimizer.prepare(problem, options, SplineTrajectory::NoObjective{})), "prepare sample recording");
     auto x = optimizer.initialGuess();
     Eigen::VectorXd gradient(x.size());
     RecordingIntegral integral;
@@ -171,7 +175,7 @@ void testRecordingAndBorrowedObjective()
             samples.back().point.isTrajectoryEnd(), "recorded sample topology");
     require(samples[4].point.interiorBoundaryIndex() == 0 && samples[5].point.interiorBoundaryIndex() == 0,
             "both quadrature endpoints identify their common boundary");
-    require(samples.front().point.global_time == problem.start_time, "recording uses the source time axis");
+    require(samples.front().point.trajectory_time == problem.start_time, "recording uses the source time axis");
     require(samples.front().trap_weight == 0.5 && samples[1].trap_weight == 1.0, "trapezoidal endpoint weights");
     const auto expected = optimizer.copyPolynomial();
     const auto checked = SplineTrajectory::checkGradients(optimizer, x, objective, 1e-6, 1e-4);
@@ -190,7 +194,7 @@ struct PolytopeSpatialMap
         if (index >= 1 && index <= 3) value(index - 1) = 1.0;
         return value;
     }
-    SplineTrajectory::StatusOr<Eigen::Vector3d> toPhysical(const Eigen::Ref<const Eigen::VectorXd> &x, int) const
+    SplineTrajectory::StatusOr<Eigen::Vector3d> forward(const Eigen::Ref<const Eigen::VectorXd> &x, int) const
     {
         const double shift = x.maxCoeff();
         double sum = 0.0;
@@ -203,7 +207,7 @@ struct PolytopeSpatialMap
         }
         return Eigen::Vector3d(point / sum);
     }
-    SplineTrajectory::StatusOr<Eigen::VectorXd> toUnconstrained(const Eigen::Vector3d &point, int index) const
+    SplineTrajectory::StatusOr<Eigen::VectorXd> inverse(const Eigen::Vector3d &point, int index) const
     {
         Eigen::VectorXd x(dimension(index));
         const double origin_weight = (1.0 - point.sum()) / (x.size() - 3);
@@ -211,10 +215,10 @@ struct PolytopeSpatialMap
         for (int i = 1; i <= 3; ++i) x(i) = std::log(point(i - 1));
         return Eigen::VectorXd(x);
     }
-    SplineTrajectory::Status backwardInto(const Eigen::Ref<const Eigen::VectorXd> &x, const Eigen::Vector3d &gradient,
+    SplineTrajectory::Status backward(const Eigen::Ref<const Eigen::VectorXd> &x, const Eigen::Vector3d &gradient,
                       int index, Eigen::Ref<Eigen::VectorXd> output) const
     {
-        const auto mapped = toPhysical(x, index);
+        const auto mapped = forward(x, index);
         if (!mapped) return mapped.status();
         const Eigen::Vector3d &point = mapped.value();
         const double shift = x.maxCoeff();
@@ -243,7 +247,7 @@ void testVariableDimensionSpatialMap()
     SplineTrajectory::OptimizerOptions options;
     options.energy_weight = 0.01;
     options.integration_steps = 8;
-    require(bool(optimizer.prepare(problem, options)), "prepare variable-dimension polytope maps");
+    require(bool(optimizer.prepare(problem, options, SplineTrajectory::NoObjective{})), "prepare variable-dimension polytope maps");
     require(optimizer.layout().waypoints[0].dof == 5 && optimizer.layout().waypoints[1].dof == 4,
             "spatial dimensions belong to individual global waypoint indices");
     auto x = optimizer.initialGuess();
@@ -289,7 +293,7 @@ struct HullCost
 
     template<class Curve>
     SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Curve> &state,
-                      SplineTrajectory::CoefficientGradient<Curve> &gradient)
+                      SplineTrajectory::CoefficientGradientView<Curve> &gradient)
     {
         workspace.update(state.polynomial);
         control_gradient = 0.01 * workspace.controls();
@@ -301,7 +305,7 @@ struct HullCost
 void testOneConstructionAndAdjoint()
 {
     SplineTrajectory::SplineOptimizer<CountingSpline> optimizer;
-    require(bool(optimizer.prepare(makeProblem<CountingSpline>())), "prepare counted spline");
+    require(bool(optimizer.prepare(makeProblem<CountingSpline>(), SplineTrajectory::NoObjective{})), "prepare counted spline");
     struct Objective
     {
         RecordingIntegral integral;

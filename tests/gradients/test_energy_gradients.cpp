@@ -184,7 +184,7 @@ void testCubic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         auto direct_gradT = cubic_spline.energyDurationGradient();
-        auto direct_gradP_inner = cubic_spline.energyWaypointGradient();
+        auto direct_gradP_inner = cubic_spline.energyInnerWaypointGradient();
         auto direct_bc_grads = cubic_spline.energyBoundaryGradient();
 
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.durations).norm());
@@ -229,8 +229,8 @@ void testCubic(int N, int BENCH_ITERS)
     const Eigen::Map<const Eigen::VectorXd> times_map(times.data(), N);
 
     SplineTrajectory::BoundaryConditions<3> bc;
-    bc.start_velocity = headPV.col(1);
-    bc.end_velocity = tailPV.col(1);
+    bc.start.v = headPV.col(1);
+    bc.end.v = tailPV.col(1);
     SplineTrajectory::CubicSpline3D cubic_spline;
 
     // 1. Performance Benchmark: Generation
@@ -324,7 +324,7 @@ void testCubic(int N, int BENCH_ITERS)
     // 5. Self-Check (Direct vs Propagated)
     printSubHeader("Self-Check: Direct vs Propagated");
     auto direct_gradT = cubic_spline.energyDurationGradient();
-    auto direct_gradP_inner = cubic_spline.energyWaypointGradient();
+    auto direct_gradP_inner = cubic_spline.energyInnerWaypointGradient();
     auto direct_bc_grads = cubic_spline.energyBoundaryGradient();
     cubic_spline.backward(gdC_spline, gdT_spline, grads_ref);
     printCheck("Reference overload", 0.0);
@@ -435,7 +435,7 @@ void testQuintic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         auto direct_gradT = quintic_spline.energyDurationGradient();
-        auto direct_gradP_inner = quintic_spline.energyWaypointGradient();
+        auto direct_gradP_inner = quintic_spline.energyInnerWaypointGradient();
         auto direct_bc_grads = quintic_spline.energyBoundaryGradient();
 
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.durations).norm());
@@ -487,8 +487,8 @@ void testQuintic(int N, int BENCH_ITERS)
     jerk_opt.reset(headPVA, tailPVA, N);
 
     SplineTrajectory::BoundaryConditions<3> bc;
-    bc.start_velocity = headPVA.col(1); bc.start_acceleration = headPVA.col(2);
-    bc.end_velocity = tailPVA.col(1); bc.end_acceleration = tailPVA.col(2);
+    bc.start.v = headPVA.col(1); bc.start.a = headPVA.col(2);
+    bc.end.v = tailPVA.col(1); bc.end.a = tailPVA.col(2);
     SplineTrajectory::QuinticSpline3D quintic_spline;
 
     // 1. Performance Benchmark: Generation
@@ -586,7 +586,7 @@ void testQuintic(int N, int BENCH_ITERS)
     // 5. Direct Gradient Consistency Check (vs Ref min_jerk)
     printSubHeader("Consistency: Direct Gradients vs Ref");
     auto direct_gradT = quintic_spline.energyDurationGradient();
-    auto direct_gradP_inner = quintic_spline.energyWaypointGradient();
+    auto direct_gradP_inner = quintic_spline.energyInnerWaypointGradient();
     auto direct_bc_grads = quintic_spline.energyBoundaryGradient();
 
     // Ref min_jerk returns 3x(N-1), need transpose
@@ -712,7 +712,7 @@ void testSeptic(int N, int BENCH_ITERS)
         // Consistency Check: Direct vs Propagated
         printSubHeader("Self-Check: Direct vs Propagated");
         auto direct_gradT = septic_spline.energyDurationGradient();
-        auto direct_gradP_inner = septic_spline.energyWaypointGradient();
+        auto direct_gradP_inner = septic_spline.energyInnerWaypointGradient();
         auto direct_bc_grads = septic_spline.energyBoundaryGradient();
 
         printCheck("Direct vs Prop (Times)", (direct_gradT - grads.durations).norm());
@@ -768,8 +768,8 @@ void testSeptic(int N, int BENCH_ITERS)
     snap_opt.reset(headPVAJ, tailPVAJ, N);
 
     SplineTrajectory::BoundaryConditions<3> bc;
-    bc.start_velocity = headPVAJ.col(1); bc.start_acceleration = headPVAJ.col(2); bc.start_jerk = headPVAJ.col(3);
-    bc.end_velocity = tailPVAJ.col(1); bc.end_acceleration = tailPVAJ.col(2); bc.end_jerk = tailPVAJ.col(3);
+    bc.start.v = headPVAJ.col(1); bc.start.a = headPVAJ.col(2); bc.start.j = headPVAJ.col(3);
+    bc.end.v = tailPVAJ.col(1); bc.end.a = tailPVAJ.col(2); bc.end.j = tailPVAJ.col(3);
     SplineTrajectory::SepticSpline3D septic_spline;
 
     // 1. Performance Benchmark: Generation
@@ -869,7 +869,7 @@ void testSeptic(int N, int BENCH_ITERS)
     // 5. Direct Gradient Consistency Check (vs Ref min_snap)
     printSubHeader("Consistency: Direct Gradients vs Ref");
     auto direct_gradT = septic_spline.energyDurationGradient();
-    auto direct_gradP_inner = septic_spline.energyWaypointGradient();
+    auto direct_gradP_inner = septic_spline.energyInnerWaypointGradient();
     auto direct_bc_grads = septic_spline.energyBoundaryGradient();
 
     // Ref min_snap returns 3x(N-1), need transpose

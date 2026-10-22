@@ -34,7 +34,7 @@ inline Eigen::VectorXd initialGuess(const ProblemData &p,const Geometry &geometr
     int offset=p.segments;
     for(int i=1;i<p.segments;++i) {
         const int dimension=map.dimension(i);
-        x.segment(offset,dimension)=map.toUnconstrained(p.waypoints.row(i).transpose(),i).value();
+        x.segment(offset,dimension)=map.inverse(p.waypoints.row(i).transpose(),i).value();
         offset+=dimension;
     }
     return x;
@@ -150,21 +150,21 @@ public:
 /** @brief Named structured objective using the same point penalties and decision parameterization. */
 class StructuredEvaluator {
     Optimizer optimizer_;
-    struct Objective { DurationCost duration; IntegralCost integral; DomainCost decision; } objective_;
+    struct Objective { DurationCost parameter; IntegralCost integral; DomainCost decision; } objective_;
 public:
     static constexpr const char *label="spline_optimizer";
     StructuredEvaluator(const ProblemData &p,const Geometry &geometry)
         :optimizer_(Parameterization{{},{&p,&geometry},{}}),objective_{{p.time_weight},{p,geometry},{p}} {
         SplineTrajectory::OptimizerOptions options;
         options.energy_weight=p.energy; options.integration_steps=p.integration;
-        const auto prepared=optimizer_.prepare(splineProblem(p),options);
+        const auto prepared=optimizer_.prepare(splineProblem(p),options,objective_);
         if(!prepared) throw std::runtime_error(prepared.message);
     }
     double evaluate(const Eigen::VectorXd &x,Eigen::VectorXd &gradient) {
         return optimizer_.evaluate(x,gradient,objective_).cost;
     }
     void accept(const Eigen::VectorXd &x) {
-        const auto status=optimizer_.updateAccepted(x);
+        const auto status=optimizer_.update(x);
         if(!status) throw std::runtime_error(status.message);
     }
     typename Spline::Polynomial snapshot() const { return optimizer_.copyPolynomial(); }

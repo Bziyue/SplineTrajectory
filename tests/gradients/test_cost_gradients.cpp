@@ -81,9 +81,9 @@ void build_minco_s2(const std::vector<double> &T,
     const int n_seg = static_cast<int>(T.size());
     Eigen::Matrix<double, 3, 2> headPV, tailPV;
     headPV.col(0) = P.row(0).transpose();
-    headPV.col(1) = bc.start_velocity;
+    headPV.col(1) = bc.start.v;
     tailPV.col(0) = P.row(n_seg).transpose();
-    tailPV.col(1) = bc.end_velocity;
+    tailPV.col(1) = bc.end.v;
 
     solver.setConditions(headPV, tailPV, n_seg);
     Eigen::Matrix3Xd inner = extract_inner_points_3d(P);
@@ -100,11 +100,11 @@ void build_minco_s3(const std::vector<double> &T,
     const int n_seg = static_cast<int>(T.size());
     Eigen::Matrix3d headPVA, tailPVA;
     headPVA.col(0) = P.row(0).transpose();
-    headPVA.col(1) = bc.start_velocity;
-    headPVA.col(2) = bc.start_acceleration;
+    headPVA.col(1) = bc.start.v;
+    headPVA.col(2) = bc.start.a;
     tailPVA.col(0) = P.row(n_seg).transpose();
-    tailPVA.col(1) = bc.end_velocity;
-    tailPVA.col(2) = bc.end_acceleration;
+    tailPVA.col(1) = bc.end.v;
+    tailPVA.col(2) = bc.end.a;
 
     solver.setConditions(headPVA, tailPVA, n_seg);
     Eigen::Matrix3Xd inner = extract_inner_points_3d(P);
@@ -121,13 +121,13 @@ void build_minco_s4(const std::vector<double> &T,
     const int n_seg = static_cast<int>(T.size());
     Eigen::Matrix<double, 3, 4> headPVAJ, tailPVAJ;
     headPVAJ.col(0) = P.row(0).transpose();
-    headPVAJ.col(1) = bc.start_velocity;
-    headPVAJ.col(2) = bc.start_acceleration;
-    headPVAJ.col(3) = bc.start_jerk;
+    headPVAJ.col(1) = bc.start.v;
+    headPVAJ.col(2) = bc.start.a;
+    headPVAJ.col(3) = bc.start.j;
     tailPVAJ.col(0) = P.row(n_seg).transpose();
-    tailPVAJ.col(1) = bc.end_velocity;
-    tailPVAJ.col(2) = bc.end_acceleration;
-    tailPVAJ.col(3) = bc.end_jerk;
+    tailPVAJ.col(1) = bc.end.v;
+    tailPVAJ.col(2) = bc.end.a;
+    tailPVAJ.col(3) = bc.end.j;
 
     solver.setConditions(headPVAJ, tailPVAJ, n_seg);
     Eigen::Matrix3Xd inner = extract_inner_points_3d(P);
@@ -167,8 +167,8 @@ void test_cubic()
     }
 
     SplineTrajectory::BoundaryConditions<DIM> bc;
-    bc.start_velocity.setConstant(0.15);
-    bc.end_velocity.setConstant(-0.05);
+    bc.start.v.setConstant(0.15);
+    bc.end.v.setConstant(-0.05);
 
     Spline sp;
     if (const auto status = sp.update(T, P, 0.0, bc); !status)
@@ -256,8 +256,8 @@ void test_cubic()
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.start_velocity(d) += eps;
-        bcm.start_velocity(d) -= eps;
+        bcp.start.v(d) += eps;
+        bcm.start.v(d) -= eps;
         const double num = (eval_loss_minco(T, P, bcp) - eval_loss_minco(T, P, bcm)) / (2.0 * eps);
         print_triplet("start_v." + std::to_string(d), g.start.v(d), gHead_minco(d, 1), num);
     }
@@ -272,8 +272,8 @@ void test_cubic()
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.end_velocity(d) += eps;
-        bcm.end_velocity(d) -= eps;
+        bcp.end.v(d) += eps;
+        bcm.end.v(d) -= eps;
         const double num = (eval_loss_minco(T, P, bcp) - eval_loss_minco(T, P, bcm)) / (2.0 * eps);
         print_triplet("end_v." + std::to_string(d), g.end.v(d), gTail_minco(d, 1), num);
     }
@@ -311,10 +311,10 @@ void test_quintic()
     }
 
     SplineTrajectory::BoundaryConditions<DIM> bc;
-    bc.start_velocity.setConstant(0.12);
-    bc.end_velocity.setConstant(-0.08);
-    bc.start_acceleration.setConstant(0.05);
-    bc.end_acceleration.setConstant(-0.03);
+    bc.start.v.setConstant(0.12);
+    bc.end.v.setConstant(-0.08);
+    bc.start.a.setConstant(0.05);
+    bc.end.a.setConstant(-0.03);
 
     Spline sp;
     if (const auto status = sp.update(T, Pvec, 0.0, bc); !status)
@@ -402,16 +402,16 @@ void test_quintic()
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.start_velocity(d) += eps;
-        bcm.start_velocity(d) -= eps;
+        bcp.start.v(d) += eps;
+        bcm.start.v(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("start_v." + std::to_string(d), g.start.v(d), gHead_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.start_acceleration(d) += eps;
-        bcm.start_acceleration(d) -= eps;
+        bcp.start.a(d) += eps;
+        bcm.start.a(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("start_a." + std::to_string(d), g.start.a(d), gHead_minco(d, 2), num);
     }
@@ -427,16 +427,16 @@ void test_quintic()
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.end_velocity(d) += eps;
-        bcm.end_velocity(d) -= eps;
+        bcp.end.v(d) += eps;
+        bcm.end.v(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("end_v." + std::to_string(d), g.end.v(d), gTail_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.end_acceleration(d) += eps;
-        bcm.end_acceleration(d) -= eps;
+        bcp.end.a(d) += eps;
+        bcm.end.a(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("end_a." + std::to_string(d), g.end.a(d), gTail_minco(d, 2), num);
     }
@@ -474,12 +474,12 @@ void test_septic()
     }
 
     SplineTrajectory::BoundaryConditions<DIM> bc;
-    bc.start_velocity.setConstant(0.11);
-    bc.end_velocity.setConstant(-0.07);
-    bc.start_acceleration.setConstant(0.04);
-    bc.end_acceleration.setConstant(-0.02);
-    bc.start_jerk.setConstant(0.015);
-    bc.end_jerk.setConstant(-0.01);
+    bc.start.v.setConstant(0.11);
+    bc.end.v.setConstant(-0.07);
+    bc.start.a.setConstant(0.04);
+    bc.end.a.setConstant(-0.02);
+    bc.start.j.setConstant(0.015);
+    bc.end.j.setConstant(-0.01);
 
     Spline sp;
     if (const auto status = sp.update(T, Pvec, 0.0, bc); !status)
@@ -563,24 +563,24 @@ void test_septic()
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.start_velocity(d) += eps;
-        bcm.start_velocity(d) -= eps;
+        bcp.start.v(d) += eps;
+        bcm.start.v(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("start_v." + std::to_string(d), g.start.v(d), gHead_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.start_acceleration(d) += eps;
-        bcm.start_acceleration(d) -= eps;
+        bcp.start.a(d) += eps;
+        bcm.start.a(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("start_a." + std::to_string(d), g.start.a(d), gHead_minco(d, 2), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.start_jerk(d) += eps;
-        bcm.start_jerk(d) -= eps;
+        bcp.start.j(d) += eps;
+        bcm.start.j(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("start_j." + std::to_string(d), g.start.j(d), gHead_minco(d, 3), num);
     }
@@ -596,24 +596,24 @@ void test_septic()
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.end_velocity(d) += eps;
-        bcm.end_velocity(d) -= eps;
+        bcp.end.v(d) += eps;
+        bcm.end.v(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("end_v." + std::to_string(d), g.end.v(d), gTail_minco(d, 1), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.end_acceleration(d) += eps;
-        bcm.end_acceleration(d) -= eps;
+        bcp.end.a(d) += eps;
+        bcm.end.a(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("end_a." + std::to_string(d), g.end.a(d), gTail_minco(d, 2), num);
     }
     for (int d = 0; d < DIM; ++d)
     {
         auto bcp = bc, bcm = bc;
-        bcp.end_jerk(d) += eps;
-        bcm.end_jerk(d) -= eps;
+        bcp.end.j(d) += eps;
+        bcm.end.j(d) -= eps;
         const double num = (eval_loss_minco(T, Pvec, bcp) - eval_loss_minco(T, Pvec, bcm)) / (2.0 * eps);
         print_triplet("end_j." + std::to_string(d), g.end.j(d), gTail_minco(d, 3), num);
     }

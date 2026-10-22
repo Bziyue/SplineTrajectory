@@ -3,7 +3,7 @@
 namespace example = spline_examples;
 struct Objective
 {
-    example::DurationCost duration;
+    example::DurationCost parameter;
     example::DynamicsCost integral;
 };
 
@@ -16,10 +16,10 @@ int main(int argc, char **argv) try
     mask.waypoints.assign(problem.waypoints.rows(), 0);
     problem.mask = mask;
     example::Optimizer optimizer;
-    const auto prepared = optimizer.prepare(problem, example::options());
+    Objective objective;
+    const auto prepared = optimizer.prepare(problem, example::options(), objective);
     if (!prepared) throw std::runtime_error(prepared.message);
 
-    Objective objective;
     example::minimize(optimizer, objective, example::checkRequested(argc, argv));
     example::printDynamics(optimizer.polynomial());
     return 0;

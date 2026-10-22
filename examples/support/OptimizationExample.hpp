@@ -18,10 +18,14 @@ using Vector = Eigen::Vector2d;
 struct DurationCost
 {
     double weight = 0.5;
-    SplineTrajectory::EvaluationResult operator()(const std::vector<double> &durations, Eigen::Ref<Eigen::VectorXd> gradient) const
+    template<class Curve>
+    double operator()(const SplineTrajectory::ParameterView<Curve> &state,
+        SplineTrajectory::ParameterGradientView<Curve> &output) const
     {
+        const auto &durations = state.durations;
+        auto &gradient = output.spline.durations;
         gradient.array() += weight;
-        return {weight * std::accumulate(durations.begin(), durations.end(), 0.0), SplineTrajectory::Status::success()};
+        return weight * std::accumulate(durations.begin(), durations.end(), 0.0);
     }
 };
 
@@ -90,7 +94,7 @@ double minimize(Engine &optimizer, Objective &objective, bool check_gradient = f
     cost = callback(&data, x, gradient);
     if (!std::isfinite(cost) || !gradient.allFinite() || cost > initial_cost + 1e-8 * std::max(1.0, std::abs(initial_cost)))
         throw std::runtime_error("Invalid final objective");
-    const auto accepted = optimizer.updateAccepted(x);
+    const auto accepted = optimizer.update(x);
     if (!accepted) throw std::runtime_error(accepted.message);
     std::cout << std::setprecision(6) << "cost: " << initial_cost << " -> " << cost
               << ", duration: " << optimizer.polynomial().duration()

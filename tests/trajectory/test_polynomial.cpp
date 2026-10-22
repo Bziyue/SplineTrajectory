@@ -145,7 +145,7 @@ int main() {
             printFail("Random Access", "Indices wrong");
         }
 
-        const auto segment = traj.at(NUM_SEGS - 1);
+        const auto segment = traj[NUM_SEGS - 1];
         if (segment.index() == last_seg.index())
             printPass("Segment access");
         else
