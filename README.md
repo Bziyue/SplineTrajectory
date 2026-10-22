@@ -35,7 +35,7 @@ The library is organized into three public headers:
 ## 🔁 Gradient Propagation
 
 `spline.backward()` maps coefficient and independent duration partials to gradients of
-segment durations, interior waypoints and endpoint derivatives. The adjoint reuses the
+segment durations, all waypoints (including endpoints) and endpoint derivatives. The adjoint reuses the
 construction factorization.
 
 For sampled-state costs, `SplineOptimizer` handles quadrature, coefficient/time partials
@@ -53,8 +53,8 @@ coefficient partials and running a separate adjoint for the energy term.
 ## 🧩 SplineOptimizer
 
 `SplineOptimizer<Spline>` owns the prepared problem and reusable evaluation workspace.
-An objective is an ordinary struct with named components such as `duration`, `integral`
-and `coefficient`; only the supplied components participate in evaluation.
+An objective is a user-defined struct holding callable members such as `integral` and
+`coefficient`. Each cost implements `operator()`; only supplied members participate.
 
 - Map decision variables to positive durations, spatial points and optional auxiliary states.
 - Combine energy, time, sampled-state and control-point costs.
@@ -70,7 +70,7 @@ Bezier or MINVO control points without changing the represented curve.
 
 - `toBezier()` and `toMINVO()` create control-point workspaces; included MINVO bases cover degrees 0–7.
 - Binary subdivision produces tighter local bounds while preserving the trajectory.
-- `configure()` prepares conversion data; `update()` and `backwardAdd()` reuse workspace storage.
+- `prepare()` prepares conversion data; `update()` and `backwardAdd()` reuse workspace storage.
 - Control-point gradients propagate to both polynomial coefficients and segment durations.
 
 If all controls lie in a convex corridor, the entire corresponding curve piece lies in it.
@@ -166,66 +166,104 @@ For local performance measurements, add `-DSPLINE_NATIVE_ARCH=ON` to tune reposi
 executables for the build machine's CPU. This option does not propagate to consumers;
 see [build and integration](docs/building.md) for CMake integration and compiler settings.
 
-### Create a spline
+### Physical input and optimization choices
 
-Declare a spline, then initialize it from segment durations and an absolute start time:
+`SplineInput<DIM>` contains N durations, N+1 waypoint rows, endpoint derivatives and a
+`start_time` on the caller's trajectory time axis; this need not be an absolute clock.
+With `spline.update(input)`, **every waypoint is an interpolation constraint**.
+With `optimizer.prepare(input, options, objective)`, values selected by `options.mask` are
+**optimization initial guesses**. By default, durations and interior waypoints can change;
+endpoint positions and endpoint derivatives remain fixed. To keep all waypoints fixed, set
+`options.mask.waypoints.assign(input.waypoints.rows(), 0)`. Auxiliary maps are a separate,
+explicit mechanism that can also transform fixed physical values.
 
-```cpp
-#include "SplineTrajectory.hpp"
-
-using Spline = SplineTrajectory::QuinticSplineND<3>;
-Spline::CoefficientMatrix points(3, 3);
-points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
-std::vector<double> durations{1.2, 1.5};
-Spline spline;
-if (const auto status = spline.update(durations, points, 0.0); !status) return 1;
-auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // position, velocity, acceleration
-```
-
-Equivalently, use the same points with an absolute time for each waypoint:
-
-```cpp
-std::vector<double> knots{0.0, 1.2, 2.7};
-Spline spline_from_knots;
-if (const auto status = spline_from_knots.update(knots, points); !status) return 1;
-```
-
-The duration form takes `N` durations and an explicit start time; the knot form takes
-`N+1` strictly increasing absolute times. Both accept optional boundary conditions as
-the last argument; supported endpoint derivatives default to zero. Call `update()` again
-to reuse the same object and, when the segment count is unchanged, its workspace.
-Query only after a successful update.
-
-Low-level spline, polynomial and hull APIs expect caller-validated input shapes and finite
-values, with positive segment durations. Spline initialization and updates return `Status`
-for numerical failures; the optimizer validates its problem at `prepare()`. See the
-[API contracts](https://bziyue.github.io/SplineTrajectory/api/?lang=en#contracts).
-
-### Create an optimizer
-
-Using the same points and durations:
+The following is a complete program. Endpoint derivatives default to zero; quintic splines
+use velocity and acceleration. Both built-in weights default to **zero**: `NoObjective` means
+no custom costs, and does not enable minimum-jerk energy by itself.
 
 ```cpp
 #include "SplineOptimizer.hpp"
+#include <cmath>
+#include <iostream>
 
-SplineTrajectory::SplineOptimizer<Spline> optimizer;
-SplineTrajectory::SplineProblem<Spline> problem;
-problem.waypoints = points;
-problem.durations = durations;
-if (!optimizer.prepare(problem)) return 1;
-auto x = optimizer.initialGuess();
-Eigen::VectorXd gradient(x.size());
-SplineTrajectory::NoObjective objective; // minimum-jerk energy only
-const auto result = optimizer.evaluate(x, gradient, objective);
-if (!result) return 1;
-const double cost = result.cost;
+int main()
+{
+    using Spline = SplineTrajectory::QuinticSplineND<3>;
+    SplineTrajectory::SplineInput<3> input;
+    input.durations = {1.2, 1.5};
+    input.waypoints.resize(3, 3);
+    input.waypoints << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
+    input.start_time = 2.0;
+    input.boundary.start.v << 0.2, 0, 0;
+
+    Spline spline;
+    if (!spline.update(input)) return 1;
+    const auto state = spline.polynomial().evaluateDerivatives<2>(2.5);
+    // Equivalent construction from N+1 times on the trajectory time axis:
+    Spline from_breakpoints;
+    if (!from_breakpoints.updateFromBreakpoints(
+            {2.0, 3.2, 4.7}, input.waypoints, input.boundary)) return 1;
+
+    SplineTrajectory::SplineOptimizer<Spline> optimizer;
+    SplineTrajectory::OptimizerOptions options;
+    options.energy_weight = 1.0;   // Minimum jerk for this spline family.
+    options.duration_weight = 0.5; // Linear total-duration cost.
+    SplineTrajectory::NoObjective objective; // No custom cost components.
+    if (!optimizer.prepare(input, options, objective)) return 1;
+    auto x = optimizer.initialGuess();
+    Eigen::VectorXd gradient; // Resizes once; matching sizes reuse storage.
+    const auto result = optimizer.evaluate(x, gradient, objective);
+    if (!result) return 1;
+
+    // This example evaluates the initial guess. A numerical solver repeatedly
+    // calls evaluate(); after solving, use its final returned x here.
+    if (!optimizer.update(x)) return 1;
+    // Check your planning task's constraints before accepting this candidate.
+    auto trajectory = optimizer.copyPolynomial();
+    auto sampler = trajectory.makeSampler<2>();
+    const auto command = sampler.evaluateDerivatives(trajectory.startTime());
+    std::cout << "Initial cost: " << result.cost << '\n';
+    return std::isfinite(result.cost) && gradient.allFinite() &&
+           state[0].allFinite() && command[0].allFinite() ? 0 : 1;
+}
 ```
 
-Call `initialGuess()` only after successful `prepare()`. Add named `duration`, `integral`
-or `coefficient` members to an objective to combine time, state and control-point costs.
-An external solver adapts `evaluate()` to its scalar callback and inspects the returned
-status; after solving, call `updateAccepted(x)` and check its status before reading the
-trajectory. See the [GCOPTER L-BFGS examples](examples/README.md).
+`prepare(input, objective)` uses default options; `prepare(input, options, objective)` makes
+weights and variable selection explicit. Preparation copies the physical input and prepares
+the library's buffers. Prepare user-owned hulls, maps and cost buffers before the solver loop
+as shown in the [convex-hull example](examples/convex_hull_optimizer.cpp).
+
+### Solve and deliver a trajectory
+
+Use the solver's final returned decision vector in this order:
+
+1. Call `optimizer.update(x_final)` and check success.
+2. Check the planning task's constraints and accept or reject the candidate.
+3. Save `auto trajectory = optimizer.copyPolynomial()`.
+4. Keep that snapshot alive and unchanged; create a sampler for each control-thread traversal.
+
+`evaluate()` replaces the current candidate. `polynomial()` borrows the last built candidate,
+which may be a rejected line-search trial; it is not automatically the solver's final accepted
+trajectory. Updates invalidate borrowed views and samplers. A saved polynomial owns independent
+data. See the [L-BFGS examples](examples/README.md) for actual optimization and solver-status handling.
+
+Choose costs by the planning requirement; custom functors return a `double` (cost) or an
+`EvaluationResult` when they can reject a candidate, and add partials to their gradient view.
+
+| Requirement | Entry |
+| --- | --- |
+| Smoothness and total duration | `energy_weight`, `duration_weight` |
+| Pointwise obstacles, speed or acceleration | `integral` |
+| Bezier / MINVO control constraints | `coefficient` |
+| Waypoint, boundary or additional duration costs | `parameter` |
+| Coupled costs across samples | `sample` |
+| Regularization in decision coordinates | `decision` |
+
+Low-level spline, polynomial and hull APIs expect valid shapes, finite inputs, positive durations
+and representable arithmetic. Check spline construction status before querying. The optimizer
+validates reference inputs during preparation and decisions during evaluation. Failed candidates
+remain invalid while their workspace is retained for fixed-topology retries; callbacks own any
+allocations they perform. See the [optimizer contracts](docs/optimizer.md).
 
 ## 🧰 Examples and Documentation
 

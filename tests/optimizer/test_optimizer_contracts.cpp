@@ -336,6 +336,67 @@ void checkSharedVariables()
 
 }
 
+struct RejectingTimeMap : SplineTrajectory::QuadInvTimeMap
+{
+    SplineTrajectory::StatusOr<double> forward(double value) const
+    {
+        if (value == 42.0)
+            return SplineTrajectory::Status{SplineTrajectory::ErrorCode::InvalidInput, "Rejected duration coordinate"};
+        if (value == 43.0) return -1.0; // A successful map must still produce positive durations.
+        return QuadInvTimeMap::forward(value);
+    }
+};
+
+template<class Spline>
+void checkFailureRecovery()
+{
+    using namespace SplineTrajectory;
+    struct Parameterization
+    {
+        RejectingTimeMap time;
+        IdentitySpatialMap<3> space;
+        NoAuxiliaryMap auxiliary;
+    };
+    SplineOptimizer<Spline, Parameterization> optimizer;
+    OptimizerOptions options;
+    options.energy_weight = 0.01;
+    options.duration_weight = 0.3;
+    options.record_samples = true;
+    NoObjective objective;
+    require(bool(optimizer.prepare(problem<Spline>(), options, objective)), "prepare failure recovery");
+    const auto good = optimizer.initialGuess();
+    Eigen::VectorXd gradient(good.size());
+    const auto baseline = optimizer.evaluate(good, gradient, objective);
+    require(bool(baseline), "valid recovery baseline");
+    const Eigen::VectorXd expected_gradient = gradient;
+    const auto expected_polynomial = optimizer.copyPolynomial();
+    std::array<Eigen::VectorXd, 5> rejected{good, good, good, good, Eigen::VectorXd(good.size() - 1)};
+    rejected[0](0) = 42.0; // Explicit map failure.
+    rejected[1](0) = 43.0; // Invalid decoded duration.
+    rejected[2](0) = 2e8;  // Finite durations whose cumulative knots cannot advance.
+    rejected[3](0) = std::numeric_limits<double>::quiet_NaN();
+
+    allocation_test::begin();
+    Eigen::internal::set_is_malloc_allowed(false);
+    for (const auto &bad : rejected)
+    {
+        const auto failed = optimizer.evaluate(bad, gradient, objective);
+        require(!failed && std::isinf(failed.cost) && gradient.isZero(), "rejected evaluation clears output");
+        require(optimizer.isPrepared() && !optimizer.polynomial().isValid() && !optimizer.energy(),
+                "rejected candidate invalidates publication but preserves preparation");
+        require(optimizer.recordedSamples().empty(), "rejected candidate hides old samples");
+        const auto retried = optimizer.evaluate(good, gradient, objective);
+        require(bool(retried) && retried.cost == baseline.cost && gradient.isApprox(expected_gradient, 1e-12),
+                "valid retry reproduces cost and gradient");
+        require(!optimizer.update(bad) && !optimizer.polynomial().isValid(), "update rejects invalid candidate");
+        require(bool(optimizer.update(good)) &&
+                optimizer.polynomial().coefficients().isApprox(expected_polynomial.coefficients(), 1e-12),
+                "valid update restores the same trajectory");
+    }
+    Eigen::internal::set_is_malloc_allowed(true);
+    require(allocation_test::end() == 0, "failed candidates and valid retries reuse standard heap storage");
+}
+
 int main()
 {
     return spline_test::run("test_optimizer_contracts", []
@@ -349,5 +410,8 @@ int main()
         checkDurationWeight<SplineTrajectory::QuinticSplineND<3>>();
         checkDurationWeight<SplineTrajectory::SepticSplineND<3>>();
         checkSharedVariables();
+        checkFailureRecovery<SplineTrajectory::CubicSplineND<3>>();
+        checkFailureRecovery<SplineTrajectory::QuinticSplineND<3>>();
+        checkFailureRecovery<SplineTrajectory::SepticSplineND<3>>();
     });
 }

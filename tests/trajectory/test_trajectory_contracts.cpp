@@ -35,13 +35,16 @@ template<class Spline> void checkSpline()
     curve.backward(gc, gt, gradient);
     Eigen::internal::set_is_malloc_allowed(true);
     require(storage == curve.polynomial().coefficients().data(), "Fixed topology must reuse coefficient storage");
+    Eigen::internal::set_is_malloc_allowed(false);
     require(!curve.update(durations, points, 1e308), "Unrepresentable cumulative knots must fail");
     require(!curve.isValid() && curve.polynomial().coefficients().rows() == 0,
             "Failed updates must not expose previous coefficients");
     require(snapshot.isValid() && snapshot.coefficients().isApprox(moved.polynomial().coefficients()),
             "Owning snapshots survive source updates");
     if (const auto status = curve.update(durations, points, 0.0); !status) { throw std::runtime_error(status.message); }
-    require(curve.isValid(), "Failure must not poison future updates");
+    Eigen::internal::set_is_malloc_allowed(true);
+    require(curve.isValid() && storage == curve.polynomial().coefficients().data(),
+            "Failure recovery must reuse the original coefficient storage");
 }
 void checkPolynomial()
 {

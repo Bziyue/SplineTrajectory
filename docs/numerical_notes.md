@@ -27,7 +27,9 @@ The replay reports all backends and returns nonzero when comparisons fail.
 ## Solver results and constraints
 
 A solver's relative-cost stopping condition does not imply a small gradient or global optimality.
-Synchronize the accepted decision vector with `updateAccepted(x)` before reading the trajectory.
+Rebuild the solver's final returned vector with `update(x)` and check success. Validate the
+planning constraints before saving an independent `copyPolynomial()` for control-thread sampling.
+The last evaluation may have been a rejected trial.
 The planner corpus includes nonnegative SUPER stopping codes with significant same-vector
 gradient differences; a close objective alone is not a gradient-equivalence check.
 

@@ -616,7 +616,7 @@ namespace SplineTrajectory
         Status failPreparation(Status status)
         {
             prepared_.status = status;
-            state_.spline = Spline{};
+            state_.spline.invalidate();
             return status;
         }
         EvaluationResult failEvaluation(Status status, Eigen::VectorXd &gradient)
@@ -836,7 +836,7 @@ namespace SplineTrajectory
          * @note Requires exclusive optimizer access. Failure invalidates the candidate spline. */
         Status buildCandidate(const Eigen::VectorXd &x)
         {
-            auto reject = [&](Status status) { state_.spline = Spline{}; return status; };
+            auto reject = [&](Status status) { state_.spline.invalidate(); return status; };
             // Auxiliary maps may modify even fixed coordinates, so restore those inputs per trial.
             if constexpr (has_auxiliary)
             {
@@ -978,7 +978,7 @@ namespace SplineTrajectory
 
         /** @brief Rebuild a candidate without evaluating costs; use the solver's final accepted vector after solving.
          * @param x Accepted coordinates, not necessarily the solver's final trial callback.
-         * @return Failure clears the working polynomial; prepared configuration remains reusable. */
+         * @return Failure invalidates the working polynomial; its storage and preparation remain reusable. */
 #if defined(__GNUC__) || defined(__clang__)
         __attribute__((noinline))
 #endif
@@ -987,7 +987,7 @@ namespace SplineTrajectory
             buffers_.samples_valid = false;
             if (!isPrepared() || x.size() != decisionDimension() || !detail::allFinite(x))
             {
-                state_.spline = Spline{};
+                state_.spline.invalidate();
                 if (!isPrepared()) return prepared_.status;
                 if (x.size() != decisionDimension()) return error(ErrorCode::DimensionMismatch, "Decision vector has wrong size");
                 return error(ErrorCode::InvalidInput, "Nonfinite decision vector");
@@ -1014,12 +1014,12 @@ namespace SplineTrajectory
             gradient.resize(decisionDimension());
             if (x.size() != decisionDimension())
             {
-                state_.spline = Spline{};
+                state_.spline.invalidate();
                 return failEvaluation(error(ErrorCode::DimensionMismatch, "Decision vector must match the prepared layout"), gradient);
             }
             if (!detail::allFinite(x))
             {
-                state_.spline = Spline{};
+                state_.spline.invalidate();
                 return failEvaluation(error(ErrorCode::InvalidInput, "Nonfinite decision vector"), gradient);
             }
             if constexpr (SampleStage<O>::present)

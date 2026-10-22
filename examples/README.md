@@ -28,13 +28,16 @@ are observations, while control points in a convex set can bound an entire polyn
 
 ## Add your own objective
 
-An objective is an ordinary struct. Use `duration` for time costs, `integral` for sampled state
-costs, and `coefficient` for polynomial or convex-hull costs. Each callback adds its partials to
+An objective is a user-defined holder of callable members. Each cost implements `operator()`.
+Use `options.duration_weight` for linear total-duration cost, `parameter` for other duration
+costs, `integral` for pointwise state costs, and `coefficient` for polynomial or convex-hull costs.
+Both built-in weights default to zero; set `energy_weight` explicitly for smoothness. Each callback adds its partials to
 the supplied gradient; SplineOptimizer handles the interpolation and decision-variable chain.
 
 The shared [L-BFGS driver](support/OptimizationExample.hpp) shows the complete solver boundary:
 prepare the optimizer, obtain `initialGuess()`, call `evaluate()` and inspect its status in the GCOPTER callback,
-check the solver status and synchronize the returned vector with `updateAccepted()`.
+check the solver status and synchronize the returned vector with `update()`. Validate task constraints before saving `copyPolynomial()` and sampling the
+independent snapshot. The last trial is not necessarily the solver's final accepted vector.
 Cost functions remain in the individual examples; [Penalties.hpp](support/Penalties.hpp) contains
 the shared box and derivative penalties.
 
@@ -42,5 +45,11 @@ For an ESDF map, replace `CircleDistance::query()` with the map's distance and s
 in the same coordinate frame. For MINVO controls, change the basis in `HullCost` configuration
 from `ConvexHullBasis::Bezier` to `ConvexHullBasis::MINVO`.
 
-The five optimization examples accept `--check-gradients` to check their initial objective
+The optimization examples accept `--check-gradients` to check their initial objective
 before solving. Full callback signatures are in the [optimizer reference](../docs/optimizer.md).
+
+`SplineInput` waypoints are interpolation constraints for direct spline construction. In optimization,
+default masks allow durations and interior waypoints to change. Prepare user-owned cost buffers
+before solving: the convex-hull example explicitly prepares hulls and control gradients, then
+uses fixed-topology `update(poly)` in each cost call. Optimizer preparation does not initialize
+user costs.

@@ -33,7 +33,7 @@
 
 ## 🔁 梯度传播
 
-`spline.backward()` 将系数与独立时长偏导映射为分段时长、内部插值点及端点导数的梯度，
+`spline.backward()` 将系数与独立时长偏导映射为分段时长、全部途经点（含端点）及端点导数的梯度，
 伴随过程复用构造阶段的矩阵分解。
 
 对于采样状态代价，`SplineOptimizer` 负责数值积分、系数与时间偏导的组装，以及变量映射的反传。
@@ -49,8 +49,8 @@
 ## 🧩 SplineOptimizer
 
 `SplineOptimizer<Spline>` 持有准备好的问题与可复用的评价工作区。
-目标函数是普通结构体，按需声明 `duration`、`integral`、`coefficient` 等命名组件，
-仅启用实际提供的组件。
+目标对象是用户定义的普通结构体，按需持有 `integral`、`coefficient` 等可调用成员。
+每个代价结构体实现 `operator()`，仅启用实际提供的成员。
 
 - 将决策变量映射为正时长、空间点与可选的辅助状态。
 - 组合能量、时间、采样状态与控制点代价。
@@ -65,7 +65,7 @@
 
 - `toBezier()`、`toMINVO()` 创建控制点工作区；内置 MINVO 基覆盖 0–7 次多项式。
 - 二分细分收紧局部包络，同时保持轨迹不变。
-- `configure()` 准备转换数据，`update()` 与 `backwardAdd()` 复用工作区存储。
+- `prepare()` 准备转换数据，`update()` 与 `backwardAdd()` 复用工作区存储。
 - 控制点梯度同时反传至多项式系数与分段时长。
 
 若全部控制点位于同一凸走廊内，对应的整段曲线也位于其中；速度和加速度控制点同样可以提供
@@ -153,63 +153,97 @@ cmake --build build --parallel 3
 本机性能测试可添加 `-DSPLINE_NATIVE_ARCH=ON`，按构建机器的 CPU 优化仓库内可执行程序。
 该选项不会传递给下游项目；CMake 接入与编译选项见[构建指南](docs/building.md)。
 
-### 创建样条
+### 物理输入与优化选择
 
-先声明样条，再使用段时长和绝对起点时间初始化：
+`SplineInput<DIM>` 包含 N 个段时长、N+1 行途经点、端点导数和调用方轨迹时间轴上的
+`start_time`，它不要求是绝对时钟。在 `spline.update(input)` 中，**所有途经点都是插值约束**；
+在 `optimizer.prepare(input, options, objective)` 中，`options.mask` 选中的值是**优化初值**。
+默认优化时长和内部途经点，端点位置与端点导数固定。若希望固定所有途经点，设置
+`options.mask.waypoints.assign(input.waypoints.rows(), 0)`。辅助映射是另一个显式的高级机制，
+也可以变换未选为直接优化变量的物理值。
 
-```cpp
-#include "SplineTrajectory.hpp"
-
-using Spline = SplineTrajectory::QuinticSplineND<3>;
-Spline::CoefficientMatrix points(3, 3);
-points << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
-std::vector<double> durations{1.2, 1.5};
-Spline spline;
-if (const auto status = spline.update(durations, points, 0.0); !status) return 1;
-auto state = spline.polynomial().evaluateDerivatives<2>(0.5); // 位置、速度、加速度
-```
-
-也可以使用同一组插值点，为每个点提供绝对时间，构造等价的轨迹：
-
-```cpp
-std::vector<double> knots{0.0, 1.2, 2.7};
-Spline spline_from_knots;
-if (const auto status = spline_from_knots.update(knots, points); !status) return 1;
-```
-
-段时长形式接收 `N` 个时长和显式起点时间；绝对时间形式接收 `N+1` 个严格递增的时刻。
-两者都可在最后追加边界条件，省略时受支持的端点导数默认为零。
-再次调用 `update()` 可复用同一对象，段数不变时复用工作区；更新成功后才能进行数值查询。
-
-底层样条、多项式和凸包接口要求调用方保证输入维度正确、数值有限，以及分段时长为正。
-样条初始化与更新通过 `Status` 返回数值失败；优化器在 `prepare()` 阶段检查问题输入。
-详见[接口契约](https://bziyue.github.io/SplineTrajectory/api/?lang=zh#contracts)。
-
-### 创建优化器
-
-沿用上面的插值点和时长：
+下面是完整可编译程序。端点导数默认为零，五次样条使用速度和加速度边界。
+两个内置权重默认都为 **零**：`NoObjective` 仅表示没有自定义代价，不会自动启用最小 jerk 能量。
 
 ```cpp
 #include "SplineOptimizer.hpp"
+#include <cmath>
+#include <iostream>
 
-SplineTrajectory::SplineOptimizer<Spline> optimizer;
-SplineTrajectory::SplineProblem<Spline> problem;
-problem.waypoints = points;
-problem.durations = durations;
-if (!optimizer.prepare(problem)) return 1;
-auto x = optimizer.initialGuess();
-Eigen::VectorXd gradient(x.size());
-SplineTrajectory::NoObjective objective; // 仅最小 jerk 能量
-const auto result = optimizer.evaluate(x, gradient, objective);
-if (!result) return 1;
-const double cost = result.cost;
+int main()
+{
+    using Spline = SplineTrajectory::QuinticSplineND<3>;
+    SplineTrajectory::SplineInput<3> input;
+    input.durations = {1.2, 1.5};
+    input.waypoints.resize(3, 3);
+    input.waypoints << 0, 0, 0, 1, 0.5, 0, 2, 0, 0;
+    input.start_time = 2.0;
+    input.boundary.start.v << 0.2, 0, 0;
+
+    Spline spline;
+    if (!spline.update(input)) return 1;
+    const auto state = spline.polynomial().evaluateDerivatives<2>(2.5);
+    // 等价形式：使用轨迹时间轴上的 N+1 个时间节点构建。
+    Spline from_breakpoints;
+    if (!from_breakpoints.updateFromBreakpoints(
+            {2.0, 3.2, 4.7}, input.waypoints, input.boundary)) return 1;
+
+    SplineTrajectory::SplineOptimizer<Spline> optimizer;
+    SplineTrajectory::OptimizerOptions options;
+    options.energy_weight = 1.0;   // 五次样条对应最小 jerk。
+    options.duration_weight = 0.5; // 线性总时长代价。
+    SplineTrajectory::NoObjective objective; // 没有自定义代价组件。
+    if (!optimizer.prepare(input, options, objective)) return 1;
+    auto x = optimizer.initialGuess();
+    Eigen::VectorXd gradient; // 首次调整尺寸，同尺寸时复用。
+    const auto result = optimizer.evaluate(x, gradient, objective);
+    if (!result) return 1;
+
+    // 本例只评价初值。数值求解器会重复调用 evaluate()；
+    // 求解结束后，此处应使用求解器最终返回的 x。
+    if (!optimizer.update(x)) return 1;
+    // 接受候选前，按规划任务验收约束。
+    auto trajectory = optimizer.copyPolynomial();
+    auto sampler = trajectory.makeSampler<2>();
+    const auto command = sampler.evaluateDerivatives(trajectory.startTime());
+    std::cout << "初始代价: " << result.cost << '\n';
+    return std::isfinite(result.cost) && gradient.allFinite() &&
+           state[0].allFinite() && command[0].allFinite() ? 0 : 1;
+}
 ```
 
-仅在 `prepare()` 成功后调用 `initialGuess()`。在目标结构体中按需声明 `duration`、`integral`
-或 `coefficient` 成员，即可组合时间、状态与控制点代价。
-外部求解器将 `evaluate()` 适配为标量回调并检查返回状态；求解结束后，
-先调用 `updateAccepted(x)` 并确认成功，再读取轨迹。
-完整接入见 [GCOPTER L-BFGS 示例](examples/README.md)。
+`prepare(input, objective)` 使用默认配置；`prepare(input, options, objective)` 显式指定权重和变量选择。
+准备时复制物理输入并分配库自己的工作区。用户代价持有的凸包、映射缓存和梯度缓冲也应在求解循环前
+准备好，参见[凸包示例](examples/convex_hull_optimizer.cpp)。上面只评价初值，完整求解见 L-BFGS 示例。
+
+### 求解与轨迹交付
+
+使用求解器最终返回的决策向量，按以下顺序交付：
+
+1. 调用 `optimizer.update(x_final)` 并检查成功。
+2. 按规划任务验收约束，决定是否接受候选。
+3. 用 `auto trajectory = optimizer.copyPolynomial()` 保存独立轨迹。
+4. 保持该快照存活且不变，由每个控制线程的采样过程创建自己的 sampler。
+
+`evaluate()` 会替换当前候选。`polynomial()` 借用最后构建的候选，它可能是线搜索拒绝的试探点，
+不会自动成为求解器最终接受的轨迹。更新会使借用视图和 sampler 失效，复制的轨迹拥有独立存储。
+实际优化和求解器状态处理见 [L-BFGS 示例](examples/README.md)。
+
+按规划需求选择代价入口即可。自定义代价结构体返回 `double`，可能拒绝候选时返回 `EvaluationResult`；
+梯度通过传入的引用视图累加。
+
+| 规划需求 | 入口 |
+| --- | --- |
+| 平滑与总时长 | `energy_weight`、`duration_weight` |
+| 逐点避障、速度和加速度惩罚 | `integral` |
+| Bezier / MINVO 控制点约束 | `coefficient` |
+| 途经点、边界和额外时长代价 | `parameter` |
+| 跨多个采样点的耦合代价 | `sample` |
+| 决策坐标上的特殊正则项 | `decision` |
+
+底层样条、多项式和凸包接口要求调用者提供正确形状、有限数值、正时长及可表示的数值范围。
+查询前检查样条构建状态。优化器在准备时验证初始输入，评价时验证决策变量；失败候选不可用，
+但工作区保留以便固定拓扑的重试复用。用户回调自行负责其分配行为。详见[优化器契约](docs/optimizer.md)。
 
 ## 🧰 示例与文档
 

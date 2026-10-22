@@ -175,7 +175,7 @@
 <td><span data-lang="en" lang="en"><code>v, a, j</code></span><span data-lang="zh" lang="zh-CN"><code>v, a, j</code></span></td>
 </tr>
 </tbody></table></div>
-<p class="notation"><span data-lang="en" lang="en"><code>N</code> = segments, <code>D</code> / <code>DIM</code> = spatial dimension, <code>K</code> = coefficients per segment, <code>M</code> = query count, <code>R</code> = highest requested derivative. <code>Spline</code> means the selected solver. <code>Vector</code>, <code>CoefficientMatrix</code>, <code>Polynomial</code> and <code>Gradients</code> are its public aliases. All library names are in <code>SplineTrajectory</code>.</span><span data-lang="zh" lang="zh-CN"><code>N</code> 为段数，<code>D</code> / <code>DIM</code> 为空间维度，<code>K</code> 为每段系数数，<code>M</code> 为查询数，<code>R</code> 为最高查询导数阶数。<code>Spline</code> 代表选定样条类；<code>Vector</code>、<code>CoefficientMatrix</code>、<code>Polynomial</code>、<code>Gradients</code> 是其公开类型别名。库类型均位于 <code>SplineTrajectory</code> 命名空间。</span></p>
+<p class="notation"><span data-lang="en" lang="en"><code>N</code> = segments, <code>D</code> / <code>DIM</code> = spatial dimension, <code>K</code> = coefficients per segment, <code>M</code> = query count, <code>R</code> = highest requested derivative. <code>Spline</code> means the selected solver. <code>Vector</code>, <code>WaypointMatrix</code>, <code>CoefficientMatrix</code>, <code>Polynomial</code> and <code>Gradients</code> are its public aliases. All library names are in <code>SplineTrajectory</code>.</span><span data-lang="zh" lang="zh-CN"><code>N</code> 为段数，<code>D</code> / <code>DIM</code> 为空间维度，<code>K</code> 为每段系数数，<code>M</code> 为查询数，<code>R</code> 为最高查询导数阶数。<code>Spline</code> 代表选定样条类；<code>Vector</code>、<code>WaypointMatrix</code>、<code>CoefficientMatrix</code>、<code>Polynomial</code>、<code>Gradients</code> 是其公开类型别名。库类型均位于 <code>SplineTrajectory</code> 命名空间。</span></p>
 </article>
 <article class="subsection">
 <h3 id="contracts"><span data-lang="en" lang="en">Common types, data & errors</span><span data-lang="zh" lang="zh-CN">通用类型、数据与错误</span><a class="anchor" href="#contracts" aria-label="Permalink / 固定链接">#</a></h3>
@@ -192,6 +192,7 @@
 <td><code>ErrorCode</code></td>
 <td><code>Ok</code>, <code>InvalidInput</code>, <code>DimensionMismatch</code>, <code>InvalidState</code>, <code>OutOfRange</code>, <code>ResourceLimit</code>, <code>NumericalFailure</code>, <code>NotPrepared</code>, <code>SamplingNotPrepared</code>, <code>GradientMismatch</code></td>
 </tr>
+<tr id="DerivativeOrder" data-search-entry><td><code>DerivativeOrder</code></td><td><span data-lang="en" lang="en">Accepts int or Deriv; defaults to position, supports equality. Orders remain caller-validated.</span><span data-lang="zh" lang="zh-CN">接受 int 或 Deriv，默认位置阶，支持相等比较。合法阶数由调用者保证。</span></td></tr>
 <tr id="deriv" data-search-entry>
 <td><code>Deriv</code></td>
 <td><code>Pos=0</code>, <code>Vel=1</code>, <code>Acc=2</code>, <code>Jerk=3</code>, <code>Snap=4</code>, <code>Crackle=5</code>, <code>Pop=6</code></td>
@@ -306,12 +307,14 @@
 <article class="subsection">
 <h3 id="construction"><span data-lang="en" lang="en">Construction & in-place update</span><span data-lang="zh" lang="zh-CN">构造与原位更新</span><a class="anchor" href="#construction" aria-label="Permalink / 固定链接">#</a></h3>
 <pre class="signature"><code>Spline();
+Status update(const SplineInput&lt;DIM&gt;&amp; input);
 Status update(const std::vector&lt;double&gt;&amp; durations,
     const CoefficientMatrix&amp; points, double start_time,
     const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});
-Status update(const std::vector&lt;double&gt;&amp; knots,
+Status updateFromBreakpoints(const std::vector&lt;double&gt;&amp; knots,
     const CoefficientMatrix&amp; points, const BoundaryConditions&lt;DIM&gt;&amp; boundary = {});</code></pre>
 <div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API / argument</span><span data-lang="zh" lang="zh-CN">接口 / 参数</span></th><th><span data-lang="en" lang="en">Shape / return</span><span data-lang="zh" lang="zh-CN">形状 / 返回</span></th><th><span data-lang="en" lang="en">Use & constraints</span><span data-lang="zh" lang="zh-CN">用途与约束</span></th></tr></thead><tbody>
+<tr id="spline-input-update" data-search-entry><td><code>update(const SplineInput&lt;DIM&gt;&amp; input)</code></td><td><code>Status</code></td><td><span data-lang="en" lang="en">Shared physical input: durations, all waypoint rows, boundary derivatives and start_time. Every waypoint is an interpolation constraint.</span><span data-lang="zh" lang="zh-CN">统一物理输入：时长、全部途经点行、边界导数和 start_time。每个途经点都是插值约束。</span></td></tr>
 <tr id="spline-default" data-search-entry>
 <td><code>Spline spline;</code></td>
 <td><code>Spline</code></td>
@@ -341,7 +344,7 @@ Status update(const std::vector&lt;double&gt;&amp; knots,
 <use x="-19.184319" y="-64.528024" xlink:href="#math-8-g1-68" />
 </g>
 </g>
-</svg></span> points and a finite absolute start time. Copies inputs into the existing spline.</span><span data-lang="zh" lang="zh-CN">N 个正时长、<span class="math" data-tex="(N+1)\times D"><span class="sr-only">(N+1) × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="5.4401em" height="1.1004em" viewBox="-64.871953 -72.500004 54.197597 10.962640" style="vertical-align: -0.3002em" aria-hidden="true" focusable="false" fill="currentColor">
+</svg></span> points and a finite trajectory start time. Copies inputs into the existing spline.</span><span data-lang="zh" lang="zh-CN">N 个正时长、<span class="math" data-tex="(N+1)\times D"><span class="sr-only">(N+1) × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="5.4401em" height="1.1004em" viewBox="-64.871953 -72.500004 54.197597 10.962640" style="vertical-align: -0.3002em" aria-hidden="true" focusable="false" fill="currentColor">
 <defs>
 <path id="math-9-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
 <path id="math-9-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
@@ -362,20 +365,20 @@ Status update(const std::vector&lt;double&gt;&amp; knots,
 <use x="-19.184319" y="-64.528024" xlink:href="#math-9-g1-68" />
 </g>
 </g>
-</svg></span> 插值点，以及有限的绝对起点时间。输入复制到已有样条。</span></td>
+</svg></span> 插值点，以及有限的轨迹起点时间。输入复制到已有样条。</span></td>
 </tr>
 <tr id="update-knots" data-search-entry>
-<td><code>update(knots, points, bc)</code></td>
+<td><code>updateFromBreakpoints(knots, points, bc)</code></td>
 <td><code>Status</code></td>
-<td><span data-lang="en" lang="en">N+1 strictly increasing absolute times, one for each waypoint row. No separate start-time argument; this vector contains knots, not durations.</span><span data-lang="zh" lang="zh-CN">N+1 个严格递增的绝对时刻，与插值点行一一对应。无需另传起点时间；该数组表示时间节点，而非段时长。</span></td>
+<td><span data-lang="en" lang="en">N+1 strictly increasing trajectory times, one for each waypoint row. No separate start-time argument; this vector contains knots, not durations.</span><span data-lang="zh" lang="zh-CN">N+1 个严格递增的轨迹时刻，与插值点行一一对应。无需另传起点时间；该数组表示时间节点，而非段时长。</span></td>
 </tr>
 <tr id="boundary-conditions" data-search-entry>
 <td><code>BoundaryConditions&lt;DIM&gt;</code></td>
-<td><span data-lang="en" lang="en">6 × <code>Vector</code> fields</span><span data-lang="zh" lang="zh-CN">6 个 <code>Vector</code> 字段</span></td>
-<td><span data-lang="en" lang="en"><code>start_velocity/acceleration/jerk</code>, <code>end_velocity/acceleration/jerk</code>; zero by default. Only derivatives supported by the chosen spline participate. Endpoint positions are the first/last waypoints.</span><span data-lang="zh" lang="zh-CN"><code>start_velocity/acceleration/jerk</code> 与 <code>end_velocity/acceleration/jerk</code>，默认零。仅选定样条支持的导数参与构造；端点位置来自首尾插值点。</span></td>
+<td><code>start/end: v, a, j</code></td>
+<td><span data-lang="en" lang="en">Zero endpoint derivatives by default; cubic uses v, quintic v/a, septic v/a/j. Positions belong only to waypoint rows.</span><span data-lang="zh" lang="zh-CN">端点导数默认零；三次使用 v，五次使用 v/a，七次使用 v/a/j。位置仅存于途经点矩阵。</span></td>
 </tr>
 </tbody></table></div>
-<p><span data-lang="en" lang="en">Both update forms reuse fixed-topology storage and recompute coefficients/factors. Failure invalidates the polynomial; any update invalidates borrowed views. The two runnable examples below describe the same trajectory using durations or absolute times. Both explicitly supply the same boundary conditions; omitting them uses zero endpoint derivatives.</span><span data-lang="zh" lang="zh-CN">两种更新形式均复用固定拓扑存储，重新计算系数与分解。失败使多项式失效；任何更新均使借用视图失效。以下两个可运行示例分别使用段时长和绝对时间，表示同一条轨迹。两者显式传入相同边界条件；省略时端点导数默认为零。</span></p>
+<p><span data-lang="en" lang="en">Both update forms reuse fixed-topology storage and recompute coefficients/factors. Failure invalidates the polynomial but retains workspace for retry; any update invalidates borrowed views. The two runnable examples below describe the same trajectory using durations or trajectory times. Both explicitly supply the same boundary conditions; omitting them uses zero endpoint derivatives.</span><span data-lang="zh" lang="zh-CN">两种更新形式均复用固定拓扑存储，重新计算系数与分解。失败使多项式失效但保留重试工作区；任何更新均使借用视图失效。以下两个可运行示例分别使用段时长和轨迹时间，表示同一条轨迹。两者显式传入相同边界条件；省略时端点导数默认为零。</span></p>
 <details class="example" open><summary><span data-lang="en" lang="en">Initialize from segment durations</span><span data-lang="zh" lang="zh-CN">使用段时长初始化</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="construction"><code>#include &quot;SplineTrajectory.hpp&quot;
 #include &lt;iostream&gt;
 
@@ -384,7 +387,7 @@ int main() {
     Spline::CoefficientMatrix points(3, 3);
     points &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
     SplineTrajectory::BoundaryConditions&lt;3&gt; bc;
-    bc.start_velocity &lt;&lt; 0.2, 0, 0;
+    bc.start.v &lt;&lt; 0.2, 0, 0;
 
     const std::vector&lt;double&gt; durations{1.2, 1.5};
     Spline spline;
@@ -393,7 +396,7 @@ int main() {
     std::cout &lt;&lt; spline.polynomial().evaluate(0.5).transpose() &lt;&lt; &#x27;\n&#x27;;
 }
 </code></pre></details>
-<details class="example" open><summary><span data-lang="en" lang="en">Initialize from absolute times</span><span data-lang="zh" lang="zh-CN">使用绝对时间初始化</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="construction-knots"><code>#include &quot;SplineTrajectory.hpp&quot;
+<details class="example" open><summary><span data-lang="en" lang="en">Initialize from trajectory times</span><span data-lang="zh" lang="zh-CN">使用轨迹时间初始化</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="construction-knots"><code>#include &quot;SplineTrajectory.hpp&quot;
 #include &lt;iostream&gt;
 
 int main() {
@@ -401,11 +404,11 @@ int main() {
     Spline::CoefficientMatrix points(3, 3);
     points &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
     SplineTrajectory::BoundaryConditions&lt;3&gt; bc;
-    bc.start_velocity &lt;&lt; 0.2, 0, 0;
+    bc.start.v &lt;&lt; 0.2, 0, 0;
 
     const std::vector&lt;double&gt; knots{0.0, 1.2, 2.7};
     Spline spline;
-    const auto status = spline.update(knots, points, bc);
+    const auto status = spline.updateFromBreakpoints(knots, points, bc);
     if (!status) { std::cerr &lt;&lt; status.message; return 1; }
     std::cout &lt;&lt; spline.polynomial().evaluate(0.5).transpose() &lt;&lt; &#x27;\n&#x27;;
 }
@@ -503,7 +506,7 @@ CoefficientMatrix energyCoefficientPartials() const;
 Eigen::VectorXd energyDurationPartials() const;
 Eigen::VectorXd energyDurationGradient() const;
 CoefficientMatrix energyWaypointGradient() const;
-BoundaryGradients energyBoundaryGradient() const;</code></pre>
+BoundaryConditions&lt;DIM&gt; energyBoundaryGradient() const;</code></pre>
 <div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Method</span><span data-lang="zh" lang="zh-CN">方法</span></th><th><span data-lang="en" lang="en">Output</span><span data-lang="zh" lang="zh-CN">输出</span></th><th><span data-lang="en" lang="en">Derivative meaning</span><span data-lang="zh" lang="zh-CN">导数含义</span></th></tr></thead><tbody>
 <tr id="energy-value" data-search-entry>
 <td><code>energy()</code></td>
@@ -730,34 +733,13 @@ BoundaryGradients energyBoundaryGradient() const;</code></pre>
 </tr>
 <tr id="energyWaypointGradient" data-search-entry>
 <td><code>energyWaypointGradient()</code></td>
-<td><span class="math" data-tex="(N-1)\times D"><span class="sr-only">(N−1) × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="5.4401em" height="1.1004em" viewBox="-64.871953 -72.500004 54.197597 10.962640" style="vertical-align: -0.3002em" aria-hidden="true" focusable="false" fill="currentColor">
-<defs>
-<path id="math-21-g0-0" d="M6.56538-2.291407C6.734745-2.291407 6.914072-2.291407 6.914072-2.49066S6.734745-2.689913 6.56538-2.689913H1.175592C1.006227-2.689913 .826899-2.689913 .826899-2.49066S1.006227-2.291407 1.175592-2.291407H6.56538Z" />
-<path id="math-21-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
-<path id="math-21-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
-<path id="math-21-g1-78" d="M7.531756-5.758406C7.631382-6.156912 7.81071-6.465753 8.607721-6.495641C8.657534-6.495641 8.777086-6.505604 8.777086-6.694894C8.777086-6.704857 8.777086-6.804483 8.647572-6.804483C8.318804-6.804483 7.970112-6.774595 7.641345-6.774595C7.302615-6.774595 6.953923-6.804483 6.625156-6.804483C6.56538-6.804483 6.445828-6.804483 6.445828-6.60523C6.445828-6.495641 6.545455-6.495641 6.625156-6.495641C7.193026-6.485679 7.302615-6.276463 7.302615-6.057285C7.302615-6.027397 7.28269-5.877958 7.272727-5.84807L6.156912-1.414695L3.955168-6.615193C3.875467-6.794521 3.865504-6.804483 3.636364-6.804483H2.30137C2.102117-6.804483 2.012453-6.804483 2.012453-6.60523C2.012453-6.495641 2.102117-6.495641 2.291407-6.495641C2.34122-6.495641 2.968867-6.495641 2.968867-6.405978L1.633873-1.05604C1.534247-.657534 1.364882-.33873 .557908-.308842C.498132-.308842 .388543-.298879 .388543-.109589C.388543-.039851 .438356 0 .518057 0C.836862 0 1.185554-.029888 1.514321-.029888C1.853051-.029888 2.211706 0 2.540473 0C2.590286 0 2.719801 0 2.719801-.199253C2.719801-.298879 2.630137-.308842 2.520548-.308842C1.942715-.328767 1.863014-.547945 1.863014-.747198C1.863014-.816936 1.872976-.86675 1.902864-.976339L3.217933-6.236613C3.257783-6.176837 3.257783-6.156912 3.307597-6.057285L5.788294-.18929C5.858032-.019925 5.88792 0 5.977584 0C6.087173 0 6.087173-.029888 6.136986-.209215L7.531756-5.758406Z" />
-<path id="math-21-g2-40" d="M3.297634 2.391034C3.297634 2.361146 3.297634 2.34122 3.128269 2.171856C1.882939 .916563 1.564134-.966376 1.564134-2.49066C1.564134-4.224159 1.942715-5.957659 3.16812-7.202989C3.297634-7.32254 3.297634-7.342466 3.297634-7.372354C3.297634-7.442092 3.257783-7.47198 3.198007-7.47198C3.098381-7.47198 2.201743-6.794521 1.613948-5.529265C1.105853-4.433375 .986301-3.327522 .986301-2.49066C.986301-1.713574 1.09589-.508095 1.643836 .617684C2.241594 1.843088 3.098381 2.49066 3.198007 2.49066C3.257783 2.49066 3.297634 2.460772 3.297634 2.391034Z" />
-<path id="math-21-g2-41" d="M2.879203-2.49066C2.879203-3.267746 2.769614-4.473225 2.221669-5.599004C1.62391-6.824408 .767123-7.47198 .667497-7.47198C.607721-7.47198 .56787-7.43213 .56787-7.372354C.56787-7.342466 .56787-7.32254 .757161-7.143213C1.733499-6.156912 2.30137-4.572852 2.30137-2.49066C2.30137-.787049 1.932752 .966376 .697385 2.221669C.56787 2.34122 .56787 2.361146 .56787 2.391034C.56787 2.450809 .607721 2.49066 .667497 2.49066C.767123 2.49066 1.663761 1.8132 2.251557 .547945C2.759651-.547945 2.879203-1.653798 2.879203-2.49066Z" />
-<path id="math-21-g2-49" d="M2.929016-6.37609C2.929016-6.615193 2.929016-6.635118 2.699875-6.635118C2.082192-5.997509 1.205479-5.997509 .886675-5.997509V-5.688667C1.085928-5.688667 1.673724-5.688667 2.191781-5.947696V-.787049C2.191781-.428394 2.161893-.308842 1.265255-.308842H.946451V0C1.295143-.029888 2.161893-.029888 2.560399-.029888S3.825654-.029888 4.174346 0V-.308842H3.855542C2.958904-.308842 2.929016-.418431 2.929016-.787049V-6.37609Z" />
-</defs>
-<g id="math-21-page1">
-<g fill="currentColor">
-<use x="-65.358254" y="-64.528024" xlink:href="#math-21-g2-40" />
-<use x="-61.483881" y="-64.528024" xlink:href="#math-21-g1-78" />
-<use x="-50.179125" y="-64.528024" xlink:href="#math-21-g0-0" />
-<use x="-40.216511" y="-64.528024" xlink:href="#math-21-g2-49" />
-<use x="-35.235172" y="-64.528024" xlink:href="#math-21-g2-41" />
-<use x="-29.146932" y="-64.528024" xlink:href="#math-21-g0-2" />
-<use x="-19.184319" y="-64.528024" xlink:href="#math-21-g1-68" />
-</g>
-</g>
-</svg></span></td>
-<td><span data-lang="en" lang="en">Total gradient for interior waypoints only.</span><span data-lang="zh" lang="zh-CN">仅内部插值点的完整梯度。</span></td>
+<td><code>(N+1) × D</code></td>
+<td><span data-lang="en" lang="en">Total gradient for all waypoint positions, including endpoints.</span><span data-lang="zh" lang="zh-CN">全部途经点位置的总梯度，包含两端。</span></td>
 </tr>
 <tr id="energyBoundaryGradient" data-search-entry>
 <td><code>energyBoundaryGradient()</code></td>
-<td><code>BoundaryGradientPair&lt;DIM&gt;</code></td>
-<td><span data-lang="en" lang="en">Start/end p/v/a/j; unsupported higher fields remain zero.</span><span data-lang="zh" lang="zh-CN">起终点 p/v/a/j；未支持的高阶字段为零。</span></td>
+<td><code>BoundaryConditions&lt;DIM&gt;</code></td>
+<td><span data-lang="en" lang="en">Only start/end v/a/j gradients; unsupported higher derivatives are zero.</span><span data-lang="zh" lang="zh-CN">仅含 start/end 的 v/a/j 导数梯度；不支持的高阶字段为零。</span></td>
 </tr>
 </tbody></table></div>
 <p class="note"><span data-lang="en" lang="en">Each partial/gradient getter also has a <code>void method(Output&amp; output) const</code> overload with the corresponding output type. Overwrite overloads resize outputs automatically and reuse matching storage. <code>output.size()</code> reports the segment count. For accumulation, prepare matching zero gradients with <code>output.setZero(N)</code>; <code>output.setZero()</code> clears existing values.</span><span data-lang="zh" lang="zh-CN">各偏导/梯度取值方法也提供 <code>void method(Output&amp; output) const</code> 引用重载，输出类型与返回值版本一致。覆盖接口自动调整输出尺寸，尺寸相同时复用存储。<code>output.size()</code> 返回段数。累加前可用 <code>output.setZero(N)</code> 准备对应段数的零梯度；<code>output.setZero()</code> 清零现有值。</span></p>
@@ -858,30 +840,9 @@ void backward(const CoefficientMatrix&amp; gdC, const Eigen::VectorXd&amp; gdT,
 <td><span data-lang="en" lang="en">Independent duration partials holding C fixed; zeros if no explicit duration term.</span><span data-lang="zh" lang="zh-CN">固定 C 的独立时长偏导；没有显式时长项时传零。</span></td>
 </tr>
 <tr id="gradient-inner" data-search-entry>
-<td><code>output.inner_points</code></td>
-<td><code>CoefficientMatrix</code> · <span class="math" data-tex="(N-1)\times D"><span class="sr-only">(N−1) × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="5.4401em" height="1.1004em" viewBox="-64.871953 -72.500004 54.197597 10.962640" style="vertical-align: -0.3002em" aria-hidden="true" focusable="false" fill="currentColor">
-<defs>
-<path id="math-24-g0-0" d="M6.56538-2.291407C6.734745-2.291407 6.914072-2.291407 6.914072-2.49066S6.734745-2.689913 6.56538-2.689913H1.175592C1.006227-2.689913 .826899-2.689913 .826899-2.49066S1.006227-2.291407 1.175592-2.291407H6.56538Z" />
-<path id="math-24-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
-<path id="math-24-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
-<path id="math-24-g1-78" d="M7.531756-5.758406C7.631382-6.156912 7.81071-6.465753 8.607721-6.495641C8.657534-6.495641 8.777086-6.505604 8.777086-6.694894C8.777086-6.704857 8.777086-6.804483 8.647572-6.804483C8.318804-6.804483 7.970112-6.774595 7.641345-6.774595C7.302615-6.774595 6.953923-6.804483 6.625156-6.804483C6.56538-6.804483 6.445828-6.804483 6.445828-6.60523C6.445828-6.495641 6.545455-6.495641 6.625156-6.495641C7.193026-6.485679 7.302615-6.276463 7.302615-6.057285C7.302615-6.027397 7.28269-5.877958 7.272727-5.84807L6.156912-1.414695L3.955168-6.615193C3.875467-6.794521 3.865504-6.804483 3.636364-6.804483H2.30137C2.102117-6.804483 2.012453-6.804483 2.012453-6.60523C2.012453-6.495641 2.102117-6.495641 2.291407-6.495641C2.34122-6.495641 2.968867-6.495641 2.968867-6.405978L1.633873-1.05604C1.534247-.657534 1.364882-.33873 .557908-.308842C.498132-.308842 .388543-.298879 .388543-.109589C.388543-.039851 .438356 0 .518057 0C.836862 0 1.185554-.029888 1.514321-.029888C1.853051-.029888 2.211706 0 2.540473 0C2.590286 0 2.719801 0 2.719801-.199253C2.719801-.298879 2.630137-.308842 2.520548-.308842C1.942715-.328767 1.863014-.547945 1.863014-.747198C1.863014-.816936 1.872976-.86675 1.902864-.976339L3.217933-6.236613C3.257783-6.176837 3.257783-6.156912 3.307597-6.057285L5.788294-.18929C5.858032-.019925 5.88792 0 5.977584 0C6.087173 0 6.087173-.029888 6.136986-.209215L7.531756-5.758406Z" />
-<path id="math-24-g2-40" d="M3.297634 2.391034C3.297634 2.361146 3.297634 2.34122 3.128269 2.171856C1.882939 .916563 1.564134-.966376 1.564134-2.49066C1.564134-4.224159 1.942715-5.957659 3.16812-7.202989C3.297634-7.32254 3.297634-7.342466 3.297634-7.372354C3.297634-7.442092 3.257783-7.47198 3.198007-7.47198C3.098381-7.47198 2.201743-6.794521 1.613948-5.529265C1.105853-4.433375 .986301-3.327522 .986301-2.49066C.986301-1.713574 1.09589-.508095 1.643836 .617684C2.241594 1.843088 3.098381 2.49066 3.198007 2.49066C3.257783 2.49066 3.297634 2.460772 3.297634 2.391034Z" />
-<path id="math-24-g2-41" d="M2.879203-2.49066C2.879203-3.267746 2.769614-4.473225 2.221669-5.599004C1.62391-6.824408 .767123-7.47198 .667497-7.47198C.607721-7.47198 .56787-7.43213 .56787-7.372354C.56787-7.342466 .56787-7.32254 .757161-7.143213C1.733499-6.156912 2.30137-4.572852 2.30137-2.49066C2.30137-.787049 1.932752 .966376 .697385 2.221669C.56787 2.34122 .56787 2.361146 .56787 2.391034C.56787 2.450809 .607721 2.49066 .667497 2.49066C.767123 2.49066 1.663761 1.8132 2.251557 .547945C2.759651-.547945 2.879203-1.653798 2.879203-2.49066Z" />
-<path id="math-24-g2-49" d="M2.929016-6.37609C2.929016-6.615193 2.929016-6.635118 2.699875-6.635118C2.082192-5.997509 1.205479-5.997509 .886675-5.997509V-5.688667C1.085928-5.688667 1.673724-5.688667 2.191781-5.947696V-.787049C2.191781-.428394 2.161893-.308842 1.265255-.308842H.946451V0C1.295143-.029888 2.161893-.029888 2.560399-.029888S3.825654-.029888 4.174346 0V-.308842H3.855542C2.958904-.308842 2.929016-.418431 2.929016-.787049V-6.37609Z" />
-</defs>
-<g id="math-24-page1">
-<g fill="currentColor">
-<use x="-65.358254" y="-64.528024" xlink:href="#math-24-g2-40" />
-<use x="-61.483881" y="-64.528024" xlink:href="#math-24-g1-78" />
-<use x="-50.179125" y="-64.528024" xlink:href="#math-24-g0-0" />
-<use x="-40.216511" y="-64.528024" xlink:href="#math-24-g2-49" />
-<use x="-35.235172" y="-64.528024" xlink:href="#math-24-g2-41" />
-<use x="-29.146932" y="-64.528024" xlink:href="#math-24-g0-2" />
-<use x="-19.184319" y="-64.528024" xlink:href="#math-24-g1-68" />
-</g>
-</g>
-</svg></span></td>
-<td><span data-lang="en" lang="en">Total gradient for interior waypoint positions.</span><span data-lang="zh" lang="zh-CN">内部插值点位置的完整梯度。</span></td>
+<td><code>output.waypoints</code></td>
+<td><code>WaypointMatrix · (N+1) × D</code></td>
+<td><span data-lang="en" lang="en">Total gradient for all waypoint positions.</span><span data-lang="zh" lang="zh-CN">全部途经点位置的总梯度。</span></td>
 </tr>
 <tr id="gradient-duration" data-search-entry>
 <td><code>output.durations</code></td>
@@ -889,9 +850,9 @@ void backward(const CoefficientMatrix&amp; gdC, const Eigen::VectorXd&amp; gdT,
 <td><span data-lang="en" lang="en">Total physical-duration gradient, including gdT.</span><span data-lang="zh" lang="zh-CN">包含 gdT 的完整物理时长梯度。</span></td>
 </tr>
 <tr id="gradient-boundary" data-search-entry>
-<td><code>output.start</code>, <code>output.end</code></td>
-<td><code>BoundaryGradient&lt;DIM&gt;</code></td>
-<td><span data-lang="en" lang="en">Each has D-vectors <code>p, v, a, j</code>, including endpoint positions.</span><span data-lang="zh" lang="zh-CN">各含 D 维向量 <code>p, v, a, j</code>，包括端点位置。</span></td>
+<td><code>output.boundary.start / end</code></td>
+<td><code>EndpointDerivatives&lt;DIM&gt;</code></td>
+<td><span data-lang="en" lang="en">Each contains v/a/j gradients; positions are in waypoints.</span><span data-lang="zh" lang="zh-CN">各自包含 v/a/j 梯度；位置梯度在 waypoints 中。</span></td>
 </tr>
 <tr id="gradient-size" data-search-entry>
 <td><code>output.size()</code></td>
@@ -917,18 +878,17 @@ spline.energyGradientAdd(g, 0.5); // add energy / 累加能量</code></pre>
 <article class="subsection">
 <h3 id="sampling"><span data-lang="en" lang="en">Scalar, batch & multi-derivative queries</span><span data-lang="zh" lang="zh-CN">单点、批量与多阶求值</span><a class="anchor" href="#sampling" aria-label="Permalink / 固定链接">#</a></h3>
 <pre class="signature"><code>// PPolyND: const queries; r is a nonnegative physical derivative order.
-Vector evaluate(double t, Deriv type = Deriv::Pos) const;
-Vector evaluate(double t, int r) const;
+Vector evaluate(double t, DerivativeOrder order = Deriv::Pos) const;
 template&lt;int R&gt; Derivatives&lt;R&gt; evaluateDerivatives(double t) const;
 CoefficientMatrix evaluate(const std::vector&lt;double&gt;&amp; times,
-                           Deriv type = Deriv::Pos) const;
-void evaluateInto(const std::vector&lt;double&gt;&amp; times,
-                  Eigen::Ref&lt;CoefficientMatrix&gt; output, int r = 0) const;
+                           DerivativeOrder order = Deriv::Pos) const;
+void evaluate(const std::vector&lt;double&gt;&amp; times,
+                  CoefficientMatrix&amp; output, DerivativeOrder order = Deriv::Pos) const;
 template&lt;int R&gt; DerivativeBatch&lt;R&gt;
     evaluateDerivatives(const std::vector&lt;double&gt;&amp; times) const;
-template&lt;int R&gt; void evaluateDerivativesInto(
+template&lt;int R&gt; void evaluateDerivatives(
     const std::vector&lt;double&gt;&amp; times, DerivativeBatch&lt;R&gt;&amp; output) const;</code></pre>
-<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Task</span><span data-lang="zh" lang="zh-CN">任务</span></th><th><span data-lang="en" lang="en">PPolyND call</span><span data-lang="zh" lang="zh-CN">PPolyND 调用</span></th><th><span data-lang="en" lang="en">Sampler<R> call</span><span data-lang="zh" lang="zh-CN">Sampler<R> 调用</span></th><th><span data-lang="en" lang="en">Output / allocation</span><span data-lang="zh" lang="zh-CN">输出 / 分配</span></th></tr></thead><tbody>
+<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Task</span><span data-lang="zh" lang="zh-CN">任务</span></th><th><span data-lang="en" lang="en">PPolyND call</span><span data-lang="zh" lang="zh-CN">PPolyND 调用</span></th><th><span data-lang="en" lang="en">Sampler&lt;R&gt; call</span><span data-lang="zh" lang="zh-CN">Sampler&lt;R&gt; 调用</span></th><th><span data-lang="en" lang="en">Output / allocation</span><span data-lang="zh" lang="zh-CN">输出 / 分配</span></th></tr></thead><tbody>
 <tr id="evaluate" data-search-entry>
 <td><span data-lang="en" lang="en">Scalar, one order</span><span data-lang="zh" lang="zh-CN">单点单阶</span></td>
 <td><code>evaluate(t, r)</code></td>
@@ -973,37 +933,11 @@ template&lt;int R&gt; void evaluateDerivativesInto(
 </g>
 </svg></span> 矩阵；分配内存。</span></td>
 </tr>
-<tr id="evaluateInto" data-search-entry>
+<tr id="evaluate-output" data-search-entry>
 <td><span data-lang="en" lang="en">Batch, reuse output</span><span data-lang="zh" lang="zh-CN">批量复用输出</span></td>
-<td><code>evaluateInto(times, out, r)</code></td>
-<td><code>evaluateInto(times, out, r)</code></td>
-<td><span data-lang="en" lang="en"><code>void</code>; out is pre-sized <span class="math" data-tex="M\times D"><span class="sr-only">M × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="3.1638em" height="0.7834em" viewBox="-65.439823 -72.496704 31.519354 7.804483" style="vertical-align: -0.1335em" aria-hidden="true" focusable="false" fill="currentColor">
-<defs>
-<path id="math-27-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
-<path id="math-27-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
-<path id="math-27-g1-77" d="M9.225405-6.03736C9.315068-6.396015 9.334994-6.495641 10.082192-6.495641C10.311333-6.495641 10.400996-6.495641 10.400996-6.694894C10.400996-6.804483 10.30137-6.804483 10.132005-6.804483H8.816936C8.557908-6.804483 8.547945-6.804483 8.428394-6.615193L4.79203-.936488L4.014944-6.575342C3.985056-6.804483 3.965131-6.804483 3.706102-6.804483H2.34122C2.15193-6.804483 2.042341-6.804483 2.042341-6.615193C2.042341-6.495641 2.132005-6.495641 2.331258-6.495641C2.460772-6.495641 2.6401-6.485679 2.759651-6.475716C2.919054-6.455791 2.978829-6.425903 2.978829-6.316314C2.978829-6.276463 2.968867-6.246575 2.938979-6.127024L1.673724-1.05604C1.574097-.657534 1.404732-.33873 .597758-.308842C.547945-.308842 .418431-.298879 .418431-.119552C.418431-.029888 .478207 0 .557908 0C.876712 0 1.225405-.029888 1.554172-.029888C1.892902-.029888 2.251557 0 2.580324 0C2.630137 0 2.759651 0 2.759651-.199253C2.759651-.308842 2.650062-.308842 2.580324-.308842C2.012453-.318804 1.902864-.518057 1.902864-.747198C1.902864-.816936 1.912827-.86675 1.942715-.976339L3.297634-6.405978H3.307597L4.164384-.229141C4.184309-.109589 4.194271 0 4.313823 0C4.423412 0 4.483188-.109589 4.533001-.179328L8.557908-6.485679H8.56787L7.143213-.777086C7.043587-.388543 7.023661-.308842 6.236613-.308842C6.067248-.308842 5.957659-.308842 5.957659-.119552C5.957659 0 6.07721 0 6.107098 0C6.386052 0 7.063512-.029888 7.342466-.029888C7.750934-.029888 8.179328 0 8.587796 0C8.647572 0 8.777086 0 8.777086-.199253C8.777086-.308842 8.687422-.308842 8.498132-.308842C8.129514-.308842 7.85056-.308842 7.85056-.488169C7.85056-.52802 7.85056-.547945 7.900374-.727273L9.225405-6.03736Z" />
-</defs>
-<g id="math-27-page1">
-<g fill="currentColor">
-<use x="-65.358254" y="-65.19222" xlink:href="#math-27-g1-77" />
-<use x="-52.393046" y="-65.19222" xlink:href="#math-27-g0-2" />
-<use x="-42.430432" y="-65.19222" xlink:href="#math-27-g1-68" />
-</g>
-</g>
-</svg></span>.</span><span data-lang="zh" lang="zh-CN"><code>void</code>；out 预分配为 <span class="math" data-tex="M\times D"><span class="sr-only">M × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="3.1638em" height="0.7834em" viewBox="-65.439823 -72.496704 31.519354 7.804483" style="vertical-align: -0.1335em" aria-hidden="true" focusable="false" fill="currentColor">
-<defs>
-<path id="math-28-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
-<path id="math-28-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
-<path id="math-28-g1-77" d="M9.225405-6.03736C9.315068-6.396015 9.334994-6.495641 10.082192-6.495641C10.311333-6.495641 10.400996-6.495641 10.400996-6.694894C10.400996-6.804483 10.30137-6.804483 10.132005-6.804483H8.816936C8.557908-6.804483 8.547945-6.804483 8.428394-6.615193L4.79203-.936488L4.014944-6.575342C3.985056-6.804483 3.965131-6.804483 3.706102-6.804483H2.34122C2.15193-6.804483 2.042341-6.804483 2.042341-6.615193C2.042341-6.495641 2.132005-6.495641 2.331258-6.495641C2.460772-6.495641 2.6401-6.485679 2.759651-6.475716C2.919054-6.455791 2.978829-6.425903 2.978829-6.316314C2.978829-6.276463 2.968867-6.246575 2.938979-6.127024L1.673724-1.05604C1.574097-.657534 1.404732-.33873 .597758-.308842C.547945-.308842 .418431-.298879 .418431-.119552C.418431-.029888 .478207 0 .557908 0C.876712 0 1.225405-.029888 1.554172-.029888C1.892902-.029888 2.251557 0 2.580324 0C2.630137 0 2.759651 0 2.759651-.199253C2.759651-.308842 2.650062-.308842 2.580324-.308842C2.012453-.318804 1.902864-.518057 1.902864-.747198C1.902864-.816936 1.912827-.86675 1.942715-.976339L3.297634-6.405978H3.307597L4.164384-.229141C4.184309-.109589 4.194271 0 4.313823 0C4.423412 0 4.483188-.109589 4.533001-.179328L8.557908-6.485679H8.56787L7.143213-.777086C7.043587-.388543 7.023661-.308842 6.236613-.308842C6.067248-.308842 5.957659-.308842 5.957659-.119552C5.957659 0 6.07721 0 6.107098 0C6.386052 0 7.063512-.029888 7.342466-.029888C7.750934-.029888 8.179328 0 8.587796 0C8.647572 0 8.777086 0 8.777086-.199253C8.777086-.308842 8.687422-.308842 8.498132-.308842C8.129514-.308842 7.85056-.308842 7.85056-.488169C7.85056-.52802 7.85056-.547945 7.900374-.727273L9.225405-6.03736Z" />
-</defs>
-<g id="math-28-page1">
-<g fill="currentColor">
-<use x="-65.358254" y="-65.19222" xlink:href="#math-28-g1-77" />
-<use x="-52.393046" y="-65.19222" xlink:href="#math-28-g0-2" />
-<use x="-42.430432" y="-65.19222" xlink:href="#math-28-g1-68" />
-</g>
-</g>
-</svg></span>。</span></td>
+<td><code>evaluate(times, out, r)</code></td>
+<td><code>evaluate(times, out, r)</code></td>
+<td><span data-lang="en" lang="en">Owning output resizes/reuses; an Eigen::Ref output must already match M × D.</span><span data-lang="zh" lang="zh-CN">拥有型输出调整尺寸或复用；Eigen::Ref 输出须已匹配 M × D。</span></td>
 </tr>
 <tr id="evaluateDerivatives-batch" data-search-entry>
 <td><span data-lang="en" lang="en">Batch, orders 0…R</span><span data-lang="zh" lang="zh-CN">批量 0…R 阶</span></td>
@@ -1037,14 +971,14 @@ template&lt;int R&gt; void evaluateDerivativesInto(
 </g>
 </svg></span> 矩阵。</span></td>
 </tr>
-<tr id="evaluateDerivativesInto" data-search-entry>
+<tr id="evaluateDerivatives-output" data-search-entry>
 <td><span data-lang="en" lang="en">Batch, reuse all orders</span><span data-lang="zh" lang="zh-CN">批量复用多阶输出</span></td>
-<td><code>evaluateDerivativesInto&lt;R&gt;(times, out)</code></td>
-<td><code>evaluateDerivativesInto(times, out)</code></td>
-<td><span data-lang="en" lang="en"><code>void</code>; pre-size every matrix in out.</span><span data-lang="zh" lang="zh-CN"><code>void</code>；out 的每张矩阵均须预分配。</span></td>
+<td><code>evaluateDerivatives&lt;R&gt;(times, out)</code></td>
+<td><code>evaluateDerivatives(times, out)</code></td>
+<td><span data-lang="en" lang="en">Each owning matrix resizes as needed and reuses matching storage.</span><span data-lang="zh" lang="zh-CN">每个拥有型矩阵按需调整尺寸，同尺寸复用。</span></td>
 </tr>
 </tbody></table></div>
-<p><span data-lang="en" lang="en">Single-order batch overloads accept either <code>int</code> or <code>Deriv</code>; <code>evaluate(times)</code> defaults to position. Multi-order results use the derivative order as the index: <code>[0]</code> position, <code>[1]</code> velocity, <code>[2]</code> acceleration. Into outputs must not alias source storage.</span><span data-lang="zh" lang="zh-CN">单阶批量重载接受 <code>int</code> 或 <code>Deriv</code>，<code>evaluate(times)</code> 默认求位置。多阶结果按导数阶数索引：<code>[0]</code> 位置、<code>[1]</code> 速度、<code>[2]</code> 加速度。Into 输出不得与源存储重叠。</span></p>
+<p><span data-lang="en" lang="en">Single-order batch overloads accept either <code>int</code> or <code>Deriv</code>; <code>evaluate(times)</code> defaults to position. Multi-order results use the derivative order as the index: <code>[0]</code> position, <code>[1]</code> velocity, <code>[2]</code> acceleration. Output buffers must not alias source storage.</span><span data-lang="zh" lang="zh-CN">单阶批量重载接受 <code>int</code> 或 <code>Deriv</code>，<code>evaluate(times)</code> 默认求位置。多阶结果按导数阶数索引：<code>[0]</code> 位置、<code>[1]</code> 速度、<code>[2]</code> 加速度。输出缓冲不得与源存储重叠。</span></p>
 <details class="example"><summary><span data-lang="en" lang="en">Runnable sampling example</span><span data-lang="zh" lang="zh-CN">可运行的采样示例</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="sampling"><code>#include &quot;SplineTrajectory.hpp&quot;
 #include &lt;iostream&gt;
 
@@ -1059,7 +993,7 @@ int main() {
 
     auto pva = poly.evaluateDerivatives&lt;2&gt;(0.5);
     Spline::CoefficientMatrix velocity(times.size(), 3);
-    poly.evaluateInto(times, velocity, SplineTrajectory::Deriv::Vel);
+    poly.evaluate(times, velocity, SplineTrajectory::Deriv::Vel);
     auto sampler = poly.makeSampler&lt;2&gt;();
     auto position = sampler.evaluate(0.5);
     auto batch = sampler.evaluateDerivatives(times);
@@ -1071,11 +1005,9 @@ int main() {
 <article class="subsection">
 <h3 id="sampler"><span data-lang="en" lang="en">Sampler, segment lookup & local time</span><span data-lang="zh" lang="zh-CN">Sampler、分段定位与局部时间</span><a class="anchor" href="#sampler" aria-label="Permalink / 固定链接">#</a></h3>
 <pre class="signature"><code>template&lt;int R&gt; Sampler&lt;R&gt; makeSampler() const &amp;;
-Segment at(int index) const &amp;;
 Segment operator[](int index) const &amp;;
 // Segment:
-Vector evaluateLocal(double local_t, Deriv type = Deriv::Pos) const;
-Vector evaluateLocal(double local_t, int r) const;</code></pre>
+Vector evaluateLocal(double local_t, DerivativeOrder order = Deriv::Pos) const;</code></pre>
 <div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API / behavior</span><span data-lang="zh" lang="zh-CN">接口 / 行为</span></th><th><span data-lang="en" lang="en">Time / state</span><span data-lang="zh" lang="zh-CN">时间 / 状态</span></th><th><span data-lang="en" lang="en">When to use</span><span data-lang="zh" lang="zh-CN">用途与约束</span></th></tr></thead><tbody>
 <tr id="query-state" data-search-entry>
 <td><code>poly.evaluate…</code></td>
@@ -1088,7 +1020,7 @@ Vector evaluateLocal(double local_t, int r) const;</code></pre>
 <td><span data-lang="en" lang="en">Reuses derivative coefficients across calls. Orders must be in <code>[0,R]</code>. Source must stay alive and unchanged. Dynamic capacity may allocate at sampler construction.</span><span data-lang="zh" lang="zh-CN">跨调用复用导数系数。阶数须在 <code>[0,R]</code>。源须存活且不变；动态容量采样器在构造时可能分配。</span></td>
 </tr>
 <tr id="evaluateLocal" data-search-entry>
-<td><code>poly.at(i).evaluateLocal(local_t, r)</code></td>
+<td><code>poly[i].evaluateLocal(local_t, r)</code></td>
 <td><span data-lang="en" lang="en">Seconds relative to piece i</span><span data-lang="zh" lang="zh-CN">相对第 i 段起点的秒数</span></td>
 <td><span data-lang="en" lang="en">No piece search. Requires a valid index. <code>Segment</code> also exposes <code>index/startTime/endTime/duration/coefficients</code>.</span><span data-lang="zh" lang="zh-CN">不查找分段，要求索引有效。<code>Segment</code> 还提供 <code>index/startTime/endTime/duration/coefficients</code>。</span></td>
 </tr>
@@ -1106,8 +1038,9 @@ Vector evaluateLocal(double local_t, int r) const;</code></pre>
                       const CoefficientMatrix&amp; coefficients, int coefficient_count);
 void update(const std::vector&lt;double&gt;&amp; knots,
             const CoefficientMatrix&amp; coefficients, int coefficient_count);
-StatusOr&lt;PPolyND&gt; derivative(int order = 1) const;
+StatusOr&lt;PPolyND&gt; derivative(DerivativeOrder order = Deriv::Vel) const;
 StatusOr&lt;PPolyND&gt; extractInterval(double start, double end) const;
+StatusOr&lt;PPolyND&gt; rebased(double new_start) const;
 StatusOr&lt;PPolyND&gt; appendRebased(const PPolyND&amp; suffix) const;
 StatusOr&lt;double&gt; length(double dt = 0.01) const;
 StatusOr&lt;double&gt; length(double start, double end, double dt = 0.01) const;
@@ -1171,12 +1104,13 @@ static PPolyND constant(const std::vector&lt;double&gt;&amp; knots, const Vector
 <tr id="extractInterval" data-search-entry>
 <td><code>extractInterval(start, end)</code></td>
 <td><code>StatusOr&lt;PPolyND&gt;</code></td>
-<td><span data-lang="en" lang="en">Nonempty interval within the source domain; result starts at time zero. Exact coefficient translation at the clipped first piece.</span><span data-lang="zh" lang="zh-CN">源域内非空区间；结果起点时间为零，对首个裁剪段做系数平移。</span></td>
+<td><span data-lang="en" lang="en">Nonempty interval within the source domain; preserves the original time axis. Translates coefficients at the clipped first piece.</span><span data-lang="zh" lang="zh-CN">源范围内的非空区间；保留原时间轴，并平移首个裁剪段的局部系数。</span></td>
 </tr>
+<tr id="rebased" data-search-entry><td><code>rebased(new_start)</code></td><td><code>StatusOr&lt;PPolyND&gt;</code></td><td><span data-lang="en" lang="en">Owning copy on an explicit new time origin, preserving local coefficients.</span><span data-lang="zh" lang="zh-CN">显式平移至新起点的拥有型副本，局部系数不变。</span></td></tr>
 <tr id="appendRebased" data-search-entry>
 <td><code>appendRebased(suffix)</code></td>
 <td><code>StatusOr&lt;PPolyND&gt;</code></td>
-<td><span data-lang="en" lang="en">Concatenates zero-origin polynomials of equal coefficient count. No fitting or continuity enforcement.</span><span data-lang="zh" lang="zh-CN">拼接系数数相同的零起点多项式。不拟合，也不保证接缝连续。</span></td>
+<td><span data-lang="en" lang="en">Accepts arbitrary origins and shifts the suffix to this polynomial’s end. Equal coefficient counts; no continuity enforcement.</span><span data-lang="zh" lang="zh-CN">接受任意起点，将后缀平移到当前轨迹末端。要求系数数相同，不强制连续性。</span></td>
 </tr>
 <tr id="length" data-search-entry>
 <td><code>length(...)</code></td>
@@ -1285,20 +1219,21 @@ static PPolyND constant(const std::vector&lt;double&gt;&amp; knots, const Vector
 <article class="subsection">
 <h3 id="optimizer-workflow"><span data-lang="en" lang="en">Preparation & external solver workflow</span><span data-lang="zh" lang="zh-CN">准备与外部求解流程</span><a class="anchor" href="#optimizer-workflow" aria-label="Permalink / 固定链接">#</a></h3>
 <p><span data-lang="en" lang="en"><code>SplineOptimizer&lt;Spline, Parameterization&gt;</code> supplies a cost and gradient; it does not run an iterative solver. A prepared optimizer owns its reference input, layout and working storage. It is noncopyable, movable and exclusive to one synchronous evaluation at a time.</span><span data-lang="zh" lang="zh-CN"><code>SplineOptimizer&lt;Spline, Parameterization&gt;</code> 提供代价与梯度，不执行迭代求解。准备后的优化器拥有参考输入、布局与工作存储；不可复制，可移动，同一时刻仅进行一次同步求值。</span></p>
-<ol class="steps"><li><code>prepare()</code><span><span data-lang="en" lang="en">Validate and allocate</span><span data-lang="zh" lang="zh-CN">验证并准备存储</span></span></li><li><code>initialGuess()</code><span><span data-lang="en" lang="en">Copy initial coordinates</span><span data-lang="zh" lang="zh-CN">复制初始坐标</span></span></li><li><code>evaluate()</code><span><span data-lang="en" lang="en">External trial loop</span><span data-lang="zh" lang="zh-CN">外部候选迭代</span></span></li><li><code>updateAccepted()</code><span><span data-lang="en" lang="en">Restore accepted x</span><span data-lang="zh" lang="zh-CN">恢复接受解 x</span></span></li></ol>
-<pre class="signature"><code>Status prepare(const Problem&amp; problem, OptimizerOptions options = {});
+<p><span data-lang="en" lang="en">Deliver in this order: solver final x → successful update(x) → task constraint acceptance → copyPolynomial() → control-thread sampler. evaluate() changes the candidate; polynomial() is the last built trial, not an automatically accepted solution. Keep the saved snapshot alive and unchanged.</span><span data-lang="zh" lang="zh-CN">交付顺序：求解器最终 x → update(x) 成功 → 规划约束验收 → copyPolynomial() → 控制线程采样。evaluate() 会改变候选；polynomial() 是最后构建的试探轨迹，不会自动成为接受解。保存的快照须存活且不变。</span></p><ol class="steps"><li><code>prepare()</code><span><span data-lang="en" lang="en">Validate and allocate</span><span data-lang="zh" lang="zh-CN">验证并准备存储</span></span></li><li><code>initialGuess()</code><span><span data-lang="en" lang="en">Copy initial coordinates</span><span data-lang="zh" lang="zh-CN">复制初始坐标</span></span></li><li><code>evaluate()</code><span><span data-lang="en" lang="en">External trial loop</span><span data-lang="zh" lang="zh-CN">外部候选迭代</span></span></li><li><code>update()</code><span><span data-lang="en" lang="en">Restore accepted x</span><span data-lang="zh" lang="zh-CN">恢复接受解 x</span></span></li></ol>
+<pre class="signature"><code>template&lt;class Objective&gt;
+Status prepare(const Problem&amp; problem, const Objective&amp; objective);
 template&lt;class Objective&gt;
-Status prepare(const Problem&amp; problem, OptimizerOptions options, const Objective&amp; objective);
+Status prepare(const Problem&amp; problem, const OptimizerOptions&amp; options, const Objective&amp; objective);
 Eigen::VectorXd initialGuess() const;
 template&lt;class Objective, class Executor = SerialExecutor&gt;
 EvaluationResult evaluate(const Eigen::VectorXd&amp; x, Eigen::VectorXd&amp; gradient,
                           Objective&amp; objective, const Executor&amp; executor = {});
-Status updateAccepted(const Eigen::VectorXd&amp; x);</code></pre>
+Status update(const Eigen::VectorXd&amp; x);</code></pre>
 <div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Method</span><span data-lang="zh" lang="zh-CN">方法</span></th><th><span data-lang="en" lang="en">Input / output</span><span data-lang="zh" lang="zh-CN">输入 / 输出</span></th><th><span data-lang="en" lang="en">Contract</span><span data-lang="zh" lang="zh-CN">契约</span></th></tr></thead><tbody>
 <tr id="prepare" data-search-entry>
-<td><code>prepare(...)</code></td>
+<td><code>prepare(input, objective) / prepare(input, options, objective)</code></td>
 <td><code>Status</code></td>
-<td><span data-lang="en" lang="en">Copies reference data and allocates buffers. Failure leaves it unprepared. Pass the objective overload if a sample stage is used; no objective reference is retained.</span><span data-lang="zh" lang="zh-CN">复制参考数据并准备缓冲。失败后未准备。有 sample 阶段时使用传 objective 的重载；不保留目标引用。</span></td>
+<td><span data-lang="en" lang="en">Copies inputs, encodes initial coordinates and prepares library buffers/capabilities. No objective reference is retained. Prepare user-owned cost resources separately.</span><span data-lang="zh" lang="zh-CN">复制输入，编码初始坐标并准备库工作区及采样能力，不保留 objective 引用。用户代价资源另行提前准备。</span></td>
 </tr>
 <tr id="initialGuess" data-search-entry>
 <td><code>initialGuess()</code></td>
@@ -1308,10 +1243,10 @@ Status updateAccepted(const Eigen::VectorXd&amp; x);</code></pre>
 <tr id="optimizer-evaluate" data-search-entry>
 <td><code>evaluate(x, g, objective, executor)</code></td>
 <td><code>EvaluationResult {cost, status}</code></td>
-<td><span data-lang="en" lang="en">x and g both have dimension() entries; g is pre-sized. Objective is an lvalue. Fixed-topology library evaluation does not allocate; user callbacks control their own allocations.</span><span data-lang="zh" lang="zh-CN">x、g 均为 dimension() 维，g 须预分配；objective 为左值。固定拓扑的库内部求值不分配，用户回调自行负责分配。</span></td>
+<td><span data-lang="en" lang="en">x must have decisionDimension() entries. Owning g resizes/reuses. With matching output, fixed-topology evaluation and rejected-candidate retry do not allocate library storage.</span><span data-lang="zh" lang="zh-CN">x 须匹配 decisionDimension()；拥有型 g 按需调整尺寸或复用。输出匹配时，固定拓扑评价及失败重试不分配库内存。</span></td>
 </tr>
-<tr id="updateAccepted" data-search-entry>
-<td><code>updateAccepted(x)</code></td>
+<tr id="optimizer-update" data-search-entry>
+<td><code>update(x)</code></td>
 <td><code>Status</code></td>
 <td><span data-lang="en" lang="en">The accepted vector may differ from the last trial. Rebuild before consuming the result; no objective evaluation.</span><span data-lang="zh" lang="zh-CN">接受向量可能不同于最后试探向量。消费结果前重建，不计算目标代价。</span></td>
 </tr>
@@ -1321,9 +1256,9 @@ Status updateAccepted(const Eigen::VectorXd&amp; x);</code></pre>
 <td><span data-lang="en" lang="en">Problem/layout/mask survive trial evaluations; parameters/polynomial do not. Repreparation or movement invalidates all views. <code>copyPolynomial()</code> owns a snapshot.</span><span data-lang="zh" lang="zh-CN">problem/layout/mask 可跨试探求值；parameters/polynomial 不可。重新准备或移动使全部视图失效。<code>copyPolynomial()</code> 返回独立快照。</span></td>
 </tr>
 <tr id="optimizer-state" data-search-entry>
-<td><code>isPrepared / dimension / energy / recordedSamples</code></td>
-<td><span data-lang="en" lang="en"><code>bool / int / StatusOr&lt;double&gt; / const SampleBuffer&amp;</code></span><span data-lang="zh" lang="zh-CN"><code>bool / int / StatusOr&lt;double&gt; / const SampleBuffer&amp;</code></span></td>
-<td><span data-lang="en" lang="en">Energy is unweighted and may reject an invalid current candidate. Records are available only from the latest successful recording evaluation.</span><span data-lang="zh" lang="zh-CN">能量未加权，当前候选无效时返回错误。记录仅来自最近一次成功的记录求值。</span></td>
+<td><code>isPrepared / decisionDimension / energy / recordedSamples</code></td>
+<td><code>bool / int / StatusOr&lt;double&gt; / const SampleBuffer&amp;</code></td>
+<td><span data-lang="en" lang="en">Energy is unweighted and rejects invalid/nonfinite results. Samples are exposed only after a successful recording evaluation.</span><span data-lang="zh" lang="zh-CN">能量不乘权重，拒绝无效或非有限结果。仅成功记录采样的评价提供记录。</span></td>
 </tr>
 </tbody></table></div>
 <details class="example"><summary><span data-lang="en" lang="en">Runnable optimizer evaluation (no solver dependency)</span><span data-lang="zh" lang="zh-CN">可运行的优化器求值示例（不依赖求解器）</span><span class="example-tag">C++17</span></summary><pre class="example-code" data-example="optimizer"><code>#include &quot;SplineOptimizer.hpp&quot;
@@ -1331,7 +1266,7 @@ Status updateAccepted(const Eigen::VectorXd&amp; x);</code></pre>
 
 int main() {
     using Spline = SplineTrajectory::QuinticSplineND&lt;3&gt;;
-    SplineTrajectory::SplineProblem&lt;Spline&gt; problem;
+    SplineTrajectory::SplineInput&lt;3&gt; problem;
     problem.durations = {1.2, 1.5};
     problem.waypoints.resize(3, 3);
     problem.waypoints &lt;&lt; 0, 0, 0,  1, 0.5, 0,  2, 0, 0;
@@ -1347,187 +1282,61 @@ int main() {
     auto result = optimizer.evaluate(x, gradient, objective);
     if (!result) { std::cerr &lt;&lt; result.status.message; return 1; }
     // An external solver repeats evaluate() and chooses an accepted x.
-    if (!optimizer.updateAccepted(x)) return 1;
+    if (!optimizer.update(x)) return 1;
+    // Check planning constraints before accepting this candidate.
     auto trajectory = optimizer.copyPolynomial();
     std::cout &lt;&lt; result.cost &lt;&lt; &#x27;\n&#x27; &lt;&lt; trajectory.evaluate(0.5).transpose() &lt;&lt; &#x27;\n&#x27;;
 }
 </code></pre></details>
 </article>
 <article class="subsection">
-<h3 id="problem"><span data-lang="en" lang="en">Problem, masks & layout</span><span data-lang="zh" lang="zh-CN">问题、掩码与布局</span><a class="anchor" href="#problem" aria-label="Permalink / 固定链接">#</a></h3>
-<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Type / field</span><span data-lang="zh" lang="zh-CN">类型 / 字段</span></th><th><span data-lang="en" lang="en">Shape / default</span><span data-lang="zh" lang="zh-CN">形状 / 默认值</span></th><th><span data-lang="en" lang="en">Meaning</span><span data-lang="zh" lang="zh-CN">含义</span></th></tr></thead><tbody>
-<tr id="SplineProblem" data-search-entry>
-<td><code>SplineProblem&lt;Spline&gt;</code></td>
-<td><code>durations: N</code>, <code>waypoints:</code> <span class="math" data-tex="(N+1)\times D"><span class="sr-only">(N+1) × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="5.4401em" height="1.1004em" viewBox="-64.871953 -72.500004 54.197597 10.962640" style="vertical-align: -0.3002em" aria-hidden="true" focusable="false" fill="currentColor">
-<defs>
-<path id="math-35-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
-<path id="math-35-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
-<path id="math-35-g1-78" d="M7.531756-5.758406C7.631382-6.156912 7.81071-6.465753 8.607721-6.495641C8.657534-6.495641 8.777086-6.505604 8.777086-6.694894C8.777086-6.704857 8.777086-6.804483 8.647572-6.804483C8.318804-6.804483 7.970112-6.774595 7.641345-6.774595C7.302615-6.774595 6.953923-6.804483 6.625156-6.804483C6.56538-6.804483 6.445828-6.804483 6.445828-6.60523C6.445828-6.495641 6.545455-6.495641 6.625156-6.495641C7.193026-6.485679 7.302615-6.276463 7.302615-6.057285C7.302615-6.027397 7.28269-5.877958 7.272727-5.84807L6.156912-1.414695L3.955168-6.615193C3.875467-6.794521 3.865504-6.804483 3.636364-6.804483H2.30137C2.102117-6.804483 2.012453-6.804483 2.012453-6.60523C2.012453-6.495641 2.102117-6.495641 2.291407-6.495641C2.34122-6.495641 2.968867-6.495641 2.968867-6.405978L1.633873-1.05604C1.534247-.657534 1.364882-.33873 .557908-.308842C.498132-.308842 .388543-.298879 .388543-.109589C.388543-.039851 .438356 0 .518057 0C.836862 0 1.185554-.029888 1.514321-.029888C1.853051-.029888 2.211706 0 2.540473 0C2.590286 0 2.719801 0 2.719801-.199253C2.719801-.298879 2.630137-.308842 2.520548-.308842C1.942715-.328767 1.863014-.547945 1.863014-.747198C1.863014-.816936 1.872976-.86675 1.902864-.976339L3.217933-6.236613C3.257783-6.176837 3.257783-6.156912 3.307597-6.057285L5.788294-.18929C5.858032-.019925 5.88792 0 5.977584 0C6.087173 0 6.087173-.029888 6.136986-.209215L7.531756-5.758406Z" />
-<path id="math-35-g2-40" d="M3.297634 2.391034C3.297634 2.361146 3.297634 2.34122 3.128269 2.171856C1.882939 .916563 1.564134-.966376 1.564134-2.49066C1.564134-4.224159 1.942715-5.957659 3.16812-7.202989C3.297634-7.32254 3.297634-7.342466 3.297634-7.372354C3.297634-7.442092 3.257783-7.47198 3.198007-7.47198C3.098381-7.47198 2.201743-6.794521 1.613948-5.529265C1.105853-4.433375 .986301-3.327522 .986301-2.49066C.986301-1.713574 1.09589-.508095 1.643836 .617684C2.241594 1.843088 3.098381 2.49066 3.198007 2.49066C3.257783 2.49066 3.297634 2.460772 3.297634 2.391034Z" />
-<path id="math-35-g2-41" d="M2.879203-2.49066C2.879203-3.267746 2.769614-4.473225 2.221669-5.599004C1.62391-6.824408 .767123-7.47198 .667497-7.47198C.607721-7.47198 .56787-7.43213 .56787-7.372354C.56787-7.342466 .56787-7.32254 .757161-7.143213C1.733499-6.156912 2.30137-4.572852 2.30137-2.49066C2.30137-.787049 1.932752 .966376 .697385 2.221669C.56787 2.34122 .56787 2.361146 .56787 2.391034C.56787 2.450809 .607721 2.49066 .667497 2.49066C.767123 2.49066 1.663761 1.8132 2.251557 .547945C2.759651-.547945 2.879203-1.653798 2.879203-2.49066Z" />
-<path id="math-35-g2-43" d="M4.07472-2.291407H6.854296C6.993773-2.291407 7.183064-2.291407 7.183064-2.49066S6.993773-2.689913 6.854296-2.689913H4.07472V-5.479452C4.07472-5.618929 4.07472-5.808219 3.875467-5.808219S3.676214-5.618929 3.676214-5.479452V-2.689913H.886675C.747198-2.689913 .557908-2.689913 .557908-2.49066S.747198-2.291407 .886675-2.291407H3.676214V.498132C3.676214 .637609 3.676214 .826899 3.875467 .826899S4.07472 .637609 4.07472 .498132V-2.291407Z" />
-<path id="math-35-g2-49" d="M2.929016-6.37609C2.929016-6.615193 2.929016-6.635118 2.699875-6.635118C2.082192-5.997509 1.205479-5.997509 .886675-5.997509V-5.688667C1.085928-5.688667 1.673724-5.688667 2.191781-5.947696V-.787049C2.191781-.428394 2.161893-.308842 1.265255-.308842H.946451V0C1.295143-.029888 2.161893-.029888 2.560399-.029888S3.825654-.029888 4.174346 0V-.308842H3.855542C2.958904-.308842 2.929016-.418431 2.929016-.787049V-6.37609Z" />
-</defs>
-<g id="math-35-page1">
-<g fill="currentColor">
-<use x="-65.358254" y="-64.528024" xlink:href="#math-35-g2-40" />
-<use x="-61.483881" y="-64.528024" xlink:href="#math-35-g1-78" />
-<use x="-50.179125" y="-64.528024" xlink:href="#math-35-g2-43" />
-<use x="-40.216511" y="-64.528024" xlink:href="#math-35-g2-49" />
-<use x="-35.235172" y="-64.528024" xlink:href="#math-35-g2-41" />
-<use x="-29.146932" y="-64.528024" xlink:href="#math-35-g0-2" />
-<use x="-19.184319" y="-64.528024" xlink:href="#math-35-g1-68" />
-</g>
-</g>
-</svg></span></td>
-<td><span data-lang="en" lang="en">Also holds <code>boundary</code>, <code>start_time = 0</code>, optional <code>mask</code>. Preparation validates active supported physical inputs.</span><span data-lang="zh" lang="zh-CN">还包含 <code>boundary</code>、<code>start_time = 0</code>、可选 <code>mask</code>。准备阶段验证相关物理输入。</span></td>
-</tr>
-<tr id="OptimizerOptions" data-search-entry>
-<td><code>OptimizerOptions</code></td>
-<td><code>energy_weight=0</code>, <code>integration_steps=64</code>, <code>record_samples=false</code></td>
-<td><span data-lang="en" lang="en">Energy weight is finite/nonnegative; integration steps are positive per segment. Change options by preparing again.</span><span data-lang="zh" lang="zh-CN">能量权重有限非负；积分步数为每段正数。改变选项后重新准备。</span></td>
-</tr>
-<tr id="OptimizationMask" data-search-entry>
-<td><code>OptimizationMask::time / waypoints</code></td>
-<td><code>N / N+1</code></td>
-<td><span data-lang="en" lang="en">Empty selects all durations / interior waypoints. Explicit nonzero entries activate coordinates, including endpoints.</span><span data-lang="zh" lang="zh-CN">空掩码分别激活全部时长 / 内部点。显式非零项激活对应变量，可包含端点。</span></td>
-</tr>
-<tr id="boundary-mask" data-search-entry>
-<td><code>mask.start / mask.end</code></td>
-<td><code>BoundaryDerivativeMask {v,a,j}</code></td>
-<td><span data-lang="en" lang="en">All false by default; requesting unsupported derivatives fails preparation.</span><span data-lang="zh" lang="zh-CN">默认全 false；请求不支持的导数会导致准备失败。</span></td>
-</tr>
-<tr id="DecisionLayout" data-search-entry>
-<td><code>DecisionLayout</code></td>
-<td><code>time, waypoints, boundary_offset, auxiliary_offset, dimension</code></td>
-<td><span data-lang="en" lang="en">Order: active times → waypoints → start derivatives → end derivatives → auxiliary variables. Point records include global index, offset and mapped dof.</span><span data-lang="zh" lang="zh-CN">顺序：活跃时长 → 插值点 → 起点导数 → 终点导数 → 辅助变量。点记录包含全局索引、偏移与映射自由度。</span></td>
-</tr>
+<h3 id="problem"><span data-lang="en" lang="en">Physical input, masks & layout</span><span data-lang="zh" lang="zh-CN">物理输入、掩码与布局</span><a class="anchor" href="#problem" aria-label="Permalink / 固定链接">#</a></h3>
+<p><span data-lang="en" lang="en">Spline construction interpolates every input waypoint. In optimization, mask-selected values are initial guesses. Defaults let durations and interior waypoints change; endpoints and boundary derivatives stay fixed as direct coordinates. Auxiliary maps may explicitly transform fixed values.</span><span data-lang="zh" lang="zh-CN">普通样条构建插值所有输入点。优化时，mask 选中的值是初值；默认允许时长和内部途经点改变，端点及边界导数保持为固定直接坐标。辅助映射可以显式变换固定值。</span></p><div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Type / field</span><span data-lang="zh" lang="zh-CN">类型 / 字段</span></th><th><span data-lang="en" lang="en">Shape / default</span><span data-lang="zh" lang="zh-CN">形状 / 默认值</span></th><th><span data-lang="en" lang="en">Meaning</span><span data-lang="zh" lang="zh-CN">含义</span></th></tr></thead><tbody>
+<tr id="SplineInput" data-search-entry><td><code>SplineInput&lt;DIM&gt;</code></td><td><code>durations: N; waypoints: (N+1) × D</code></td><td><span data-lang="en" lang="en">Also boundary.start/end.v/a/j and start_time. No mask in physical input.</span><span data-lang="zh" lang="zh-CN">还含 boundary.start/end.v/a/j 与 start_time；物理输入不持有 mask。</span></td></tr>
+<tr id="OptimizerOptions" data-search-entry><td><code>OptimizerOptions</code></td><td><code>energy_weight=0, duration_weight=0, integration_steps=64, record_samples=false, mask={}</code></td><td><span data-lang="en" lang="en">Weights finite/nonnegative; both are opt-in. Steps positive. NoObjective alone adds no energy or duration cost.</span><span data-lang="zh" lang="zh-CN">权重有限非负，均需显式启用；步数为正。NoObjective 本身不启用能量或时长代价。</span></td></tr>
+<tr id="OptimizationMask" data-search-entry><td><code>options.mask.durations / waypoints</code></td><td><code>N / N+1</code></td><td><span data-lang="en" lang="en">Empty selects all durations / interior points. Explicit nonzero entries select coordinates, including endpoints. none(N) disables direct coordinates; interiorWaypoints(N) selects only interior points.</span><span data-lang="zh" lang="zh-CN">空掩码选择全部时长/内部点；显式非零项选中相应坐标，含端点。none(N) 关闭直接坐标；interiorWaypoints(N) 仅选内部点。</span></td></tr>
+<tr id="boundary-mask" data-search-entry><td><code>options.mask.start / end</code></td><td><code>BoundaryDerivativeMask {v,a,j}</code></td><td><span data-lang="en" lang="en">All false by default; unsupported derivative selections fail preparation.</span><span data-lang="zh" lang="zh-CN">默认全 false；选中不支持的导数会导致准备失败。</span></td></tr>
+<tr id="DecisionLayout" data-search-entry><td><code>DecisionLayout</code></td><td><code>durations, waypoints, boundary_offset, auxiliary_offset, dimension</code></td><td><span data-lang="en" lang="en">Order: durations → waypoints → start derivatives → end derivatives → auxiliary. Point records include full waypoint index, offset and mapped dof.</span><span data-lang="zh" lang="zh-CN">顺序为时长→途经点→起点导数→终点导数→辅助变量；点记录含完整下标、偏移和映射自由度。</span></td></tr>
 </tbody></table></div>
 </article>
 <article class="subsection">
-<h3 id="objectives"><span data-lang="en" lang="en">Named objective stages</span><span data-lang="zh" lang="zh-CN">命名代价阶段</span><a class="anchor" href="#objectives" aria-label="Permalink / 固定链接">#</a></h3>
-<p><span data-lang="en" lang="en">Declare only the needed named members on an ordinary objective object. Each stage is a callable returning <code>EvaluationResult</code>. Use <code>NoObjective</code> explicitly for energy-only evaluation. Output gradients are <strong>additive</strong>: do not resize or clear earlier contributions.</span><span data-lang="zh" lang="zh-CN">在普通目标对象上只声明所需的命名成员。每个阶段是返回 <code>EvaluationResult</code> 的可调用对象。仅能量求值显式使用 <code>NoObjective</code>。输出梯度均为<strong>累加</strong>，不要调整大小或清空前序贡献。</span></p>
-<div class="pipeline"><code>duration → integral → sample → coefficient</code><span>↓</span><code><span data-lang="en" lang="en">spline adjoint + energy</span><span data-lang="zh" lang="zh-CN">样条伴随 + 能量</span></code><span>↓</span><code>parameter → auxiliary backward → time/space backward → decision</code></div>
-<p><span data-lang="en" lang="en">Below, <code>S</code> is the spline, <code>D = S::kDimension</code>, <code>Opt = SplineOptimizer&lt;S&gt;</code>. Views are borrowed only during each synchronous callback. Explicit failures propagate; successful callbacks promise valid shapes and numerical values.</span><span data-lang="zh" lang="zh-CN">下表 <code>S</code> 为样条，<code>D = S::kDimension</code>，<code>Opt = SplineOptimizer&lt;S&gt;</code>。视图仅在同步回调期间借用。显式失败继续传播；回调成功则承诺输出形状与数值有效。</span></p>
-<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Member / callable parameters</span><span data-lang="zh" lang="zh-CN">成员 / 回调参数</span></th><th><span data-lang="en" lang="en">Output gradient shape</span><span data-lang="zh" lang="zh-CN">输出梯度形状</span></th><th><span data-lang="en" lang="en">Responsibility</span><span data-lang="zh" lang="zh-CN">职责</span></th></tr></thead><tbody>
-<tr id="cost-duration" data-search-entry>
-<td><code>duration(const std::vector&lt;double&gt;&amp; T, Eigen::Ref&lt;Eigen::VectorXd&gt; gT)</code></td>
-<td><code>N</code></td>
-<td><span data-lang="en" lang="en">Physical duration cost before adjoint.</span><span data-lang="zh" lang="zh-CN">伴随前的物理时长代价。</span></td>
-</tr>
-<tr id="cost-integral" data-search-entry>
-<td><code>integral(const IntegralPointInfo&amp;, const SampleState&lt;D&gt;&amp;, SampleGradient&lt;D&gt;&amp;)</code></td>
-<td><code>p/v/a/j/s:</code> <span class="math" data-tex="D\times 1"><span class="sr-only">D×1</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="2.5573em" height="0.7834em" viewBox="-65.459749 -72.496704 25.477309 7.804483" style="vertical-align: -0.1335em" aria-hidden="true" focusable="false" fill="currentColor">
-<defs>
-<path id="math-36-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
-<path id="math-36-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
-<path id="math-36-g2-49" d="M2.929016-6.37609C2.929016-6.615193 2.929016-6.635118 2.699875-6.635118C2.082192-5.997509 1.205479-5.997509 .886675-5.997509V-5.688667C1.085928-5.688667 1.673724-5.688667 2.191781-5.947696V-.787049C2.191781-.428394 2.161893-.308842 1.265255-.308842H.946451V0C1.295143-.029888 2.161893-.029888 2.560399-.029888S3.825654-.029888 4.174346 0V-.308842H3.855542C2.958904-.308842 2.929016-.418431 2.929016-.787049V-6.37609Z" />
-</defs>
-<g id="math-36-page1">
-<g fill="currentColor">
-<use x="-65.358254" y="-65.19222" xlink:href="#math-36-g1-68" />
-<use x="-54.6194" y="-65.19222" xlink:href="#math-36-g0-2" />
-<use x="-44.656786" y="-65.19222" xlink:href="#math-36-g2-49" />
-</g>
-</g>
-</svg></span>, <code>time: double</code></td>
-<td><span data-lang="en" lang="en">Unweighted integrand; declare <code>kDerivativeOrder=0…4</code> (default 4). Optimizer applies trapezoid weights and time chain.</span><span data-lang="zh" lang="zh-CN">未加权被积函数；声明 <code>kDerivativeOrder=0…4</code>（默认 4）。优化器处理梯形权重与时间链。</span></td>
-</tr>
-<tr id="cost-sample" data-search-entry>
-<td><code>sample(const Opt::SampleBuffer&amp;, Eigen::Ref&lt;Opt::SampleGradMatrix&gt; gp, Eigen::Ref&lt;Eigen::VectorXd&gt; gt)</code></td>
-<td><code>gp:</code> <span class="math" data-tex="D\times M"><span class="sr-only">D×M</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="3.1823em" height="0.7834em" viewBox="-65.459749 -72.496704 31.703959 7.804483" style="vertical-align: -0.1335em" aria-hidden="true" focusable="false" fill="currentColor">
-<defs>
-<path id="math-37-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
-<path id="math-37-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
-<path id="math-37-g1-77" d="M9.225405-6.03736C9.315068-6.396015 9.334994-6.495641 10.082192-6.495641C10.311333-6.495641 10.400996-6.495641 10.400996-6.694894C10.400996-6.804483 10.30137-6.804483 10.132005-6.804483H8.816936C8.557908-6.804483 8.547945-6.804483 8.428394-6.615193L4.79203-.936488L4.014944-6.575342C3.985056-6.804483 3.965131-6.804483 3.706102-6.804483H2.34122C2.15193-6.804483 2.042341-6.804483 2.042341-6.615193C2.042341-6.495641 2.132005-6.495641 2.331258-6.495641C2.460772-6.495641 2.6401-6.485679 2.759651-6.475716C2.919054-6.455791 2.978829-6.425903 2.978829-6.316314C2.978829-6.276463 2.968867-6.246575 2.938979-6.127024L1.673724-1.05604C1.574097-.657534 1.404732-.33873 .597758-.308842C.547945-.308842 .418431-.298879 .418431-.119552C.418431-.029888 .478207 0 .557908 0C.876712 0 1.225405-.029888 1.554172-.029888C1.892902-.029888 2.251557 0 2.580324 0C2.630137 0 2.759651 0 2.759651-.199253C2.759651-.308842 2.650062-.308842 2.580324-.308842C2.012453-.318804 1.902864-.518057 1.902864-.747198C1.902864-.816936 1.912827-.86675 1.942715-.976339L3.297634-6.405978H3.307597L4.164384-.229141C4.184309-.109589 4.194271 0 4.313823 0C4.423412 0 4.483188-.109589 4.533001-.179328L8.557908-6.485679H8.56787L7.143213-.777086C7.043587-.388543 7.023661-.308842 6.236613-.308842C6.067248-.308842 5.957659-.308842 5.957659-.119552C5.957659 0 6.07721 0 6.107098 0C6.386052 0 7.063512-.029888 7.342466-.029888C7.750934-.029888 8.179328 0 8.587796 0C8.647572 0 8.777086 0 8.777086-.199253C8.777086-.308842 8.687422-.308842 8.498132-.308842C8.129514-.308842 7.85056-.308842 7.85056-.488169C7.85056-.52802 7.85056-.547945 7.900374-.727273L9.225405-6.03736Z" />
-</defs>
-<g id="math-37-page1">
-<g fill="currentColor">
-<use x="-65.358254" y="-65.19222" xlink:href="#math-37-g1-68" />
-<use x="-54.6194" y="-65.19222" xlink:href="#math-37-g0-2" />
-<use x="-44.656786" y="-65.19222" xlink:href="#math-37-g1-77" />
-</g>
-</g>
-</svg></span>, <code>gt: M</code></td>
-<td><span data-lang="en" lang="en">Cross-sample costs; explicit global-time partial at fixed position. Unlike query matrices, positions use columns here.</span><span data-lang="zh" lang="zh-CN">跨采样点代价；gt 是固定位置下显式全局时间偏导。与查询矩阵不同，此处每列对应一个点。</span></td>
-</tr>
-<tr id="cost-coefficient" data-search-entry>
-<td><code>coefficient(const ParameterView&lt;S&gt;&amp;, CoefficientGradient&lt;S&gt;&amp;)</code></td>
-<td><code>coefficients:</code> <span class="math" data-tex="(N\cdot K)\times D"><span class="sr-only">(N·K) × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="5.3609em" height="1.1004em" viewBox="-64.871953 -72.500004 53.408858 10.962640" style="vertical-align: -0.3002em" aria-hidden="true" focusable="false" fill="currentColor">
-<defs>
-<path id="math-38-g0-1" d="M1.912827-2.49066C1.912827-2.779577 1.673724-3.01868 1.384807-3.01868S.856787-2.779577 .856787-2.49066S1.09589-1.96264 1.384807-1.96264S1.912827-2.201743 1.912827-2.49066Z" />
-<path id="math-38-g0-2" d="M3.875467-2.769614L1.882939-4.752179C1.763387-4.871731 1.743462-4.891656 1.663761-4.891656C1.564134-4.891656 1.464508-4.801993 1.464508-4.692403C1.464508-4.622665 1.484433-4.60274 1.594022-4.493151L3.58655-2.49066L1.594022-.488169C1.484433-.37858 1.464508-.358655 1.464508-.288917C1.464508-.179328 1.564134-.089664 1.663761-.089664C1.743462-.089664 1.763387-.109589 1.882939-.229141L3.865504-2.211706L5.927771-.14944C5.947696-.139477 6.017435-.089664 6.07721-.089664C6.196762-.089664 6.276463-.179328 6.276463-.288917C6.276463-.308842 6.276463-.348692 6.246575-.398506C6.236613-.418431 4.652553-1.982565 4.154421-2.49066L5.977584-4.313823C6.027397-4.373599 6.176837-4.503113 6.22665-4.562889C6.236613-4.582814 6.276463-4.622665 6.276463-4.692403C6.276463-4.801993 6.196762-4.891656 6.07721-4.891656C5.997509-4.891656 5.957659-4.851806 5.84807-4.742217L3.875467-2.769614Z" />
-<path id="math-38-g1-68" d="M1.58406-.777086C1.484433-.388543 1.464508-.308842 .67746-.308842C.508095-.308842 .398506-.308842 .398506-.119552C.398506 0 .488169 0 .67746 0H3.975093C6.047323 0 8.009963-2.102117 8.009963-4.283935C8.009963-5.688667 7.163138-6.804483 5.668742-6.804483H2.321295C2.132005-6.804483 2.022416-6.804483 2.022416-6.615193C2.022416-6.495641 2.11208-6.495641 2.311333-6.495641C2.440847-6.495641 2.620174-6.485679 2.739726-6.475716C2.899128-6.455791 2.958904-6.425903 2.958904-6.316314C2.958904-6.276463 2.948941-6.246575 2.919054-6.127024L1.58406-.777086ZM3.73599-6.117061C3.825654-6.465753 3.845579-6.495641 4.273973-6.495641H5.339975C6.316314-6.495641 7.143213-5.967621 7.143213-4.652553C7.143213-4.164384 6.94396-2.530511 6.097136-1.43462C5.808219-1.066002 5.021171-.308842 3.795766-.308842H2.669988C2.530511-.308842 2.510585-.308842 2.450809-.318804C2.351183-.328767 2.321295-.33873 2.321295-.418431C2.321295-.448319 2.321295-.468244 2.371108-.647572L3.73599-6.117061Z" />
-<path id="math-38-g1-75" d="M5.070984-4.024907C5.061021-4.054795 5.021171-4.134496 5.021171-4.164384C5.021171-4.174346 5.200498-4.313823 5.310087-4.393524L7.053549-5.738481C7.990037-6.425903 8.37858-6.465753 8.67746-6.495641C8.757161-6.505604 8.856787-6.515567 8.856787-6.694894C8.856787-6.734745 8.826899-6.804483 8.747198-6.804483C8.52802-6.804483 8.278954-6.774595 8.039851-6.774595C7.681196-6.774595 7.292653-6.804483 6.933998-6.804483C6.864259-6.804483 6.744707-6.804483 6.744707-6.60523C6.744707-6.535492 6.794521-6.505604 6.864259-6.495641C7.083437-6.475716 7.173101-6.425903 7.173101-6.286426C7.173101-6.107098 6.874222-5.877958 6.814446-5.828144L2.929016-2.839352L3.726027-6.03736C3.815691-6.396015 3.835616-6.495641 4.562889-6.495641C4.811955-6.495641 4.901619-6.495641 4.901619-6.694894C4.901619-6.784558 4.821918-6.804483 4.762142-6.804483C4.483188-6.804483 3.765878-6.774595 3.486924-6.774595C3.198007-6.774595 2.49066-6.804483 2.201743-6.804483C2.132005-6.804483 2.002491-6.804483 2.002491-6.615193C2.002491-6.495641 2.092154-6.495641 2.291407-6.495641C2.420922-6.495641 2.600249-6.485679 2.719801-6.475716C2.879203-6.455791 2.938979-6.425903 2.938979-6.316314C2.938979-6.276463 2.929016-6.246575 2.899128-6.127024L1.564134-.777086C1.464508-.388543 1.444583-.308842 .657534-.308842C.488169-.308842 .37858-.308842 .37858-.119552C.37858 0 .498132 0 .52802 0C.806974 0 1.514321-.029888 1.793275-.029888C2.002491-.029888 2.221669-.019925 2.430884-.019925C2.650062-.019925 2.86924 0 3.078456 0C3.148194 0 3.277709 0 3.277709-.199253C3.277709-.308842 3.188045-.308842 2.998755-.308842C2.630137-.308842 2.351183-.308842 2.351183-.488169C2.351183-.557908 2.410959-.777086 2.440847-.926526C2.580324-1.444583 2.709838-1.972603 2.839352-2.49066L4.323786-3.646326L5.479452-.966376C5.599004-.697385 5.599004-.67746 5.599004-.617684C5.599004-.318804 5.17061-.308842 5.080946-.308842C4.971357-.308842 4.861768-.308842 4.861768-.109589C4.861768 0 4.98132 0 5.001245 0C5.399751 0 5.818182-.029888 6.216687-.029888C6.435866-.029888 6.973848 0 7.193026 0C7.242839 0 7.372354 0 7.372354-.199253C7.372354-.308842 7.262765-.308842 7.173101-.308842C6.764633-.318804 6.635118-.408468 6.485679-.757161L5.070984-4.024907Z" />
-<path id="math-38-g1-78" d="M7.531756-5.758406C7.631382-6.156912 7.81071-6.465753 8.607721-6.495641C8.657534-6.495641 8.777086-6.505604 8.777086-6.694894C8.777086-6.704857 8.777086-6.804483 8.647572-6.804483C8.318804-6.804483 7.970112-6.774595 7.641345-6.774595C7.302615-6.774595 6.953923-6.804483 6.625156-6.804483C6.56538-6.804483 6.445828-6.804483 6.445828-6.60523C6.445828-6.495641 6.545455-6.495641 6.625156-6.495641C7.193026-6.485679 7.302615-6.276463 7.302615-6.057285C7.302615-6.027397 7.28269-5.877958 7.272727-5.84807L6.156912-1.414695L3.955168-6.615193C3.875467-6.794521 3.865504-6.804483 3.636364-6.804483H2.30137C2.102117-6.804483 2.012453-6.804483 2.012453-6.60523C2.012453-6.495641 2.102117-6.495641 2.291407-6.495641C2.34122-6.495641 2.968867-6.495641 2.968867-6.405978L1.633873-1.05604C1.534247-.657534 1.364882-.33873 .557908-.308842C.498132-.308842 .388543-.298879 .388543-.109589C.388543-.039851 .438356 0 .518057 0C.836862 0 1.185554-.029888 1.514321-.029888C1.853051-.029888 2.211706 0 2.540473 0C2.590286 0 2.719801 0 2.719801-.199253C2.719801-.298879 2.630137-.308842 2.520548-.308842C1.942715-.328767 1.863014-.547945 1.863014-.747198C1.863014-.816936 1.872976-.86675 1.902864-.976339L3.217933-6.236613C3.257783-6.176837 3.257783-6.156912 3.307597-6.057285L5.788294-.18929C5.858032-.019925 5.88792 0 5.977584 0C6.087173 0 6.087173-.029888 6.136986-.209215L7.531756-5.758406Z" />
-<path id="math-38-g2-40" d="M3.297634 2.391034C3.297634 2.361146 3.297634 2.34122 3.128269 2.171856C1.882939 .916563 1.564134-.966376 1.564134-2.49066C1.564134-4.224159 1.942715-5.957659 3.16812-7.202989C3.297634-7.32254 3.297634-7.342466 3.297634-7.372354C3.297634-7.442092 3.257783-7.47198 3.198007-7.47198C3.098381-7.47198 2.201743-6.794521 1.613948-5.529265C1.105853-4.433375 .986301-3.327522 .986301-2.49066C.986301-1.713574 1.09589-.508095 1.643836 .617684C2.241594 1.843088 3.098381 2.49066 3.198007 2.49066C3.257783 2.49066 3.297634 2.460772 3.297634 2.391034Z" />
-<path id="math-38-g2-41" d="M2.879203-2.49066C2.879203-3.267746 2.769614-4.473225 2.221669-5.599004C1.62391-6.824408 .767123-7.47198 .667497-7.47198C.607721-7.47198 .56787-7.43213 .56787-7.372354C.56787-7.342466 .56787-7.32254 .757161-7.143213C1.733499-6.156912 2.30137-4.572852 2.30137-2.49066C2.30137-.787049 1.932752 .966376 .697385 2.221669C.56787 2.34122 .56787 2.361146 .56787 2.391034C.56787 2.450809 .607721 2.49066 .667497 2.49066C.767123 2.49066 1.663761 1.8132 2.251557 .547945C2.759651-.547945 2.879203-1.653798 2.879203-2.49066Z" />
-</defs>
-<g id="math-38-page1">
-<g fill="currentColor">
-<use x="-65.358254" y="-64.528024" xlink:href="#math-38-g2-40" />
-<use x="-61.483881" y="-64.528024" xlink:href="#math-38-g1-78" />
-<use x="-50.179125" y="-64.528024" xlink:href="#math-38-g0-1" />
-<use x="-45.19785" y="-64.528024" xlink:href="#math-38-g1-75" />
-<use x="-36.023911" y="-64.528024" xlink:href="#math-38-g2-41" />
-<use x="-29.935671" y="-64.528024" xlink:href="#math-38-g0-2" />
-<use x="-19.973058" y="-64.528024" xlink:href="#math-38-g1-68" />
-</g>
-</g>
-</svg></span>, <code>durations: N</code>, <code>start_time: double</code></td>
-<td><span data-lang="en" lang="en">Coefficient and independent time partials before the spline adjoint; suitable for hull costs.</span><span data-lang="zh" lang="zh-CN">样条伴随前的系数与独立时间偏导，适合凸包代价。</span></td>
-</tr>
-<tr id="cost-parameter" data-search-entry>
-<td><code>parameter(const ParameterView&lt;S&gt;&amp;, ParameterGradient&lt;S&gt;&amp;)</code></td>
-<td><code>inner_points, durations, start, end, start_time</code></td>
-<td><span data-lang="en" lang="en">Total physical gradients after adjoint. <code>addWaypoint(index, Vector)</code> includes endpoints.</span><span data-lang="zh" lang="zh-CN">伴随后完整物理梯度。<code>addWaypoint(index, Vector)</code> 可覆盖端点。</span></td>
-</tr>
-<tr id="cost-decision" data-search-entry>
-<td><code>decision(const DecisionView&amp;, Eigen::Ref&lt;Eigen::VectorXd&gt; gx)</code></td>
-<td><code>dimension()</code></td>
-<td><span data-lang="en" lang="en">Direct decision-domain cost; add to already mapped gradients.</span><span data-lang="zh" lang="zh-CN">决策域直接代价；累加到已映射梯度。</span></td>
-</tr>
-</tbody></table></div>
-<p class="note"><span data-lang="en" lang="en"><code>SampleGradient::time</code> differentiates explicit global time <strong>at fixed state</strong>. Do not include state drift or quadrature weights yourself. The optimizer computes one extra derivative for time drift and propagates explicit time dependence to earlier segment durations and the common start time.</span><span data-lang="zh" lang="zh-CN"><code>SampleGradient::time</code> 表示<strong>固定状态</strong>下的显式全局时间偏导。不要自行包含状态漂移或积分权重。优化器额外计算一阶导数处理时间漂移，并将显式时间依赖传播到前面各段时长与公共起点时间。</span></p>
-<p><span data-lang="en" lang="en"><code>IntegralPointInfo</code> provides segment/step indices, counts, alpha, duration, step size, local/global time, plus endpoint predicates. Shared endpoints are sampled twice with half weights. Optional <code>integral.beginEvaluation()</code> runs once before the loop. Sample recording does not itself add a cost.</span><span data-lang="zh" lang="zh-CN"><code>IntegralPointInfo</code> 提供段/步索引及数量、alpha、时长、步长、局部/全局时间与端点判断。共享端点重复采样且各带半权重。可选 <code>integral.beginEvaluation()</code> 在循环前调用一次。记录采样本身不增加代价。</span></p>
+<h3 id="objectives"><span data-lang="en" lang="en">Callable objective members</span><span data-lang="zh" lang="zh-CN">可调用代价成员</span><a class="anchor" href="#objectives" aria-label="Permalink / 固定链接">#</a></h3>
+<p><span data-lang="en" lang="en">Objective is a user-defined holder of callable data members. Each cost implements operator(); there are no direct Objective stage methods. Return double for success, or EvaluationResult to reject. Gradients are additive; do not clear or resize. NoObjective means no custom costs.</span><span data-lang="zh" lang="zh-CN">Objective 是用户定义的可调用成员容器；每个代价实现 operator()，不使用 Objective 的直接阶段方法。成功可返回 double，需拒绝时返回 EvaluationResult。梯度累加，不清零或调整尺寸。NoObjective 表示无自定义代价。</span></p><pre><code>struct Objective {
+    ObstacleCost integral;
+    HullCost coefficient;
+    TargetDurationCost parameter;
+};</code></pre><div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Requirement / entry</span><span data-lang="zh" lang="zh-CN">需求 / 入口</span></th><th><span data-lang="en" lang="en">operator() arguments</span><span data-lang="zh" lang="zh-CN">operator() 参数</span></th><th><span data-lang="en" lang="en">Contract</span><span data-lang="zh" lang="zh-CN">契约</span></th></tr></thead><tbody>
+<tr id="cost-builtin" data-search-entry><td><code>energy_weight / duration_weight</code></td><td><span data-lang="en" lang="en">Built-in options</span><span data-lang="zh" lang="zh-CN">内置配置</span></td><td><span data-lang="en" lang="en">Smoothness and linear total duration. Defaults zero; additional duration costs go in parameter.</span><span data-lang="zh" lang="zh-CN">平滑及线性总时长代价，默认零；额外时长代价放 parameter。</span></td></tr>
+<tr id="cost-integral" data-search-entry><td><code>integral</code></td><td><code>const IntegralPointInfo&amp;, const IntegralState&lt;D&gt;&amp;, IntegralGradient&lt;D&gt;&amp;</code></td><td><span data-lang="en" lang="en">Pointwise obstacles/dynamics. Unweighted integrand and p/v/a/j/s, trajectory_time partials. Optional kDerivativeOrder on this functor, default 4; allowed 0…4.</span><span data-lang="zh" lang="zh-CN">逐点避障/动力学代价；未加权被积函数及 p/v/a/j/s、trajectory_time 偏导。此 Functor 可声明 kDerivativeOrder，默认 4，范围 0…4。</span></td></tr>
+<tr id="cost-sample" data-search-entry><td><code>sample</code></td><td><code>const Opt::SampleBuffer&amp;, SampleGradientView&lt;S&gt;&amp;</code></td><td><span data-lang="en" lang="en">Cross-sample position coupling. positions: M × D contiguous rows; trajectory_times: M. Return whole batch cost, no automatic quadrature weighting.</span><span data-lang="zh" lang="zh-CN">跨点位置耦合；positions 为 M × D 连续行，trajectory_times 为 M 项。返回整批代价，不自动加积分权重。</span></td></tr>
+<tr id="cost-coefficient" data-search-entry><td><code>coefficient</code></td><td><code>const ParameterView&lt;S&gt;&amp;, CoefficientGradientView&lt;S&gt;&amp;</code></td><td><span data-lang="en" lang="en">Hull/control costs. coefficients, independent durations and start_time partials before the spline adjoint.</span><span data-lang="zh" lang="zh-CN">凸包/控制点代价；在样条伴随前累加 coefficients、独立 durations 和 start_time 偏导。</span></td></tr>
+<tr id="cost-parameter" data-search-entry><td><code>parameter</code></td><td><code>const ParameterView&lt;S&gt;&amp;, ParameterGradientView&lt;S&gt;&amp;</code></td><td><span data-lang="en" lang="en">Physical costs after adjoint: waypoints, durations, boundary.start/end.v/a/j, start_time. Same access paths as state; addWaypoint(i, partial) accepts rows or columns.</span><span data-lang="zh" lang="zh-CN">伴随后物理代价：waypoints、durations、boundary.start/end.v/a/j、start_time，与输入访问路径对齐；addWaypoint 接受行或列。</span></td></tr>
+<tr id="cost-decision" data-search-entry><td><code>decision</code></td><td><code>const DecisionView&amp;, Eigen::Ref&lt;Eigen::VectorXd&gt;</code></td><td><span data-lang="en" lang="en">Direct regularization in decision coordinates; adds to already mapped gradients.</span><span data-lang="zh" lang="zh-CN">决策坐标的直接正则项，累加至已映射梯度。</span></td></tr>
+</tbody></table></div><p><span data-lang="en" lang="en">IntegralPointInfo uses trajectory_time on the caller’s axis and segment_time from the segment start. trajectory_time partials hold state fixed; the optimizer handles state drift and quadrature. waypointIndex() is 0…N at waypoints, otherwise −1. Shared knots appear twice in segment-major records with half trapezoid weights. A discrete sample cost may skip a segment start that is not the trajectory start, leaving its gradient row zero.</span><span data-lang="zh" lang="zh-CN">IntegralPointInfo 的 trajectory_time 位于调用方时间轴，segment_time 相对段起点。显式时间偏导固定状态，状态漂移和积分权重由优化器处理。waypointIndex() 在途经点返回 0…N，否则 −1。内部节点按相邻段记录两次，各带半梯形权重；离散 sample 代价可跳过非轨迹起点的段起点，并将对应梯度行留零。</span></p><p><span data-lang="en" lang="en">No beginEvaluation hook is called. Prepare mutable cost resources explicitly before the solver. Full protocols and additional duration-cost examples are in <a href="../optimizer.md">the optimizer guide</a>.</span><span data-lang="zh" lang="zh-CN">不调用 beginEvaluation 钩子；用户代价资源在求解前显式准备。完整协议和额外时长代价见<a href="../optimizer.md">优化器指南</a>。</span></p>
 </article>
 <article class="subsection">
-<h3 id="maps"><span data-lang="en" lang="en">Time, spatial & auxiliary parameterization</span><span data-lang="zh" lang="zh-CN">时间、空间与辅助变量映射</span><a class="anchor" href="#maps" aria-label="Permalink / 固定链接">#</a></h3>
-<p><span data-lang="en" lang="en">A parameterization exposes <code>time</code>, <code>space</code>, <code>auxiliary</code>. The default combines <code>QuadInvTimeMap</code>, <code>IdentitySpatialMap&lt;D&gt;</code> and <code>NoAuxiliaryMap</code>. <code>makeOptimizer&lt;Spline&gt;(maps)</code> deduces and owns the maps; <code>std::ref/std::cref</code> explicitly borrow objects that must outlive the optimizer.</span><span data-lang="zh" lang="zh-CN">参数化提供 <code>time</code>、<code>space</code>、<code>auxiliary</code>。默认组合为 <code>QuadInvTimeMap</code>、<code>IdentitySpatialMap&lt;D&gt;</code>、<code>NoAuxiliaryMap</code>。<code>makeOptimizer&lt;Spline&gt;(maps)</code> 推导并拥有映射；<code>std::ref/std::cref</code> 显式借用，要求对象比优化器存活更久。</span></p>
-<pre class="signature"><code>// Time map:
-double toTime(double tau) const;
-double toTau(double duration) const;
+<h3 id="maps"><span data-lang="en" lang="en">Time, spatial & auxiliary maps</span><span data-lang="zh" lang="zh-CN">时间、空间与辅助映射</span><a class="anchor" href="#maps" aria-label="Permalink / 固定链接">#</a></h3>
+<p><span data-lang="en" lang="en">Parameterization holds time, space and auxiliary. Defaults are QuadInvTimeMap, IdentitySpatialMap&lt;D&gt;, NoAuxiliaryMap. makeOptimizer&lt;Spline&gt;(maps) owns maps by value; std::ref/std::cref explicitly borrow longer-lived objects. Keep dimensions/inverse semantics fixed until reprepare.</span><span data-lang="zh" lang="zh-CN">Parameterization 持有 time、space、auxiliary；默认 QuadInvTimeMap、IdentitySpatialMap&lt;D&gt;、NoAuxiliaryMap。makeOptimizer&lt;Spline&gt;(maps) 按值拥有映射；std::ref/std::cref 显式借用长生命周期对象。重新准备前不改变维度或逆映射语义。</span></p><pre><code>// Time map:
+double forward(double tau) const;
+double inverse(double duration) const;
 double backward(double tau, double duration, double grad_duration) const;
-// Spatial map (Vector is the physical D-vector):
-int dimension(int global_index) const;
-Vector toPhysical(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; x, int global_index) const;
-Eigen::VectorXd toUnconstrained(const Vector&amp; p, int global_index) const;
-void backwardInto(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; x, const Vector&amp; gp,
-                  int global_index, Eigen::Ref&lt;Eigen::VectorXd&gt; output) const;
+// Spatial map (Vector is S::Vector):
+int dimension(int waypoint_index) const;
+Vector forward(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; x, int waypoint_index) const;
+Eigen::VectorXd inverse(const Vector&amp; point, int waypoint_index) const;
+void backward(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; x, const Vector&amp; gradient,
+              int waypoint_index, Eigen::Ref&lt;Eigen::VectorXd&gt; output) const;
 // Auxiliary map:
 int dimension() const;
-StatusOr&lt;Eigen::VectorXd&gt; initial(const SplineProblem&lt;S&gt;&amp; reference) const;
+StatusOr&lt;Eigen::VectorXd&gt; initial(const SplineInput&lt;D&gt;&amp; reference) const;
 Status apply(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; z, MutableParameters&lt;S&gt;&amp; state) const;
-EvaluationResult backward(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; z,
-    const ParameterView&lt;S&gt;&amp; state, ParameterGradient&lt;S&gt;&amp; g,
-    Eigen::Ref&lt;Eigen::VectorXd&gt; gz) const;</code></pre>
-<div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Map / entry</span><span data-lang="zh" lang="zh-CN">映射 / 入口</span></th><th><span data-lang="en" lang="en">Behavior</span><span data-lang="zh" lang="zh-CN">行为与约束</span></th></tr></thead><tbody>
-<tr id="time-map" data-search-entry>
-<td><code>QuadInvTimeMap / IdentityTimeMap</code></td>
-<td><span data-lang="en" lang="en">Positive duration map / direct physical seconds. <code>toTau()</code> encodes initial coordinates. <code>backward()</code> receives duration <strong>before auxiliary mapping</strong>, cached during forward decoding.</span><span data-lang="zh" lang="zh-CN">正时长映射 / 直接物理秒数。<code>toTau()</code> 编码初始坐标。<code>backward()</code> 接收<strong>辅助映射前</strong>的时长，正向解码时已缓存。</span></td>
-</tr>
-<tr id="space-map" data-search-entry>
-<td><code>IdentitySpatialMap&lt;D&gt; / custom space</code></td>
-<td><span data-lang="en" lang="en">Index is global 0…N, including endpoints. dimension(i) must be positive. Inverse returns a vector of that dimension (fixed-size vectors also work). <code>backwardInto()</code> overwrites only its pre-sized decision slice.</span><span data-lang="zh" lang="zh-CN">索引为含端点的全局 0…N，dimension(i) 须为正。逆映射返回该维度向量（也可定长）。<code>backwardInto()</code> 仅覆盖自己的预分配决策切片。</span></td>
-</tr>
-<tr id="aux-map" data-search-entry>
-<td><code>auxiliary.apply / backward</code></td>
-<td><span data-lang="en" lang="en">apply runs before spline construction and must preserve topology. backward transforms physical gradients to pre-auxiliary coordinates, adds to initially-zero gz and may return an auxiliary cost. Ordinary map pullbacks follow it.</span><span data-lang="zh" lang="zh-CN">apply 在构造前执行且须保持拓扑。backward 把物理梯度变回辅助映射前坐标，向初始零 gz 累加，并可返回辅助代价；普通映射反传在其后执行。</span></td>
-</tr>
-<tr id="map-status" data-search-entry>
-<td><span data-lang="en" lang="en">Return contracts</span><span data-lang="zh" lang="zh-CN">返回契约</span></td>
-<td><span data-lang="en" lang="en">Built-in total maps return values/void. Custom rejecting time/spatial maps may use StatusOr/Status in the same protocol. Keep map dimensions and inverse semantics fixed between preparations.</span><span data-lang="zh" lang="zh-CN">内置全定义映射返回值/void。可拒绝输入的自定义时间/空间映射可在同一协议中使用 StatusOr/Status。两次 prepare 之间维度与逆映射语义必须固定。</span></td>
-</tr>
+Status backward(const Eigen::Ref&lt;const Eigen::VectorXd&gt;&amp; z,
+    const ParameterView&lt;S&gt;&amp; state, ParameterGradientView&lt;S&gt;&amp; gradient,
+    Eigen::Ref&lt;Eigen::VectorXd&gt; grad_z) const;</code></pre><div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">Map</span><span data-lang="zh" lang="zh-CN">映射</span></th><th><span data-lang="en" lang="en">Behavior</span><span data-lang="zh" lang="zh-CN">行为</span></th></tr></thead><tbody>
+<tr id="time-map" data-search-entry><td><code>time</code></td><td><span data-lang="en" lang="en">inverse encodes once during prepare. backward receives cached duration before auxiliary transformation. Decoded durations must be positive and finite.</span><span data-lang="zh" lang="zh-CN">inverse 在准备时编码一次；backward 接收辅助变换前缓存的时长。解码时长须正且有限。</span></td></tr>
+<tr id="space-map" data-search-entry><td><code>space</code></td><td><span data-lang="en" lang="en">Waypoint indices 0…N include endpoints. Inverse returns mapped dimension; backward overwrites its matching decision slice.</span><span data-lang="zh" lang="zh-CN">途经点下标 0…N 含端点；逆映射返回映射维度，backward 覆盖自己的匹配决策切片。</span></td></tr>
+<tr id="aux-map" data-search-entry><td><code>auxiliary</code></td><td><span data-lang="en" lang="en">apply may transform physical values but preserves topology. backward adds auxiliary gradients and pulls physical gradients back before ordinary maps; returns Status only. Put costs in parameter or decision.</span><span data-lang="zh" lang="zh-CN">apply 可变换物理值但保持拓扑；backward 累加辅助梯度并将物理梯度传回普通映射之前，只返回 Status。代价放在 parameter 或 decision。</span></td></tr>
+<tr id="map-status" data-search-entry><td><span data-lang="en" lang="en">Return contracts</span><span data-lang="zh" lang="zh-CN">返回契约</span></td><td><span data-lang="en" lang="en">Total time/spatial maps return values/void; rejecting maps may return StatusOr/Status. Auxiliary apply/backward return Status.</span><span data-lang="zh" lang="zh-CN">全域时间/空间映射返回值或 void；可能拒绝的映射可返回 StatusOr/Status。辅助 apply/backward 返回 Status。</span></td></tr>
 </tbody></table></div>
 </article>
 <article class="subsection">
@@ -1558,18 +1367,19 @@ GradientCheckResult checkGradients(Optimizer&amp; optimizer, const Eigen::Vector
 <h3 id="hull-build"><span data-lang="en" lang="en">Factories and workspace reuse</span><span data-lang="zh" lang="zh-CN">便利工厂与工作区复用</span><a class="anchor" href="#hull-build" aria-label="Permalink / 固定链接">#</a></h3>
 <pre class="signature"><code>template&lt;int DIM, int MaxCoefficients&gt;
 ConvexHullWorkspace&lt;DIM&gt; toBezier(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly,
-    int derivative_order = 0, int subdivision_depth = 0);
+    DerivativeOrder derivative_order = Deriv::Pos, int subdivision_depth = 0);
 template&lt;int DIM, int MaxCoefficients&gt;
 ConvexHullWorkspace&lt;DIM&gt; toMINVO(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly,
-    int derivative_order = 0, int subdivision_depth = 0);
+    DerivativeOrder derivative_order = Deriv::Pos, int subdivision_depth = 0);
 // ConvexHullWorkspace&lt;DIM&gt;:
 template&lt;int MaxCoefficients&gt;
 static ConvexHullWorkspace fromPPoly(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly,
                                     HullOptions options = {});
-void configure(int segments, int coefficient_count, HullOptions options = {});
+void prepare(int segments, int coefficient_count, HullOptions options = {});
 template&lt;int MaxCoefficients&gt;
-void configure(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly, HullOptions options = {});
-template&lt;int MaxCoefficients&gt; void update(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly);</code></pre>
+void prepare(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly, HullOptions options = {});
+template&lt;int MaxCoefficients&gt; void update(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly);
+template&lt;int MaxCoefficients&gt; void update(const PPolyND&lt;DIM, MaxCoefficients&gt;&amp; poly, HullOptions options);</code></pre>
 <div class="table-scroll"><table><thead><tr><th><span data-lang="en" lang="en">API / options</span><span data-lang="zh" lang="zh-CN">接口 / 选项</span></th><th><span data-lang="en" lang="en">Return / meaning</span><span data-lang="zh" lang="zh-CN">返回 / 含义</span></th></tr></thead><tbody>
 <tr id="toBezier" data-search-entry>
 <td><code>toBezier / toMINVO / fromPPoly</code></td>
@@ -1580,7 +1390,7 @@ template&lt;int MaxCoefficients&gt; void update(const PPolyND&lt;DIM, MaxCoeffic
 <td><span data-lang="en" lang="en">Default Bezier, position (0), depth 0. Derivative order is between 0 and source degree. MINVO result degree must be 0…7. Supported depth is 0…16; caller owns feasible memory/index bounds.</span><span data-lang="zh" lang="zh-CN">默认 Bezier、位置（0）、深度 0。导数阶在 0 到源次数之间；MINVO 结果次数须为 0…7。支持深度 0…16，调用方负责可用内存与索引范围。</span></td>
 </tr>
 <tr id="configure" data-search-entry>
-<td><code>configure(...)</code></td>
+<td><code>prepare(...)</code></td>
 <td><span data-lang="en" lang="en">Prepares topology and shared immutable kernel; controls are not valid yet. May allocate and lock the kernel cache.</span><span data-lang="zh" lang="zh-CN">准备拓扑与共享不可变核，控制点尚无效。可能分配并锁定核缓存。</span></td>
 </tr>
 <tr id="hull-update" data-search-entry>
@@ -1588,7 +1398,7 @@ template&lt;int MaxCoefficients&gt; void update(const PPolyND&lt;DIM, MaxCoeffic
 <td><span data-lang="en" lang="en">Returns void; requires configured matching topology. Refreshes controls/time and adjoint caches without allocation or locking.</span><span data-lang="zh" lang="zh-CN">返回 void，要求已配置且拓扑匹配。无分配、无锁地更新控制点/时间与伴随缓存。</span></td>
 </tr>
 <tr id="hull-matches" data-search-entry>
-<td><code>isConfigured / isValid / matches(poly, options)</code></td>
+<td><code>isPrepared / isValid / matches(poly, options)</code></td>
 <td><span data-lang="en" lang="en">Separate topology readiness, numeric readiness and topology/options matching. Each concurrent computation needs its own mutable workspace.</span><span data-lang="zh" lang="zh-CN">分别判断拓扑就绪、数值就绪、拓扑/选项匹配。每个并发计算使用独立可变工作区。</span></td>
 </tr>
 </tbody></table></div>
@@ -1602,7 +1412,7 @@ int main() {
     Spline spline;
     if (const auto status = spline.update({1.2, 1.5}, points, 0.0); !status) return 1;
     SplineTrajectory::ConvexHullWorkspace&lt;3&gt; hull;
-    hull.configure(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 0, 1});
+    hull.prepare(spline.polynomial(), {SplineTrajectory::ConvexHullBasis::Bezier, 0, 1});
     hull.update(spline.polynomial());
 
     // L = 0.5 * ||controls||^2, dL/dControls = controls.
@@ -1612,7 +1422,7 @@ int main() {
     std::cout &lt;&lt; hull.numPieces() &lt;&lt; &#x27;\n&#x27; &lt;&lt; gradients.durations.transpose() &lt;&lt; &#x27;\n&#x27;;
 }
 </code></pre></details>
-</article>
+<p><span data-lang="en" lang="en">Prepare user-owned hull workspaces and control-gradient matrices before solving, then call strict update(poly) inside the callback. update(poly, options) is a convenience overload that prepares on a mismatch and may allocate then; matching repetitions reuse storage. See <a href="../../examples/convex_hull_optimizer.cpp">the example</a>.</span><span data-lang="zh" lang="zh-CN">求解前显式准备用户持有的凸包和控制点梯度矩阵，回调内调用固定拓扑 update(poly)。便捷重载 update(poly, options) 仅在不匹配时准备，届时可能分配；匹配时复用。见<a href="../../examples/convex_hull_optimizer.cpp">示例</a>。</span></p></article>
 <article class="subsection">
 <h3 id="hull-access"><span data-lang="en" lang="en">Controls and child-piece metadata</span><span data-lang="zh" lang="zh-CN">控制点与子段元数据</span><a class="anchor" href="#hull-access" aria-label="Permalink / 固定链接">#</a></h3>
 <p><span data-lang="en" lang="en">Depth d creates <span class="math" data-tex="H=N\cdot 2^d"><span class="sr-only">H = N · 2^d</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="4.8444em" height="0.9991em" viewBox="-65.469711 -72.496917 48.263092 9.953346" style="vertical-align: -0.0502em" aria-hidden="true" focusable="false" fill="currentColor">
@@ -1715,6 +1525,7 @@ int main() {
 </svg></span></td>
 <td><span data-lang="en" lang="en">Borrow all controls after update.</span><span data-lang="zh" lang="zh-CN">更新后借用全部控制点。</span></td>
 </tr>
+<tr id="piece" data-search-entry><td><code>piece(i)</code></td><td><span data-lang="en" lang="en">Borrowed proxy</span><span data-lang="zh" lang="zh-CN">借用代理</span></td><td><span data-lang="en" lang="en">info() and controls() access one piece’s metadata and contiguous control rows.</span><span data-lang="zh" lang="zh-CN">通过 info() 和 controls() 读取该分片元数据与连续控制点行。</span></td></tr>
 <tr id="pieceControls" data-search-entry>
 <td><code>pieceControls(i)</code></td>
 <td><span class="math" data-tex="Q\times D"><span class="sr-only">Q × D</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="2.8681em" height="0.9994em" viewBox="-65.370085 -72.715882 28.574288 9.956413" style="vertical-align: -0.2446em" aria-hidden="true" focusable="false" fill="currentColor">
@@ -1745,8 +1556,8 @@ int main() {
 </tr>
 <tr id="hull-properties" data-search-entry>
 <td><code>basis / derivativeOrder / degree / sourceDegree / subdivisionDepth</code></td>
-<td><span data-lang="en" lang="en">Basis enum / integers</span><span data-lang="zh" lang="zh-CN">基枚举 / 整数</span></td>
-<td><span data-lang="en" lang="en">q is the degree after differentiation; sourceDegree is the original degree.</span><span data-lang="zh" lang="zh-CN">degree 是求导后的次数 q，sourceDegree 是原次数。</span></td>
+<td><code>Basis / DerivativeOrder / integers</code></td>
+<td><span data-lang="en" lang="en">DerivativeOrder supports .value() and equality. q is differentiated degree.</span><span data-lang="zh" lang="zh-CN">DerivativeOrder 支持 .value() 和相等比较；q 为求导后的次数。</span></td>
 </tr>
 <tr id="powerToControlMatrix" data-search-entry>
 <td><code>powerToControlMatrix(basis, degree)</code></td>
@@ -1766,7 +1577,7 @@ int main() {
 <use x="-37.653247" y="-65.081506" xlink:href="#math-45-g0-97" />
 </g>
 </g>
-</svg></span>, where b contains controls and a contains normalized ascending-power coefficients. <code>kernel()</code> borrows the shared immutable conversion data.</span><span data-lang="zh" lang="zh-CN">返回独立 B，满足 <span class="math" data-tex="\mathbf{b}=B\mathbf{a}"><span class="sr-only">b = B a</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="3.4023em" height="0.8004em" viewBox="-65.489637 -72.495578 33.895543 7.973848" style="vertical-align: -0.0502em" aria-hidden="true" focusable="false" fill="currentColor">
+</svg></span>, where b contains controls and a contains normalized ascending-power coefficients.</span><span data-lang="zh" lang="zh-CN">返回独立 B，满足 <span class="math" data-tex="\mathbf{b}=B\mathbf{a}"><span class="sr-only">b = B a</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="3.4023em" height="0.8004em" viewBox="-65.489637 -72.495578 33.895543 7.973848" style="vertical-align: -0.0502em" aria-hidden="true" focusable="false" fill="currentColor">
 <defs>
 <path id="math-46-g0-97" d="M3.726027-.767123C3.726027-.458281 3.726027 0 4.762142 0H5.240349C5.439601 0 5.559153 0 5.559153-.239103C5.559153-.468244 5.429639-.468244 5.300125-.468244C4.692403-.478207 4.692403-.607721 4.692403-.836862V-2.978829C4.692403-3.865504 3.985056-4.513076 2.500623-4.513076C1.932752-4.513076 .71731-4.473225 .71731-3.596513C.71731-3.158157 1.066002-2.968867 1.334994-2.968867C1.643836-2.968867 1.96264-3.178082 1.96264-3.596513C1.96264-3.895392 1.77335-4.064757 1.743462-4.084682C2.022416-4.144458 2.34122-4.154421 2.460772-4.154421C3.20797-4.154421 3.556663-3.73599 3.556663-2.978829V-2.6401C2.849315-2.610212 .318804-2.520548 .318804-1.075965C.318804-.119552 1.554172 .059776 2.241594 .059776C3.038605 .059776 3.506849-.348692 3.726027-.767123ZM3.556663-2.331258V-1.384807C3.556663-.428394 2.6401-.298879 2.391034-.298879C1.882939-.298879 1.484433-.647572 1.484433-1.085928C1.484433-2.161893 3.058531-2.30137 3.556663-2.331258Z" />
 <path id="math-46-g0-98" d="M2.132005-3.995019V-6.914072L.368618-6.834371V-6.366127C.986301-6.366127 1.05604-6.366127 1.05604-5.977584V0H1.524284L2.012453-.557908C2.092154-.478207 2.580324 .059776 3.466999 .059776C4.951432 .059776 5.977584-.836862 5.977584-2.221669C5.977584-3.5467 5.041096-4.483188 3.596513-4.483188C2.86924-4.483188 2.371108-4.194271 2.132005-3.995019ZM2.191781-.986301V-3.486924C2.460772-3.835616 2.938979-4.124533 3.486924-4.124533C4.702366-4.124533 4.702366-2.919054 4.702366-2.221669C4.702366-1.753425 4.702366-1.205479 4.443337-.816936C4.154421-.408468 3.696139-.298879 3.377335-.298879C2.67995-.298879 2.291407-.836862 2.191781-.986301Z" />
@@ -1781,14 +1592,14 @@ int main() {
 <use x="-37.653247" y="-65.081506" xlink:href="#math-46-g0-97" />
 </g>
 </g>
-</svg></span>，其中 b 为控制点，a 为归一化升幂系数。<code>kernel()</code> 借用共享不可变转换数据。</span></td>
+</svg></span>，其中 b 为控制点，a 为归一化升幂系数。</span></td>
 </tr>
 </tbody></table></div>
 </article>
 <article class="subsection">
 <h3 id="hull-adjoint"><span data-lang="en" lang="en">Control and explicit-time pullbacks</span><span data-lang="zh" lang="zh-CN">控制点与显式时间反传</span><a class="anchor" href="#hull-adjoint" aria-label="Permalink / 固定链接">#</a></h3>
 <pre class="signature"><code>BackwardResult backward(const CoefficientMatrix&amp; gdControls);
-void backwardInto(const CoefficientMatrix&amp; gdControls,
+void backward(const CoefficientMatrix&amp; gdControls,
                   CoefficientMatrix&amp; gdC, Eigen::VectorXd&amp; gdT);
 void backwardAdd(const CoefficientMatrix&amp; gdControls,
                  Eigen::Ref&lt;CoefficientMatrix&gt; gdC, Eigen::Ref&lt;Eigen::VectorXd&gt; gdT);
@@ -1845,10 +1656,10 @@ void backwardPieceTimesAdd(
 </svg></span>, <code>durations: N</code>}</td>
 <td><span data-lang="en" lang="en">Returns an owning BackwardResult; allocates.</span><span data-lang="zh" lang="zh-CN">返回拥有的 BackwardResult，分配输出。</span></td>
 </tr>
-<tr id="backwardInto" data-search-entry>
-<td><code>backwardInto(gdControls, gdC, gdT)</code></td>
+<tr id="hull-backward-output" data-search-entry>
+<td><code>backward(gdControls, gdC, gdT)</code></td>
 <td><span data-lang="en" lang="en">Same shapes</span><span data-lang="zh" lang="zh-CN">相同形状</span></td>
-<td><span data-lang="en" lang="en">Overwrites pre-sized buffers without allocation.</span><span data-lang="zh" lang="zh-CN">无分配地覆盖预分配缓冲。</span></td>
+<td><span data-lang="en" lang="en">Overwrites owning outputs, resizing as needed and reusing matching storage.</span><span data-lang="zh" lang="zh-CN">覆盖拥有型输出，按需调整尺寸，同尺寸复用。</span></td>
 </tr>
 <tr id="backwardAdd" data-search-entry>
 <td><code>backwardAdd(gdControls, gdC, gdT)</code></td>
@@ -1861,7 +1672,7 @@ void backwardPieceTimesAdd(
 <td><span data-lang="en" lang="en">Adds explicit child-piece time partials; separate from the control adjoint.</span><span data-lang="zh" lang="zh-CN">累加子段显式时间偏导，独立于控制点伴随。</span></td>
 </tr>
 </tbody></table></div>
-<p><span data-lang="en" lang="en">All adjoints require an updated workspace and matching finite inputs. Into/Add outputs must not alias inputs or workspace storage. Keep both <code>gdC</code> and <code>gdT</code>: normalization uses <span class="math" data-tex="a_k=T^k c_k"><span class="sr-only">aₖ = Tᵏcₖ</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="4.4592em" height="1.1561em" viewBox="-65.459749 -72.496917 44.425841 11.517466" style="vertical-align: -0.2002em" aria-hidden="true" focusable="false" fill="currentColor">
+<p><span data-lang="en" lang="en">All adjoints require an updated workspace and matching finite inputs. Overwrite/Add outputs must not alias inputs or workspace storage. Keep both <code>gdC</code> and <code>gdT</code>: normalization uses <span class="math" data-tex="a_k=T^k c_k"><span class="sr-only">aₖ = Tᵏcₖ</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="4.4592em" height="1.1561em" viewBox="-65.459749 -72.496917 44.425841 11.517466" style="vertical-align: -0.2002em" aria-hidden="true" focusable="false" fill="currentColor">
 <defs>
 <path id="math-49-g0-84" d="M4.254047-6.047323C4.323786-6.326276 4.363636-6.386052 4.483188-6.41594C4.572852-6.435866 4.901619-6.435866 5.110834-6.435866C6.117061-6.435866 6.56538-6.396015 6.56538-5.618929C6.56538-5.469489 6.525529-5.080946 6.485679-4.821918C6.475716-4.782067 6.455791-4.662516 6.455791-4.632628C6.455791-4.572852 6.485679-4.503113 6.575342-4.503113C6.684932-4.503113 6.704857-4.582814 6.724782-4.732254L6.993773-6.465753C7.003736-6.505604 7.013699-6.60523 7.013699-6.635118C7.013699-6.744707 6.914072-6.744707 6.744707-6.744707H1.215442C.976339-6.744707 .966376-6.734745 .896638-6.545455L.298879-4.79203C.288917-4.772105 .239103-4.632628 .239103-4.612702C.239103-4.552927 .288917-4.503113 .358655-4.503113C.458281-4.503113 .468244-4.552927 .52802-4.712329C1.066002-6.256538 1.325031-6.435866 2.799502-6.435866H3.188045C3.466999-6.435866 3.466999-6.396015 3.466999-6.316314C3.466999-6.256538 3.437111-6.136986 3.427148-6.107098L2.092154-.787049C2.002491-.418431 1.972603-.308842 .9066-.308842C.547945-.308842 .488169-.308842 .488169-.119552C.488169 0 .597758 0 .657534 0C.926526 0 1.205479-.019925 1.474471-.019925C1.753425-.019925 2.042341-.029888 2.321295-.029888S2.879203-.019925 3.148194-.019925C3.437111-.019925 3.73599 0 4.014944 0C4.11457 0 4.234122 0 4.234122-.199253C4.234122-.308842 4.154421-.308842 3.895392-.308842C3.646326-.308842 3.516812-.308842 3.257783-.328767C2.968867-.358655 2.889166-.388543 2.889166-.547945C2.889166-.557908 2.889166-.607721 2.929016-.757161L4.254047-6.047323Z" />
 <path id="math-49-g0-97" d="M3.716065-3.765878C3.536737-4.134496 3.247821-4.403487 2.799502-4.403487C1.633873-4.403487 .398506-2.938979 .398506-1.484433C.398506-.547945 .946451 .109589 1.723537 .109589C1.92279 .109589 2.420922 .069738 3.01868-.637609C3.098381-.219178 3.447073 .109589 3.92528 .109589C4.273973 .109589 4.503113-.119552 4.662516-.438356C4.83188-.797011 4.961395-1.404732 4.961395-1.424658C4.961395-1.524284 4.871731-1.524284 4.841843-1.524284C4.742217-1.524284 4.732254-1.484433 4.702366-1.344956C4.533001-.697385 4.353674-.109589 3.945205-.109589C3.676214-.109589 3.646326-.368618 3.646326-.56787C3.646326-.787049 3.666252-.86675 3.775841-1.305106C3.88543-1.723537 3.905355-1.823163 3.995019-2.201743L4.353674-3.596513C4.423412-3.875467 4.423412-3.895392 4.423412-3.935243C4.423412-4.104608 4.303861-4.204234 4.134496-4.204234C3.895392-4.204234 3.745953-3.985056 3.716065-3.765878ZM3.068493-1.185554C3.01868-1.006227 3.01868-.986301 2.86924-.816936C2.430884-.268991 2.022416-.109589 1.743462-.109589C1.24533-.109589 1.105853-.657534 1.105853-1.046077C1.105853-1.544209 1.424658-2.769614 1.653798-3.227895C1.96264-3.815691 2.410959-4.184309 2.809465-4.184309C3.457036-4.184309 3.596513-3.367372 3.596513-3.307597S3.576588-3.188045 3.566625-3.138232L3.068493-1.185554Z" />
@@ -1880,7 +1691,7 @@ void backwardPieceTimesAdd(
 <use x="-25.48808" y="-61.549189" xlink:href="#math-49-g1-107" />
 </g>
 </g>
-</svg></span>, so conversion depends explicitly on duration. Pass the resulting pair through <code>spline.backward()</code> for total physical gradients.</span><span data-lang="zh" lang="zh-CN">所有伴随要求工作区已更新、输入匹配且有限。Into/Add 输出不得与输入或工作区重叠。保留 <code>gdC</code> 与 <code>gdT</code> 两者：归一化使用 <span class="math" data-tex="a_k=T^k c_k"><span class="sr-only">aₖ = Tᵏcₖ</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="4.4592em" height="1.1561em" viewBox="-65.459749 -72.496917 44.425841 11.517466" style="vertical-align: -0.2002em" aria-hidden="true" focusable="false" fill="currentColor">
+</svg></span>, so conversion depends explicitly on duration. Pass the resulting pair through <code>spline.backward()</code> for total physical gradients.</span><span data-lang="zh" lang="zh-CN">所有伴随要求工作区已更新、输入匹配且有限。Overwrite/Add 输出不得与输入或工作区重叠。保留 <code>gdC</code> 与 <code>gdT</code> 两者：归一化使用 <span class="math" data-tex="a_k=T^k c_k"><span class="sr-only">aₖ = Tᵏcₖ</span><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="4.4592em" height="1.1561em" viewBox="-65.459749 -72.496917 44.425841 11.517466" style="vertical-align: -0.2002em" aria-hidden="true" focusable="false" fill="currentColor">
 <defs>
 <path id="math-50-g0-84" d="M4.254047-6.047323C4.323786-6.326276 4.363636-6.386052 4.483188-6.41594C4.572852-6.435866 4.901619-6.435866 5.110834-6.435866C6.117061-6.435866 6.56538-6.396015 6.56538-5.618929C6.56538-5.469489 6.525529-5.080946 6.485679-4.821918C6.475716-4.782067 6.455791-4.662516 6.455791-4.632628C6.455791-4.572852 6.485679-4.503113 6.575342-4.503113C6.684932-4.503113 6.704857-4.582814 6.724782-4.732254L6.993773-6.465753C7.003736-6.505604 7.013699-6.60523 7.013699-6.635118C7.013699-6.744707 6.914072-6.744707 6.744707-6.744707H1.215442C.976339-6.744707 .966376-6.734745 .896638-6.545455L.298879-4.79203C.288917-4.772105 .239103-4.632628 .239103-4.612702C.239103-4.552927 .288917-4.503113 .358655-4.503113C.458281-4.503113 .468244-4.552927 .52802-4.712329C1.066002-6.256538 1.325031-6.435866 2.799502-6.435866H3.188045C3.466999-6.435866 3.466999-6.396015 3.466999-6.316314C3.466999-6.256538 3.437111-6.136986 3.427148-6.107098L2.092154-.787049C2.002491-.418431 1.972603-.308842 .9066-.308842C.547945-.308842 .488169-.308842 .488169-.119552C.488169 0 .597758 0 .657534 0C.926526 0 1.205479-.019925 1.474471-.019925C1.753425-.019925 2.042341-.029888 2.321295-.029888S2.879203-.019925 3.148194-.019925C3.437111-.019925 3.73599 0 4.014944 0C4.11457 0 4.234122 0 4.234122-.199253C4.234122-.308842 4.154421-.308842 3.895392-.308842C3.646326-.308842 3.516812-.308842 3.257783-.328767C2.968867-.358655 2.889166-.388543 2.889166-.547945C2.889166-.557908 2.889166-.607721 2.929016-.757161L4.254047-6.047323Z" />
 <path id="math-50-g0-97" d="M3.716065-3.765878C3.536737-4.134496 3.247821-4.403487 2.799502-4.403487C1.633873-4.403487 .398506-2.938979 .398506-1.484433C.398506-.547945 .946451 .109589 1.723537 .109589C1.92279 .109589 2.420922 .069738 3.01868-.637609C3.098381-.219178 3.447073 .109589 3.92528 .109589C4.273973 .109589 4.503113-.119552 4.662516-.438356C4.83188-.797011 4.961395-1.404732 4.961395-1.424658C4.961395-1.524284 4.871731-1.524284 4.841843-1.524284C4.742217-1.524284 4.732254-1.484433 4.702366-1.344956C4.533001-.697385 4.353674-.109589 3.945205-.109589C3.676214-.109589 3.646326-.368618 3.646326-.56787C3.646326-.787049 3.666252-.86675 3.775841-1.305106C3.88543-1.723537 3.905355-1.823163 3.995019-2.201743L4.353674-3.596513C4.423412-3.875467 4.423412-3.895392 4.423412-3.935243C4.423412-4.104608 4.303861-4.204234 4.134496-4.204234C3.895392-4.204234 3.745953-3.985056 3.716065-3.765878ZM3.068493-1.185554C3.01868-1.006227 3.01868-.986301 2.86924-.816936C2.430884-.268991 2.022416-.109589 1.743462-.109589C1.24533-.109589 1.105853-.657534 1.105853-1.046077C1.105853-1.544209 1.424658-2.769614 1.653798-3.227895C1.96264-3.815691 2.410959-4.184309 2.809465-4.184309C3.457036-4.184309 3.596513-3.367372 3.596513-3.307597S3.576588-3.188045 3.566625-3.138232L3.068493-1.185554Z" />

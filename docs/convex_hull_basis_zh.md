@@ -112,12 +112,13 @@ $$
 这与 Bezier 的重复二分/de Casteljau 在数学上等价，但运行时不再建立
 细分树。由于 $B_m$ 可以是 Bezier 或 MINVO，MINVO 细分无需另一套算法。
 
-`ConvexHullKernel` 是不可变共享对象，按“基、源系数数、导数阶、细分深度”缓存
+内部转换核是不可变共享对象，按“基、源系数数、导数阶、细分深度”缓存
 $K$、$K^T$、下降阶乘和叶片起始比例。相同拓扑的多个表示或多个优化上下文
 复用同一份核。
 
-`configure()` 只在拓扑改变时分配输出和临时工作区，并按真实字节数
-检查内存预算；`update()` 只更新系数、时长幂、控制点和 piece 元数据。
+`prepare()` 准备输出、临时工作区和共享转换核；调用者负责可行的内存及索引范围。
+固定拓扑的 `update(poly)` 只更新系数、时长幂、控制点和 piece 元数据；
+便捷形式 `update(poly, options)` 仅在拓扑或选项不匹配时重新准备。
 时长幂通过
 
 $$
@@ -223,7 +224,7 @@ auto partial = position.backward(grad_controls);
 
 ```cpp
 SplineTrajectory::ConvexHullWorkspace<3> hull;
-hull.configure(ppoly, {SplineTrajectory::ConvexHullBasis::MINVO, 1, 2});
+hull.prepare(ppoly, {SplineTrajectory::ConvexHullBasis::MINVO, 1, 2});
 
 // 每次迭代：不改变 topology，不重新分配。
 hull.update(spline.polynomial());
@@ -231,24 +232,25 @@ hull.backwardAdd(grad_controls, grad_coeffs, grad_times);
 ```
 
 `SplineOptimizer` 通过普通 Objective 的 `coefficient` 成员绑定凸包代价。
-它只读取多项式，在统一样条伴随之前累加系数和独立时间偏导：
+每个代价结构体实现 `operator()`，可直接返回 `double`；可能失败时返回 `EvaluationResult`。
+线性总时长代价通过 `options.duration_weight` 配置，额外时长代价放在 `parameter` 成员中。
+凸包代价只读取多项式，在统一样条伴随之前累加系数和独立时间偏导：
 
 ```cpp
 struct ProblemObjective {
-    TimeCost duration;
     IntegralCost integral;
     HullCost coefficient;
 };
 
 // HullCost's callable interface:
 SplineTrajectory::EvaluationResult operator()(const SplineTrajectory::ParameterView<Spline>& state,
-                  SplineTrajectory::CoefficientGradient<Spline>& gradient);
+                  SplineTrajectory::CoefficientGradientView<Spline>& gradient);
 ```
 
 代价工作区在准备阶段配置，回调内调用 `update()` 和 `backwardAdd()`；
 后者为非 const 操作，需要独占工作区。`gradient.coefficients/durations/start_time`
 都使用加法语义，优化器随后只执行一次 `backward()`。
-`isConfigured()` 与 `isValid()` 分别表示已配置拓扑和本次数值有效；
+`isPrepared()` 与 `isValid()` 分别表示已配置拓扑和本次数值有效；
 `matches(ppoly, HullOptions)` 可判断是否需要重新配置。
 共享转换核不依赖 DIM，相同拓扑的不同维度工作区复用同一个不可变核。
 完整用法见[协议文档](optimizer.md)和[优化示例](../examples/convex_hull_optimizer.cpp)。

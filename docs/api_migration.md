@@ -1,156 +1,124 @@
-# API migration from d504135
+# API migration
 
-Use this guide when updating code written against `d504135` or earlier.
+This guide covers the current public API, including the October 2026 consolidation. Older
+names in the left column are migration references, not supported compatibility aliases.
+The cubic/quintic/septic implementations, numerical formulas and partial energy computations remain.
 
-## Polynomial and spline names
+## Physical input, gradients and outputs
+
+| Previous API / assumption | Current API / behavior |
+| --- | --- |
+| Parameterized spline constructors / `Spline::create(...)` | Default construct, then `update(...)`; check Status |
+| `update(knots, points, boundary)` | `updateFromBreakpoints(knots, waypoints, boundary)` |
+| Separate optimizer-only `SplineProblem<Spline>` / `ProblemDefinition` | `SplineInput<DIM>` shared by spline and optimizer; `Optimizer::Problem` aliases it |
+| `BoundaryConditions::start_velocity/acceleration/jerk` and end equivalents | `boundary.start.v/a/j`, `boundary.end.v/a/j`; positions only in waypoints |
+| `Gradients::inner_points`, `start.p`, `end.p` | One `waypoints` matrix, (N+1) × DIM, including endpoints |
+| `BoundaryGradient`, `BoundaryGradients`, earlier `BoundaryStateGrads/BoundaryDualGrads` | Removed; gradient `boundary` uses `BoundaryConditions<DIM>` with derivatives only |
+| `energyInnerWaypointGradient()` or older interior-only `energyWaypointGradient()` | `energyWaypointGradient()` returns ALL N+1 waypoints |
+| `energyBoundaryGradient()` including positions | Returns `BoundaryConditions<DIM>`, derivatives only |
+| Waypoints declared with `CoefficientMatrix` | Prefer `WaypointMatrix`; same underlying Eigen type |
+| `ParameterGradient`, nested `gradient.spline` | `ParameterGradientView`: flat waypoints/durations/boundary/start_time references |
+| `CoefficientGradient` | `CoefficientGradientView`: coefficients/durations/start_time references |
+| `evaluateInto`, `evaluateDerivativesInto`, `backwardInto` | Use the corresponding unsuffixed output overload |
+| Owning outputs must be pre-sized | Owning overwrite resizes as needed; matching storage is reused |
+| Preallocated Eigen view outputs | Where supported, unsuffixed overload overwrites without resizing |
+| `*Add` outputs | Still accumulate into matching storage, never clear/resize |
+
+`Spline::Gradients` is the owning physical gradient store; callback views borrow fields.
+`addWaypoint(i, row_or_column_expression)` uses the full input row index 0…N.
+`setZero(N)` prepares an accumulator; `setZero()` clears existing sizes; `size()` returns N.
+
+`energyDurationPartials()` holds local coefficients fixed. `energyDurationGradient()` is the
+total derivative through interpolation. Keep separate coefficient/time partials for a general
+`spline.backward(gC, gT)`; no bundled input wrapper is required.
+
+## Optimizer, objective and maps
+
+| Previous API / assumption | Current API / behavior |
+| --- | --- |
+| `problem.mask`, `mask.time`, `layout.time` | `options.mask`, `mask.durations`, `layout().durations` |
+| `OptimizationMask::allFixed(N)` | `none(N)` disables direct coordinates; auxiliary maps remain active |
+| `prepare(problem)` / `prepare(problem, options)` | Pass an objective: `prepare(input, objective)` or `prepare(input, options, objective)` |
+| Implicit minimum-energy objective | Both built-in weights default to zero; set `energy_weight` explicitly |
+| `objective.duration` | `options.duration_weight` for linear total time; `objective.parameter` for other duration costs |
+| `Objective::integral(...)` or other stage methods | Objective holds callable data members; each cost struct implements `operator()` |
+| `Objective::kIntegralDerivativeOrder` | Optional `kDerivativeOrder` on the integral functor, default 4 |
+| `beginIntegralEvaluation()` / `beginEvaluation()` | Removed; initialize caller-owned resources explicitly before solving |
+| Callbacks always return EvaluationResult | Return `double` for unconditional success, or EvaluationResult for rejection |
+| `SampleState`, `SampleGradient` for integral callbacks | `IntegralState`, `IntegralGradient` |
+| `IntegralPointInfo.global_time/local_time`, integral gradient `.time` | `trajectory_time/segment_time`, gradient `.trajectory_time` |
+| `interiorBoundaryIndex()` with shifted indexing | `waypointIndex()` returns 0…N at any waypoint, otherwise -1 |
+| Sample callback with separate gradient matrices/vectors | `(const SampleBuffer&, SampleGradientView<Spline>&)` |
+| Sample positions stored DIM × count | `gradient.positions` is count × DIM with contiguous rows; `trajectory_times` is count |
+| `toTime/toTau`, `toPhysical/toUnconstrained` | `forward/inverse` on time and space maps |
+| Spatial `backwardInto` | `backward(..., Eigen::Ref<VectorXd>)`; overwrite the preallocated decision slice |
+| Auxiliary backward returns cost and status | Returns Status only; move costs to parameter/decision stages |
+| `updateAccepted(x)` / `synchronizeWorkingState(...)` | `update(x)` with the solver's final returned vector |
+| Optimizer `dimension()` | `decisionDimension()` |
+| `costAndGradient()` / `lastStatus()` | `evaluate()` returns EvaluationResult directly; inspect its status |
+
+Default masks optimize durations and interior waypoints. Input waypoints are initial guesses for
+active coordinates; they are not all fixed interpolation constraints throughout optimization.
+Use explicit masks to fix them. Ordinary spline construction still interpolates every input point.
+
+Five custom stages remain: integral, sample, coefficient, parameter and decision. Gradients are
+additive. Integral costs return unweighted integrands; sample costs return the whole batch cost.
+Sample records still duplicate interior knots per adjacent segment. Do not silently deduplicate
+them while retaining a differently indexed gradient matrix.
+
+Maps may be owned or borrowed with explicit `std::ref/std::cref`. Total time/spatial operations
+return values/void; fallible ones may return StatusOr/Status. Auxiliary apply/backward return
+Status and preserve topology. Its backward only propagates gradients, including a movable start
+time; the time-map backward receives the cached duration before auxiliary transforms.
+
+For older context APIs, replace `SplineOptimizer<DIM, Spline, ...>` and `OptimizationContext`
+with `SplineOptimizer<Spline, Parameterization>`. Replace `makeEvaluateSpec().with...Cost(...)`
+with a user-defined objective holding functors. `generateInitialGuess(context)` becomes
+`initialGuess()`, `evaluate(context,...)` becomes `evaluate(...)`, and `checkGradients` is a free
+function. Mutable working-spline access is replaced by read-only `polynomial()` / `parameters()`.
+
+## Trajectory lifetime and time axis
+
+| Previous API / assumption | Current API / behavior |
+| --- | --- |
+| `PPolyND<DIM, ORDER>` interpreted as degree | Second argument is maximum coefficient count |
+| `ORDER`, `COEFF_NUM` | `kDegree`, `kCoefficientCount`; also kDimension/kMinDerivativeOrder |
+| `VectorType/RowVectorType/MatrixType/TrajectoryType` | `Vector/RowVector/CoefficientMatrix/Polynomial` |
+| `isInitialized()`, `get...()` accessors | `isValid()` and direct names such as duration(), coefficients(), waypoints() |
+| `getTrajectory/getPPoly`, corresponding Copy forms | `polynomial()` borrows, `copyPolynomial()` owns |
+| `getEnergy`, `getEnergyPartialGradByCoeffs/Times`, `getEnergyGrad`, `propagateGrad` | `energy`, `energyCoefficientPartials/energyDurationPartials`, `energyGradient`, `backward` |
+| `at(i)` | `operator[](i)`; caller validates index |
+| Segment `evaluate()` | `evaluateLocal()`; local seconds |
+| Query hint pointers | One `makeSampler<R>()` per traversal |
+| Separate int / Deriv overload families | `DerivativeOrder` accepts both, defaults to position |
+| `extractInterval()` resets origin | Preserves source time axis; call `rebased(0.0)` explicitly to shift |
+| `appendRebased()` requires zero-origin inputs | Accepts arbitrary origins; shifts suffix to receiver's end |
+
+Borrowing from temporary owners is deleted. Updates, assignment, moves and destruction invalidate
+borrowed segments/samplers/views. A polynomial snapshot is independent. The recommended delivery
+flow is final solver x → successful update(x) → task constraint acceptance → copyPolynomial() →
+control-thread sampling. The final callback trial is not necessarily the accepted solver result.
+
+## Convex hulls and allocation
 
 | Previous API | Current API |
 | --- | --- |
-| Parameterized spline constructors / `Spline::create(...)` | Default-construct a spline, call either `update()` overload, and check its `Status` |
-| `PPolyND<DIM, ORDER>` | `PPolyND<DIM, MaxCoefficients>`; capacity, not degree |
-| `Spline::ORDER`, `COEFF_NUM` | `kDegree`, `kCoefficientCount`; also `kDimension`, `kMinDerivativeOrder` |
-| `VectorType`, `RowVectorType`, `MatrixType`, `TrajectoryType` | `Vector`, `RowVector`, `CoefficientMatrix`, `Polynomial` |
-| `isInitialized()` | `isValid()` |
-| `getDimension/getDegree/getNumCoeffs/getNumSegments()` | `dimension/degree/coefficientCount/numSegments()` |
-| `getStartTime/getEndTime/getDuration()` | `startTime/endTime/duration()` |
-| `getBreakpoints/getCoefficients()` | `breakpoints/coefficients()` |
-| `getNumPoints/getSpacePoints/getTimeSegments/getBoundaryConditions()` | `numPoints/waypoints/durations/boundary()` |
-| `getCumulativeTimes()` | `breakpoints()` |
-| `getTrajectory/getPPoly()` | `polynomial()`; borrowed const lvalue only |
-| `getTrajectoryCopy/getPPolyCopy()` | `copyPolynomial()`; independent owning copy |
-| `getTrajectoryLength()` | `length()` |
-| `Segment::evaluate()` / `getCoeffs()` | `evaluateLocal()` / `coefficients()` |
-| `evaluate(t, int* hint, ...)` | Own one `makeSampler<N>()` per traversal |
-| `getEnergy()` | `energy()` |
-| `getEnergyPartialGradByCoeffs/Times()` | `energyCoefficientPartials/energyDurationPartials()` |
-| `getEnergyGradTimes/InnerPoints/Boundary()` | `energyDurationGradient/energyWaypointGradient/energyBoundaryGradient()` |
-| `getEnergyGrad()` | `energyGradient()` |
-| `propagateGrad()` | `backward()`; owning return or overwritten output overload |
-| `BoundaryStateGrads`, `BoundaryDualGrads` | `BoundaryGradient`, `BoundaryGradients` |
-| `Gradients::times` | `Gradients::durations` |
-| `Gradients::resetTopology(N)` (v1.0.0) | Overwrite calls size outputs automatically; use `setZero(N)` for zero-initialized accumulation and `size()` to query the segment count |
+| `ConvexHullRepresentation` | `ConvexHullWorkspace<DIM>` |
+| `configure` / `resetTopology` | `prepare(poly, HullOptions)` or `prepare(segments, coefficient_count, options)` |
+| `isConfigured()` | `isPrepared()`; isValid() additionally requires numerical update |
+| `kernel()` / public conversion-cache type | Internal detail; use controls, piece views, metadata and adjoints |
+| Repeated manual piece offsets | `hull.piece(i).info()` / `.controls()`; older named accessors remain |
+| `backwardInto(gControls, gC, gT)` | `backward(gControls, gC, gT)`; owning outputs resize/reuse |
+| Repeated on-demand configuration in a cost | Prepare hull and gradients before the solver; call strict update(poly) in the loop |
 
-There is one coefficient/knots owner: PPoly. Spline construction and adjoints access it through
-private controlled access. Copying a spline or polynomial still deep-copies its numerical data.
-Moved-from polynomials are invalid. Updates invalidate all samplers, segments and iterators.
+`update(poly, options)` is a convenience form that prepares only on a mismatch. The one-argument
+`update(poly)` requires matching prepared topology and does no allocation or cache lookup.
+`toBezier`, `toMINVO` and `fromPPoly(poly, options)` return owning updated workspaces.
+`backward` returns or overwrites independent coefficient/duration partials; `backwardAdd` adds
+to matching outputs or a coefficient gradient view. The cache remains shared internally.
 
-`energyDurationPartials()` holds local coefficients fixed. `energyDurationGradient()` includes
-the interpolation constraints. `backward()` receives coefficient and independent-duration
-partials and overwrites physical gradients; `ConvexHullWorkspace::backwardAdd()` accumulates
-partials. Distinguish those contracts when combining multiple objectives.
-
-Shared `ErrorCode`, `Status` and `StatusOr<T>` live in `SplineTrajectory.hpp`; no planner types
-are required. Initialize and reuse splines through `update()`, which returns `Status` for
-unrepresentable knots or failed factorization. Polynomial transforms retain explicit state/numerical failures.
-Polynomial queries and hull update/adjoints require initialized/configured objects instead
-of returning call-order errors. Discard partial output after any reported numerical failure.
-
-Operations that cannot reject caller-validated input now return values directly:
-
-- `PPolyND::create/zero/constant` return `PPolyND`; `update` returns `void`.
-- Polynomial, segment and sampler queries return values; query `Into` overloads return `void`.
-  `at()` returns `Segment`. These views require an initialized source that stays alive and unchanged.
-- Spline energy/gradient/adjoint value overloads return plain values. Reference overloads
-  return `void` and automatically resize owned outputs, reusing storage when sizes match.
-- `energyGradientAdd(output, weight)` adds to matching initialized gradients. Use `output.setZero(N)`
-  to prepare a zero accumulator; `output.setZero()` clears its current values.
-- `SplineGradients::size()` reports the segment count. `ParameterGradient::addWaypoint()` returns `void`. Unused gradient
-  `allFinite()` helpers and the scalar-coordinate `SplineGradients::addWaypoint()` overload are removed.
-- Built-in time/spatial maps return plain values or `void`; genuinely fallible custom maps
-  may still return `StatusOr`/`Status` on the same statically bound protocol.
-
-Low-level inputs are caller-validated: finite values, legal orders and indices, matching shapes,
-valid topology and representable arithmetic. No checked/unchecked API pair is provided.
-Spline energy/adjoints require successful construction. Derivatives above degree remain zero;
-outside query times extrapolate. Ordinary computed results are not scanned for overflow.
-
-## Optimizer replacement
-
-| Previous API | Current API |
-| --- | --- |
-| `SplineOptimizer<DIM, Spline, TimeMap, SpatialMap, AuxMap>` | `SplineOptimizer<Spline, Parameterization>` |
-| `OptimizationContext` | Private storage owned by one optimizer |
-| `ProblemDefinition` | `SplineProblem<Spline>` or `Optimizer::Problem` |
-| `problem.time_segments`, `.bc` | `.durations`, `.boundary` |
-| `OptimizerConfig` | `OptimizerOptions` |
-| `integral_num_steps`, `rho_energy` | `integration_steps`, `energy_weight` |
-| `prepareContext(problem, context, config)` | `prepare(problem, options)` |
-| `makeEvaluateSpec(...).with...Cost(...)` | Ordinary named objective struct |
-| `VoidTimeCost/VoidIntegralCost/...` | Omit that member; `NoObjective` for an empty objective |
-| `generateInitialGuess(context)` | `initialGuess()` |
-| `evaluate(context, x, g, spec)` | `evaluate(x, g, objective)` |
-| `evaluatePrepared(...)` | `evaluate(...).cost` after checking the returned result |
-| `synchronizeWorkingState(context, x)` | `updateAccepted(x)` |
-| `getWorkingSpline(context)` | `polynomial()`; mutable solver access is removed |
-| Member `checkGradients(...)` | Free `checkGradients(optimizer, x, objective, ...)` |
-| `setRecordIntegralSamples(...)` | `options.record_samples`, then prepare |
-| `getRecordedIntegralSamples(context)` | `recordedSamples()` |
-| `SpatialMap::getUnconstrainedDim` | `dimension(global_index)` |
-| Owning spatial backward return/fallback | `backwardInto(..., Eigen::Ref<VectorXd>)` |
-
-Create an ordinary parameterization with `time`, `space` and `auxiliary` roles. Default maps
-are owned, not borrowed from a second object's members. An advanced parameterization can be
-passed by value (including non-default-constructible maps) or explicitly through `std::cref`.
-The optimizer cannot be copied; moving transfers its solve. Keep externally borrowed objects
-alive and do not change dimensions during a prepared solve.
-
-Declare only the required stages: `duration`, `integral`, `sample`, `coefficient`, `parameter`,
-`decision`. Member types stay concrete and can be borrowed with references or `std::ref`.
-Old waypoint and trajectory costs become a `parameter` functor; add their contributions directly
-inside it. Direct mapped-domain penalties belong in `decision`, which accumulates into an
-already written decision gradient. No legacy long-argument integral dispatch remains: use
-`SampleState<DIM>` and `SampleGradient<DIM>` with `IntegralPointInfo`.
-
-The coefficient stage now receives a read-only `ParameterView<Spline>` and writable
-`CoefficientGradient<Spline>`, rather than a mutable spline solver and several unrelated outputs.
-The auxiliary protocol also receives these physical views; it must propagate gradients back
-through its transforms **before** ordinary time/spatial maps. The time map's duration argument
-is the pre-auxiliary `toTime(tau)` value. See [complete signatures](optimizer.md).
-
-Pre-size `g` before entering the external solver callback. Sample objectives require
-`prepare(problem, options, objective)` to determine recording capability without borrowing the
-objective. Preparation is the allocation boundary. After the solver returns, check
-`updateAccepted(x)` and then consume `polynomial()` or `copyPolynomial()`.
-
-## Hull replacement
-
-| Previous API | Current API |
-| --- | --- |
-| `ConvexHullRepresentation<DIM>` alias pair | `ConvexHullWorkspace<DIM>` |
-| Nested `Kernel` / `ConvexHullKernel<DIM>` | Dimension-independent `ConvexHullKernel` |
-| `resetTopology(poly, basis, derivative, depth, budget)` | `configure(poly, HullOptions{basis, derivative, depth})`; no byte budget |
-| Shape-only topology configuration | `configure(segments, coefficients, HullOptions)` |
-| Manual field-by-field topology matching | `matches(poly, options)` |
-| One initialization flag | `isConfigured()` and `isValid()` |
-| Const `backward()/backwardAdd()` | Non-const operations using exclusive workspace scratch |
-| `fromPPoly(poly, basis, derivative, depth)` | `fromPPoly(poly, HullOptions{basis, derivative, depth})`; returns a workspace directly |
-| Resizing `backward(partials, coefficients, durations)` | Pre-size both outputs, then call `backwardInto(partials, coefficients, durations)` |
-
-`toBezier()` and `toMINVO()` retain their convenience arguments. The one-argument `backward()`
-still returns owned gradients; `backwardInto()` overwrites pre-sized outputs and `backwardAdd()`
-accumulates into them. Both require caller-validated matching shapes and never resize. `update()`
-returns `void` and requires a configured workspace and a valid source matching its topology.
-Adjoints require an updated workspace: `backward()` returns `BackwardResult` directly, while
-`backwardInto()`, `backwardAdd()` and `backwardPieceTimesAdd()` return `void`. These state
-preconditions are asserted in debug builds. Callers guarantee representable arithmetic.
-Controls and accumulated gradients are not checked for overflow. The immutable kernel cache is consulted only during configuration; it is shared
-across spatial dimensions. A complete tuple key avoids packed-field collisions.
-
-## Unified failure contracts
-
-`OptimizationError/OptimizationStatus` are replaced by the shared `ErrorCode/Status`.
-Optimizer `evaluate()` keeps `EvaluationResult { cost, status }`; do not wrap it in another
-`StatusOr`. Every cost callback and auxiliary backward callback returns `EvaluationResult`.
-Return `{cost, Status::success()}` on success, or `{infinity, status}` on rejection.
-Value-producing map operations return `StatusOr`, while map operations writing outputs return
-`Status`. Propagation preserves the original code/message/index. Update custom maps and
-callbacks together with their callers; no compatibility dispatch is retained.
-
-`costAndGradient()` and `lastStatus()` are removed. External scalar solver callbacks consume
-`evaluate()` directly and retain its status when needed; the solver still owns its termination
-codes. `initialGuess()` remains a normal owning return: successful `prepare()` is a precondition,
-checked by assertion. Failed trial evaluation does not invalidate that prepared initial vector.
-Allocation failure and unexpected user exceptions are not translated into expected-failure statuses.
-
-Hull configuration is `void`, and factories and `powerToControlMatrix()` return values directly.
-The caller owns allocation-size limits; subdivision depth is constrained to [0, 16].
+Failed decode or numerical construction invalidates the current candidate while preserving
+workspace for retry. Fixed-topology library evaluation/recovery with matching output buffers
+does not allocate. User cost buffers remain the caller's preparation responsibility. Status and
+EvaluationResult report expected failures; unexpected exceptions and allocation failure propagate.
+Low-level numerical APIs retain caller-validated input and representable-arithmetic preconditions.

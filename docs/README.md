@@ -15,5 +15,5 @@
 
 GitHub Pages publishes `main:/docs` directly, with `.nojekyll` preserving the static files.
 The site root redirects to `api/`, retaining the language query and section anchor.
-Update the three files in `docs/api/` and push to `main` to publish documentation changes;
+Edit the static files in `docs/api/` and push to `main` to publish documentation changes;
 no generator or separate deployment branch is required.

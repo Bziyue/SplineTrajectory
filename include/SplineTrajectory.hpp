@@ -700,9 +700,7 @@ namespace SplineTrajectory
         /** @brief Invalidate the polynomial and all its borrowed views. */
         void clear()
         {
-            is_initialized_ = false;
-            num_segments_ = num_coeffs_ = 0;
-            breakpoints_.clear();
+            invalidate();
             coefficients_.resize(0, DIM);
         }
 
@@ -899,7 +897,13 @@ namespace SplineTrajectory
         double duration() const { return endTime() - startTime(); }
         const std::vector<double> &breakpoints() const & { return breakpoints_; }
         const std::vector<double> &breakpoints() const && = delete;
-        const CoefficientMatrix &coefficients() const & { return coefficients_; }
+        const CoefficientMatrix &coefficients() const &
+        {
+            if (is_initialized_) return coefficients_;
+            // Failed candidates retain private storage, but must not publish stale coefficients.
+            static const CoefficientMatrix empty;
+            return empty;
+        }
         const CoefficientMatrix &coefficients() const && = delete;
 
         /** @brief Generate increasing query times on the caller's time axis, including both endpoints.
@@ -1068,11 +1072,19 @@ namespace SplineTrajectory
         template <int, int> friend class SplineND;
         template <int, int> friend class detail::SplineKernel;
 
+        // Reject a candidate while retaining coefficient storage and knot capacity for retry.
+        void invalidate()
+        {
+            is_initialized_ = false;
+            num_segments_ = num_coeffs_ = 0;
+            breakpoints_.clear();
+        }
+
         /** @brief Prepare owning polynomial storage for exclusive coefficient writes.
          * @param durations Positive physical piece durations in seconds.
          * @param start Finite start time on the caller's time axis, in seconds.
          * @param count Positive coefficient count per piece, within the static capacity.
-         * @return Success with writable storage, or failure with an empty invalid polynomial.
+         * @return Success with writable storage, or failure with an invalid polynomial.
          * @note Requires validated input shape, start time and coefficient capacity. Reuses
          *       same-size storage and stays invalid until publishCoefficients(); the spline
          *       must finish writing every coefficient before publishing. */
@@ -1089,7 +1101,7 @@ namespace SplineTrajectory
                 const double next = breakpoints_[i] + durations[i];
                 if (!std::isfinite(next) || next <= breakpoints_[i])
                 {
-                    clear();
+                    invalidate();
                     return {ErrorCode::NumericalFailure, "Unrepresentable time knot", static_cast<int>(i)};
                 }
                 breakpoints_[i + 1] = next;
@@ -3247,6 +3259,7 @@ namespace SplineTrajectory
         using Gradients = SplineGradients<DIM>;
 
     private:
+        template <class, class> friend class SplineOptimizer;
         using Data = detail::SplineData<DIM, DEGREE>;
         using Kernel = detail::SplineKernel<DIM, DEGREE>;
         Data data_;
@@ -3278,7 +3291,7 @@ namespace SplineTrajectory
          * @param boundary Clamped physical endpoint derivatives in the caller's frame.
          * @pre Inputs satisfy the class contract; no input validation is performed.
          * @note Copies inputs, reuses fixed-topology storage and invalidates all borrowed views.
-         *       Numeric construction failures clear the polynomial; inputs are not validated here.
+         *       Numeric construction failures invalidate the polynomial but retain storage for retry.
          * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
         Status update(const std::vector<double> &time_segments,
                     const WaypointMatrix &spatial_points,
@@ -3561,7 +3574,13 @@ namespace SplineTrajectory
         }
 
     private:
-        /** @brief Rebuild from physical data; failed construction clears the published polynomial.
+        void invalidate()
+        {
+            data_.num_segments_ = 0;
+            data_.trajectory_.invalidate();
+        }
+
+        /** @brief Rebuild from physical data; failed construction invalidates the published polynomial.
          * @note Requires exclusive access. Storage is reused when the topology is unchanged.
          * @return Success, or a state/resource/numerical failure; input validity is a precondition. */
         Status updateSplineInternal()
@@ -3573,7 +3592,7 @@ namespace SplineTrajectory
 
             if (!kernel_.update(data_))
             {
-                data_.trajectory_.clear();
+                invalidate();
                 return {ErrorCode::NumericalFailure, "Spline factorization failed"};
             }
             data_.trajectory_.publishCoefficients();

@@ -12,7 +12,7 @@ cmake --build build --parallel 3
 | `gradients/` / `gradients` | Energy, waypoint, duration and boundary derivatives |
 | `optimizer/` / `optimizer` | Objective composition, maps, workspace and numerical failures |
 | `convex_hull/` / `convex_hull` | Bezier/MINVO values, subdivision and adjoints |
-| `compile/` / `compile` | Public header and callback compile contracts |
+| `compile/` / `compile` | Public headers, callback contracts and both English/Chinese README programs |
 | `support/` | Shared checks and allocation counters |
 | `../examples/` / `examples` | Runnable examples and objective gradients |
 
@@ -26,3 +26,6 @@ Run a category with `ctest -L`, or a test with `ctest -R`:
 
 Assertion-dependent checks remain enabled in Release; numerical-failure tests also exercise normal Release semantics. Performance measurements are in
 [benchmarks](../docs/benchmarks.md) and are enabled separately.
+
+Optimizer allocation checks cover prepared success and rejected-candidate recovery for all three
+spline families, using both standard heap counters and Eigen's runtime no-malloc guard.
